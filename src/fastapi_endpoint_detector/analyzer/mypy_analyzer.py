@@ -620,7 +620,8 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v7-partial-holes-exposure-identities"
+        "conditional-elif-try-else-guaranteed-finally-v8-"
+        "strict-release-partial-alternatives-provider-origin"
     )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
@@ -636,7 +637,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 11
+    EXECUTION_SUMMARY_VERSION = 12
     CALLBACK_PROVIDER_MODULES: ClassVar[frozenset[str]] = frozenset(
         {
             "asyncio.threads",
@@ -7162,84 +7163,44 @@ class MypyAnalyzer:
             for name in alias_target_names(target):
                 clear_alias_name(name)
 
-        def context_bound_names(body: Any) -> set[str] | None:
-            """Collect reachable local writes without entering nested scope bodies."""
+        def context_bound_names(
+            body: Any, *, reject_nonlocal_targets: bool = False
+        ) -> set[str] | None:
+            """Collect reachable writes, optionally rejecting unknown mutation targets."""
             from types import GetSetDescriptorType, MemberDescriptorType
 
-            from mypy.nodes import AssignmentExpr, DelStmt, Node, OperatorAssignmentStmt, TempNode
+            from mypy.nodes import (
+                Argument,
+                AssignmentExpr,
+                BytesExpr,
+                ComplexExpr,
+                DelStmt,
+                EllipsisExpr,
+                FloatExpr,
+                GlobalDecl,
+                IntExpr,
+                Node,
+                NonlocalDecl,
+                OperatorAssignmentStmt,
+                OverloadedFuncDef,
+                PassStmt,
+                Statement,
+                StrExpr,
+                TempNode,
+                Var,
+            )
 
             names: set[str] = set()
-            pending: list[Any] = [body]
-            seen: set[int] = set()
+            invoked_names: set[str] = set()
+            direct_partial_callees: set[int] = set()
+            source_function_ids: set[int] | None = None
+            source_scopes: dict[int, Any] = {
+                id(getattr(function_node, "body", None)): function_node
+            }
+            release_profiles: dict[int, dict[str, set[int]] | None] = {}
             item_count = 0
-            while pending:
-                item = pending.pop()
-                item_count += 1
-                if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
-                    self._record_analysis_limitation(
-                        "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
-                    )
-                    return None
-                if isinstance(item, (list, tuple)):
-                    pending.extend(item)
-                    continue
-                if not isinstance(item, Node) or id(item) in seen:
-                    continue
-                seen.add(id(item))
-                if len(seen) > self.MAX_CALL_SPAN_MYPY_NODES:
-                    self._record_analysis_limitation(
-                        "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
-                    )
-                    return None
-                if isinstance(item, AssignmentStmt) and not isinstance(item.rvalue, TempNode):
-                    for assignment_target in item.lvalues:
-                        names.update(alias_target_names(assignment_target))
-                elif isinstance(item, AssignmentExpr):
-                    names.update(alias_target_names(item.target))
-                elif isinstance(item, OperatorAssignmentStmt):
-                    names.update(alias_target_names(item.lvalue))
-                elif isinstance(item, DelStmt):
-                    names.update(alias_target_names(item.expr))
-                elif isinstance(item, ForStmt):
-                    if (
-                        not item.is_async
-                        and isinstance(item.expr, (ListExpr, TupleExpr))
-                        and not item.expr.items
-                    ):
-                        pending.extend((item.expr, item.else_body))
-                        continue
-                    names.update(alias_target_names(item.index))
-                elif isinstance(item, WithStmt):
-                    for context_target in item.target:
-                        names.update(alias_target_names(context_target))
-                elif isinstance(item, TryStmt):
-                    for exception_target in item.vars:
-                        names.update(alias_target_names(exception_target))
-                elif isinstance(item, (FuncDef, Decorator, ClassDef)):
-                    names.add(item.name)
-                elif isinstance(item, Import):
-                    names.update(alias or module.split(".")[0] for module, alias in item.ids)
-                elif isinstance(item, ImportFrom):
-                    names.update(alias or name for name, alias in item.names)
-                if isinstance(item, IfStmt):
-                    can_reach_else = True
-                    for expression, branch in zip(item.expr, item.body, strict=True):
-                        pending.append(expression)
-                        truth = self._literal_boolean(expression)
-                        if truth is not False:
-                            pending.append(branch)
-                        if truth is True:
-                            can_reach_else = False
-                            break
-                    if can_reach_else:
-                        pending.append(item.else_body)
-                    continue
-                if isinstance(item, WhileStmt) and self._literal_boolean(item.expr) is False:
-                    pending.extend((item.expr, item.else_body))
-                    continue
-                if isinstance(item, LambdaExpr):
-                    # A lambda's body and bindings belong to its deferred scope.
-                    continue
+
+            def syntax_children(item: Any) -> list[Any]:
                 fields = set(getattr(item, "__dict__", {}))
                 for cls in type(item).__mro__:
                     fields.update(
@@ -7247,6 +7208,7 @@ class MypyAnalyzer:
                         for attribute, descriptor in cls.__dict__.items()
                         if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
                     )
+                children: list[Any] = []
                 for attribute in fields:
                     if attribute.startswith("__") or attribute in {
                         "node",
@@ -7259,13 +7221,544 @@ class MypyAnalyzer:
                         "original_decorators",
                     }:
                         continue
-                    if isinstance(item, FuncDef) and attribute == "body":
-                        continue
-                    if isinstance(item, ClassDef) and attribute in {"defs", "removed_statements"}:
-                        continue
                     child = getattr(item, attribute, None)
                     if isinstance(child, (Node, list, tuple)):
-                        pending.append(child)
+                        children.append(child)
+                return children
+
+            def release_profile(scope: Any) -> dict[str, set[int]] | None:
+                """Prove old local values are unbound or scalar before release.
+
+                This uses every lexical binder, not a single try-body snapshot.
+                Unknown bindings, captured writes and parameters remain unsafe.
+                A unique non-repeated local binder has no prior local value.
+                """
+                nonlocal item_count
+                scope_id = id(scope)
+                if scope_id in release_profiles:
+                    return release_profiles[scope_id]
+                release_profiles[scope_id] = None
+                bindings: dict[str, dict[int, tuple[bool, bool]]] = {}
+                unsafe = {argument.variable.name for argument in getattr(scope, "arguments", ())}
+
+                def scalar(expression: Any) -> bool:
+                    return isinstance(
+                        expression,
+                        (BytesExpr, ComplexExpr, EllipsisExpr, FloatExpr, IntExpr, StrExpr),
+                    ) or (
+                        isinstance(expression, NameExpr)
+                        and expression.name in {"False", "None", "True"}
+                    )
+
+                def remember(target: Any, literal: bool, repeated: bool) -> bool:
+                    targets = [target]
+                    target_count = 0
+                    while targets:
+                        current = targets.pop()
+                        target_count += 1
+                        if target_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                            return False
+                        if current is None:
+                            continue
+                        if isinstance(current, NameExpr):
+                            bindings.setdefault(current.name, {})[id(current)] = (
+                                literal,
+                                repeated,
+                            )
+                        elif isinstance(current, (ListExpr, TupleExpr)):
+                            targets.extend(current.items)
+                        elif isinstance(current, StarExpr):
+                            targets.append(current.expr)
+                        else:
+                            return False
+                    return True
+
+                pending_profile: list[tuple[Any, bool]] = [(getattr(scope, "body", None), False)]
+                profile_seen: set[tuple[int, bool]] = set()
+                while pending_profile:
+                    current, repeated = pending_profile.pop()
+                    item_count += 1
+                    if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                        self._record_analysis_limitation(
+                            "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                        )
+                        return None
+                    if isinstance(current, (list, tuple)):
+                        pending_profile.extend((child, repeated) for child in current)
+                        continue
+                    if not isinstance(current, Node) or (id(current), repeated) in profile_seen:
+                        continue
+                    profile_seen.add((id(current), repeated))
+                    if len(profile_seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                        self._record_analysis_limitation(
+                            "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                        )
+                        return None
+                    if isinstance(current, (GlobalDecl, NonlocalDecl)):
+                        unsafe.update(current.names)
+                        continue
+                    if isinstance(current, (Decorator, ClassDef, MatchStmt)):
+                        # Their binding effects need a separate scope/protocol proof.
+                        return None
+                    if isinstance(current, FuncDef):
+                        bindings.setdefault(current.name, {})[id(current)] = (False, repeated)
+                        pending_profile.extend(
+                            (argument.initializer, repeated) for argument in current.arguments
+                        )
+                        # Captured writes can invalidate an otherwise scalar outer name.
+                        captured: list[Any] = [current.body]
+                        captured_seen: set[int] = set()
+                        while captured:
+                            child = captured.pop()
+                            item_count += 1
+                            if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                                self._record_analysis_limitation(
+                                    "MAX_CONTEXT_BINDING_ITEMS",
+                                    limit=self.MAX_CALL_SPAN_MYPY_ITEMS,
+                                )
+                                return None
+                            if isinstance(child, (list, tuple)):
+                                captured.extend(child)
+                                continue
+                            if not isinstance(child, Node) or id(child) in captured_seen:
+                                continue
+                            captured_seen.add(id(child))
+                            if len(captured_seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                                self._record_analysis_limitation(
+                                    "MAX_CONTEXT_BINDING_NODES",
+                                    limit=self.MAX_CALL_SPAN_MYPY_NODES,
+                                )
+                                return None
+                            if isinstance(child, (GlobalDecl, NonlocalDecl)):
+                                unsafe.update(child.names)
+                            captured.extend(syntax_children(child))
+                        continue
+                    if isinstance(current, LambdaExpr):
+                        pending_profile.extend(
+                            (argument.initializer, repeated) for argument in current.arguments
+                        )
+                        continue
+                    if isinstance(current, AssignmentStmt):
+                        if not isinstance(current.rvalue, TempNode):
+                            for target in current.lvalues:
+                                if not remember(target, scalar(current.rvalue), repeated):
+                                    return None
+                    elif isinstance(current, AssignmentExpr):
+                        if not remember(current.target, scalar(current.value), repeated):
+                            return None
+                    elif isinstance(current, OperatorAssignmentStmt):
+                        if not remember(current.lvalue, False, repeated):
+                            return None
+                    elif isinstance(current, DelStmt):
+                        if not remember(current.expr, True, repeated):
+                            return None
+                    elif isinstance(current, ForStmt):
+                        if not remember(current.index, False, True):
+                            return None
+                    elif isinstance(current, WithStmt):
+                        for context_target in current.target:
+                            if not remember(context_target, False, repeated):
+                                return None
+                    elif isinstance(current, TryStmt):
+                        for exception_target in current.vars:
+                            if not remember(exception_target, False, repeated):
+                                return None
+                    elif isinstance(current, Import):
+                        for module, alias in current.ids:
+                            bindings.setdefault(alias or module.split(".")[0], {})[id(current)] = (
+                                False,
+                                repeated,
+                            )
+                    elif isinstance(current, ImportFrom):
+                        for name, alias in current.names:
+                            bindings.setdefault(alias or name, {})[id(current)] = (False, repeated)
+                    elif isinstance(current, Statement) and not isinstance(
+                        current,
+                        (
+                            AssertStmt,
+                            Block,
+                            BreakStmt,
+                            ContinueStmt,
+                            ExpressionStmt,
+                            IfStmt,
+                            PassStmt,
+                            RaiseStmt,
+                            ReturnStmt,
+                            WhileStmt,
+                        ),
+                    ):
+                        return None
+                    child_repeated = repeated or isinstance(current, (ForStmt, WhileStmt))
+                    pending_profile.extend(
+                        (child, child_repeated) for child in syntax_children(current)
+                    )
+                safe: dict[str, set[int]] = {}
+                for name, occurrences in bindings.items():
+                    if name in unsafe:
+                        continue
+                    if all(literal for literal, _ in occurrences.values()) or (
+                        len(occurrences) == 1 and not next(iter(occurrences.values()))[1]
+                    ):
+                        safe[name] = set(occurrences)
+                release_profiles[scope_id] = safe
+                return safe
+
+            def safe_release(name: str, binder: Any, scope: Any) -> bool:
+                profile = release_profile(scope)
+                return profile is not None and id(binder) in profile.get(name, set())
+
+            def source_body(target: Any) -> Any | None:
+                """Require local syntax or an exact executable project declaration."""
+                nonlocal source_function_ids, item_count
+                if not isinstance(target, FuncDef):
+                    return None
+                if source_function_ids is None:
+                    source_function_ids = set()
+                    declarations: list[Any] = [function_node.body]
+                    declaration_seen: set[int] = set()
+                    while declarations:
+                        declaration = declarations.pop()
+                        item_count += 1
+                        if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                            self._record_analysis_limitation(
+                                "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                            )
+                            return None
+                        if isinstance(declaration, (list, tuple)):
+                            declarations.extend(declaration)
+                            continue
+                        if not isinstance(declaration, Node) or id(declaration) in declaration_seen:
+                            continue
+                        declaration_seen.add(id(declaration))
+                        if len(declaration_seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                            self._record_analysis_limitation(
+                                "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                            )
+                            return None
+                        if isinstance(declaration, FuncDef):
+                            source_function_ids.add(id(declaration))
+                        declarations.extend(syntax_children(declaration))
+                if id(target) in source_function_ids:
+                    source_scopes[id(target.body)] = target
+                    return target.body
+                resolved = self._function_node_for_fullname(target.fullname)
+                if (
+                    resolved is None
+                    or resolved[2] not in self._project_modules
+                    or not resolved[1].endswith(".py")
+                    or self._actual_function(resolved[0]) is not target
+                    or isinstance(resolved[0], Decorator)
+                ):
+                    return None
+                source_scopes[id(target.body)] = target
+                return target.body
+
+            def record_target(target: Any, *, outer_scope: bool, scope: Any) -> bool:
+                if not reject_nonlocal_targets:
+                    names.update(alias_target_names(target))
+                    return True
+                targets = [target]
+                target_count = 0
+                while targets:
+                    binding_target = targets.pop()
+                    target_count += 1
+                    if target_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                        self._record_analysis_limitation(
+                            "MAX_CONTEXT_BINDING_TARGETS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                        )
+                        return False
+                    if binding_target is None:
+                        continue
+                    if isinstance(binding_target, NameExpr):
+                        if not safe_release(binding_target.name, binding_target, scope):
+                            return False
+                        if outer_scope:
+                            names.add(binding_target.name)
+                    elif isinstance(binding_target, (TupleExpr, ListExpr)):
+                        targets.extend(binding_target.items)
+                    elif isinstance(binding_target, StarExpr):
+                        targets.append(binding_target.expr)
+                    else:
+                        return False
+                return True
+
+            def invoked_bodies(expression: Any, *, outer_scope: bool) -> list[Any] | None:
+                """Resolve only source-backed bodies; uncertain callable values abstain."""
+                target = getattr(expression, "node", None)
+                if isinstance(expression, LambdaExpr):
+                    source_scopes[id(expression.body)] = expression
+                    return [expression.body]
+                if isinstance(target, OverloadedFuncDef):
+                    target = target.impl
+                if isinstance(target, Decorator):
+                    # A runtime decorator may replace the declared function.
+                    return None
+                if isinstance(target, FuncDef):
+                    resolved_body = source_body(target)
+                    return [resolved_body] if resolved_body is not None else None
+                if not outer_scope or not isinstance(expression, NameExpr):
+                    return None
+                assigned_lambda = lambda_environment.get(expression.name)
+                if assigned_lambda is not None:
+                    actual_lambda = (
+                        assigned_lambda[0]
+                        if isinstance(assigned_lambda, tuple) and len(assigned_lambda) == 4
+                        else assigned_lambda
+                    )
+                    if not isinstance(actual_lambda, LambdaExpr):
+                        return None
+                    source_scopes[id(actual_lambda.body)] = actual_lambda
+                    return [actual_lambda.body]
+                partial_value = partial_environment.get(expression.name)
+                if isinstance(partial_value, _PartialCallableAlternatives):
+                    if (
+                        partial_value.unknown
+                        or partial_value.overflow
+                        or not partial_value.alternatives
+                    ):
+                        return None
+                    aliases = tuple(
+                        (partial.declaration, partial.receiver)
+                        for partial in partial_value.alternatives
+                    )
+                elif isinstance(partial_value, _PartialCallable):
+                    aliases = ((partial_value.declaration, partial_value.receiver),)
+                else:
+                    alias_value = callable_environment.get(expression.name)
+                    if alias_value is None:
+                        return None
+                    aliases = (
+                        alias_value.targets
+                        if isinstance(alias_value, _CallableUnion)
+                        else (alias_value,)
+                    )
+                bodies: list[Any] = []
+                for declaration, _ in aliases:
+                    if declaration[1] != InvocationKind.FUNCTION:
+                        return None
+                    resolved = self._function_node_for_fullname(declaration[0])
+                    if resolved is None or isinstance(resolved[0], Decorator):
+                        return None
+                    actual = self._actual_function(resolved[0])
+                    if not isinstance(actual, FuncDef):
+                        return None
+                    resolved_body = source_body(actual)
+                    if resolved_body is None:
+                        return None
+                    bodies.append(resolved_body)
+                return bodies or None
+
+            pending: list[tuple[Any, bool, Any]] = [(body, True, function_node)]
+            seen: set[tuple[int, bool, int]] = set()
+            while pending:
+                item, outer_scope, scope = pending.pop()
+                item_count += 1
+                if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                    )
+                    return None
+                if isinstance(item, (list, tuple)):
+                    pending.extend((child, outer_scope, scope) for child in item)
+                    continue
+                if not isinstance(item, Node) or (id(item), outer_scope, id(scope)) in seen:
+                    continue
+                seen.add((id(item), outer_scope, id(scope)))
+                if len(seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                    )
+                    return None
+                if reject_nonlocal_targets and not isinstance(
+                    item,
+                    (
+                        Argument,
+                        AssignmentExpr,
+                        AssignmentStmt,
+                        Block,
+                        BreakStmt,
+                        BytesExpr,
+                        CallExpr,
+                        ComplexExpr,
+                        ContinueStmt,
+                        DelStmt,
+                        EllipsisExpr,
+                        ExpressionStmt,
+                        FloatExpr,
+                        ForStmt,
+                        FuncDef,
+                        IfStmt,
+                        IntExpr,
+                        LambdaExpr,
+                        ListExpr,
+                        NameExpr,
+                        PassStmt,
+                        ReturnStmt,
+                        StrExpr,
+                        TempNode,
+                        TryStmt,
+                        TupleExpr,
+                        Var,
+                        WhileStmt,
+                    ),
+                ):
+                    # Accept only forms whose effects are handled below.
+                    # Other forms may invoke implicit user protocols.
+                    return None
+                if isinstance(item, AssignmentStmt) and not isinstance(item.rvalue, TempNode):
+                    if (
+                        reject_nonlocal_targets
+                        and any(
+                            isinstance(target, (ListExpr, TupleExpr)) for target in item.lvalues
+                        )
+                        and not isinstance(item.rvalue, (ListExpr, TupleExpr))
+                    ):
+                        return None
+                    for assignment_target in item.lvalues:
+                        if not record_target(
+                            assignment_target, outer_scope=outer_scope, scope=scope
+                        ):
+                            return None
+                elif isinstance(item, AssignmentExpr):
+                    if not record_target(item.target, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, OperatorAssignmentStmt):
+                    if not record_target(item.lvalue, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, DelStmt):
+                    if not record_target(item.expr, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, ForStmt):
+                    if (
+                        not item.is_async
+                        and isinstance(item.expr, (ListExpr, TupleExpr))
+                        and not item.expr.items
+                    ):
+                        pending.extend(
+                            ((item.expr, outer_scope, scope), (item.else_body, outer_scope, scope))
+                        )
+                        continue
+                    if reject_nonlocal_targets and (
+                        item.is_async or not isinstance(item.expr, (ListExpr, TupleExpr))
+                    ):
+                        # A deferred or custom iterator can mutate captured state.
+                        return None
+                    if not record_target(item.index, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, WithStmt):
+                    for context_target in item.target:
+                        if not record_target(context_target, outer_scope=outer_scope, scope=scope):
+                            return None
+                elif isinstance(item, TryStmt):
+                    if reject_nonlocal_targets and item.handlers:
+                        return None
+                    for exception_target in item.vars:
+                        if not record_target(
+                            exception_target, outer_scope=outer_scope, scope=scope
+                        ):
+                            return None
+                elif isinstance(item, (FuncDef, Decorator, ClassDef)):
+                    if reject_nonlocal_targets and not safe_release(item.name, item, scope):
+                        return None
+                    if outer_scope:
+                        names.add(item.name)
+                elif isinstance(item, Import):
+                    if outer_scope:
+                        names.update(alias or module.split(".")[0] for module, alias in item.ids)
+                elif isinstance(item, ImportFrom):
+                    if outer_scope:
+                        names.update(alias or name for name, alias in item.names)
+                if (
+                    reject_nonlocal_targets
+                    and isinstance(item, NameExpr)
+                    and item.name in partial_environment
+                    and id(item) not in direct_partial_callees
+                ):
+                    # Reading the captured mutable object can expose its args or
+                    # keyword mapping even through a source-less method stub.
+                    return None
+                if reject_nonlocal_targets and isinstance(item, CallExpr):
+                    if any(kind in (ARG_STAR, ARG_STAR2) for kind in item.arg_kinds):
+                        return None
+                    if outer_scope and isinstance(item.callee, NameExpr):
+                        invoked_names.add(item.callee.name)
+                        if item.callee.name in partial_environment:
+                            direct_partial_callees.add(id(item.callee))
+                    called_bodies = invoked_bodies(item.callee, outer_scope=outer_scope)
+                    if called_bodies is None:
+                        return None
+                    pending.extend(
+                        (called_body, False, source_scopes[id(called_body)])
+                        for called_body in called_bodies
+                    )
+                    # A supplied local closure can run inside a higher-order helper.
+                    for argument in item.args:
+                        argument_node = getattr(argument, "node", None)
+                        if (
+                            isinstance(argument, LambdaExpr)
+                            or isinstance(argument_node, (FuncDef, Decorator, OverloadedFuncDef))
+                            or (
+                                outer_scope
+                                and isinstance(argument, NameExpr)
+                                and (
+                                    argument.name in callable_environment
+                                    or argument.name in partial_environment
+                                    or argument.name in lambda_environment
+                                )
+                            )
+                        ):
+                            argument_bodies = invoked_bodies(argument, outer_scope=outer_scope)
+                            if argument_bodies is None:
+                                return None
+                            pending.extend(
+                                (called_body, False, source_scopes[id(called_body)])
+                                for called_body in argument_bodies
+                            )
+                if isinstance(item, IfStmt):
+                    if reject_nonlocal_targets and any(
+                        self._literal_boolean(expression) is None for expression in item.expr
+                    ):
+                        return None
+                    can_reach_else = True
+                    for expression, branch in zip(item.expr, item.body, strict=True):
+                        pending.append((expression, outer_scope, scope))
+                        truth = self._literal_boolean(expression)
+                        if truth is not False:
+                            pending.append((branch, outer_scope, scope))
+                        if truth is True:
+                            can_reach_else = False
+                            break
+                    if can_reach_else:
+                        pending.append((item.else_body, outer_scope, scope))
+                    continue
+                if (
+                    reject_nonlocal_targets
+                    and isinstance(item, WhileStmt)
+                    and self._literal_boolean(item.expr) is None
+                ):
+                    return None
+                if isinstance(item, WhileStmt) and self._literal_boolean(item.expr) is False:
+                    pending.extend(
+                        ((item.expr, outer_scope, scope), (item.else_body, outer_scope, scope))
+                    )
+                    continue
+                if isinstance(item, LambdaExpr):
+                    # Default arguments execute at creation; the body is deferred.
+                    pending.extend(
+                        (argument.initializer, outer_scope, scope) for argument in item.arguments
+                    )
+                    continue
+                for child in syntax_children(item):
+                    if isinstance(item, FuncDef) and child is item.body:
+                        continue
+                    if isinstance(item, ClassDef) and (
+                        child is item.defs or child is getattr(item, "removed_statements", None)
+                    ):
+                        continue
+                    pending.append((child, outer_scope, scope))
+            if reject_nonlocal_targets and names & invoked_names:
+                # A callee rebound by this suite may no longer be its typed declaration.
+                return None
             return names
 
         def walk_node(n: Any) -> bool | None:
@@ -8401,16 +8894,44 @@ class MypyAnalyzer:
                 else:
                     lambda_environment.clear()
                 if n.finally_body:
-                    # Finally runs on every exit from an entered try. Retain
-                    # enclosing uncertainty, without adding uncertainty just
-                    # because control exits normally, raises, or returns.
+                    before_final_callables = dict(callable_environment)
+                    before_final_partials = dict(partial_environment)
+                    before_final_lambdas = dict(lambda_environment)
+                    written_names = context_bound_names(
+                        n.finally_body, reject_nonlocal_targets=True
+                    )
+                    # Finally runs on every exit, including terminal exits.
                     finally_can_continue = walk_node(n.finally_body) is not False
                     can_continue = can_continue and finally_can_continue
-                    # Finally is traced for terminal and continuing exits. Its
-                    # merged alias state cannot establish a post-try binding.
-                    callable_environment.clear()
-                    partial_environment.clear()
-                    lambda_environment.clear()
+                    if written_names is None:
+                        callable_environment.clear()
+                        partial_environment.clear()
+                        lambda_environment.clear()
+                        self._record_analysis_limitation("UNKNOWN_FINALLY_EXIT_BINDING")
+                    else:
+                        # Never restore an exposed or invalidated value or export
+                        # a binding established on only one final-body path.
+                        callable_environment = {
+                            name: value
+                            for name, value in before_final_callables.items()
+                            if name not in written_names
+                            and name in callable_environment
+                            and callable_environment[name] == value
+                        }
+                        partial_environment = {
+                            name: value
+                            for name, value in before_final_partials.items()
+                            if name not in written_names
+                            and name in partial_environment
+                            and partial_environment[name] == value
+                        }
+                        lambda_environment = {
+                            name: value
+                            for name, value in before_final_lambdas.items()
+                            if name not in written_names
+                            and name in lambda_environment
+                            and lambda_environment[name] is value
+                        }
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
