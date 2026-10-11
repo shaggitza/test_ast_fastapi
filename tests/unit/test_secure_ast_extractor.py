@@ -20,6 +20,99 @@ from fastapi_endpoint_detector.parser.secure_ast_extractor import (
 class TestSecureASTExtractor:
     """Tests for SecureASTExtractor class."""
 
+    def test_dynamic_getattr_argument_cannot_establish_registration_alias(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+METHOD = app.add_event_handler
+getattr(app, method_name)(METHOD := app.add_event_handler, 'startup', lambda: None)
+app.add_event_handler('startup', lambda: None)
+"""
+        )
+
+        inventory = SecureASTExtractor(main).extract_inventory()
+
+        assert inventory.endpoints == []
+        assert any(
+            "dynamic method lookup may alter route registration aliases" in item.reason
+            for item in inventory.limitations
+        )
+
+    def test_bootstrap_getattr_uses_active_local_method_binding(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+method = 'add_event_handler'
+def run():
+    method = 'openapi'
+    getattr(app, method)('/not-a-route')
+"""
+        )
+
+        inventory = SecureASTExtractor(main, bootstrap_entry="main:run").extract_inventory()
+
+        assert inventory.endpoints == []
+        assert any("bootstrap" in item.reason for item in inventory.limitations)
+
+    def test_factory_getattr_local_method_shadows_module_method(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+method = 'add_api_route'
+def endpoint():
+    return None
+def create_app(method='openapi'):
+    app = FastAPI()
+    getattr(app, method)('/not-a-route', endpoint)
+    return app
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, app_entry="main:create_app").extract_endpoints()
+
+        assert endpoints == []
+
+    def test_factory_getattr_resolves_exact_local_registration_method(self, tmp_path: Path) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+def endpoint():
+    return None
+def create_app():
+    app = FastAPI()
+    method = 'add_api_route'
+    getattr(app, method)('/visible', endpoint)
+    return app
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, app_entry="main:create_app").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /visible"]
+
+    def test_bootstrap_getattr_resolves_exact_local_registration_method(
+        self, tmp_path: Path
+    ) -> None:
+        main = tmp_path / "main.py"
+        main.write_text(
+            """from fastapi import FastAPI
+app = FastAPI()
+def endpoint():
+    return None
+def run():
+    method = 'add_api_route'
+    getattr(app, method)('/visible', endpoint)
+"""
+        )
+
+        endpoints = SecureASTExtractor(main, bootstrap_entry="main:run").extract_endpoints()
+
+        assert [endpoint.identifier for endpoint in endpoints] == ["GET /visible"]
+
     def test_init(self, tmp_path: Path) -> None:
         """Test extractor initialization."""
         app_file = tmp_path / "app.py"
@@ -995,6 +1088,105 @@ if enabled:
 
         assert inventory.status == InventoryStatus.CONDITIONAL
         assert "unresolved route-state method" in inventory.limitations[0].reason
+
+    def test_exact_fastapi_lifecycle_registration_is_inventory_neutral(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.on_event('startup')\n"
+            "def startup(): pass\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.path for endpoint in inventory.endpoints] == ["/probe"]
+        assert not inventory.limitations
+
+    def test_conditional_or_rebound_lifecycle_registration_remains_conditional(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def startup(): pass\n"
+            "if enabled:\n"
+            "    app.on_event('startup', startup)\n"
+            "app.on_event = replacement\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        reasons = [limitation.reason for limitation in inventory.limitations]
+        assert any("conditionally mutate route inventory" in reason for reason in reasons)
+        assert any("replace a route registration method" in reason for reason in reasons)
+
+    def test_unknown_on_event_phase_does_not_silence_route_inventory_limit(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "@app.on_event(event_name)\n"
+            "def startup(): pass\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any(
+            "registration could not be modeled" in item.reason for item in inventory.limitations
+        )
+
+    def test_foreign_on_event_method_name_does_not_establish_fastapi_ownership(
+        self, tmp_path: Path
+    ) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "class Foreign:\n"
+            "    def on_event(self, event): return self\n"
+            "    def __call__(self, callback): return callback\n"
+            "app = FastAPI()\n"
+            "foreign = Foreign()\n"
+            "@foreign.on_event('startup')\n"
+            "def not_lifecycle(): pass\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.ESTABLISHED
+        assert [endpoint.path for endpoint in inventory.endpoints] == ["/probe"]
+
+    def test_dynamic_lifecycle_registration_remains_conditional(self, tmp_path: Path) -> None:
+        app_file = tmp_path / "app.py"
+        app_file.write_text(
+            "from fastapi import FastAPI\n"
+            "app = FastAPI()\n"
+            "def startup(): pass\n"
+            "exec(\"app.on_event('startup', startup)\")\n"
+            "@app.get('/probe')\n"
+            "def probe(): return {'ok': True}\n"
+        )
+
+        inventory = SecureASTExtractor(app_file).extract_inventory()
+
+        assert inventory.status == InventoryStatus.CONDITIONAL
+        assert any(
+            "dynamic module-level execution" in item.reason for item in inventory.limitations
+        )
 
     def test_unrelated_conditional_app_attribute_read_does_not_weaken_inventory(
         self, tmp_path: Path

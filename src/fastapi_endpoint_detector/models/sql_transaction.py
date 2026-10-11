@@ -42,6 +42,14 @@ class SQLTransactionOutcome(str, Enum):
     OUTCOME_UNRESOLVED = "outcome_unresolved"
 
 
+class SQLTransactionTargetScope(str, Enum):
+    """Transaction object targeted by one boundary when source proves it."""
+
+    UNKNOWN = "unknown"
+    TRANSACTION = "transaction"
+    SAVEPOINT = "savepoint"
+
+
 class SQLTransactionBeginScopeEvidence(_StrictModel):
     """Declared transaction/savepoint scope for one exact reachable begin occurrence."""
 
@@ -237,9 +245,9 @@ class SQLTransactionPathError(ValueError):
 
 
 class SQLTransactionOrderedPath(_StrictModel):
-    """One same-scope, same-receiver straight-line stage-to-boundary relation."""
+    """One direct-scope straight-line stage-to-boundary source relation."""
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     id: Digest
     endpoint_id: Digest
     file_path: str = Field(min_length=1)
@@ -247,6 +255,8 @@ class SQLTransactionOrderedPath(_StrictModel):
     receiver_hash: Digest
     begin_occurrence_id: Digest | None = None
     begin_scope: TransactionScope | None = None
+    receiver_relation: Literal["same_receiver", "returned_transaction"] = "same_receiver"
+    boundary_target_scope: SQLTransactionTargetScope = SQLTransactionTargetScope.UNKNOWN
     stage_occurrence_id: Digest
     boundary_occurrence_id: Digest
     boundary: Literal["flush", "commit", "rollback"]
@@ -273,6 +283,19 @@ class SQLTransactionOrderedPath(_StrictModel):
             raise ValueError("ordered transaction path occurrence roles must be disjoint")
         if (self.begin_occurrence_id is None) != (self.begin_scope is None):
             raise ValueError("ordered begin occurrence and scope must be provided together")
+        if self.receiver_relation == "returned_transaction" and (
+            self.boundary == "flush"
+            or self.begin_occurrence_id is None
+            or self.boundary_target_scope == SQLTransactionTargetScope.UNKNOWN
+            or self.begin_scope is None
+            or self.begin_scope.value != self.boundary_target_scope.value
+        ):
+            raise ValueError("returned transaction paths require matching exact begin and target")
+        if (
+            self.receiver_relation == "same_receiver"
+            and self.boundary_target_scope != SQLTransactionTargetScope.UNKNOWN
+        ):
+            raise ValueError("same-receiver paths cannot claim a returned transaction target")
         if not self.file_path.strip() or not self.function_name.strip():
             raise ValueError("ordered transaction source identity must not be blank")
         if any(not item.strip() for item in self.limitations):
@@ -342,6 +365,42 @@ class SQLTransactionPathDiagnostic(_StrictModel):
     ]
 
 
+class SQLTransactionSourceProjection(_StrictModel):
+    """Source-only stage association whose SQL method identity is unresolved."""
+
+    schema_version: Literal[1] = 1
+    id: Digest
+    endpoint_id: Digest
+    begin_occurrence_id: Digest
+    unresolved_stage_occurrence_id: Digest
+    endpoint_file_path: str = Field(min_length=1)
+    endpoint_source_hash: Digest
+    wrapper_file_path: str = Field(min_length=1)
+    wrapper_source_hash: Digest
+    delegated_wrapper_file_path: str = Field(min_length=1)
+    delegated_wrapper_source_hash: Digest
+    function_name: str = Field(min_length=1)
+    receiver_hash: Digest
+    receiver_expression: str = Field(min_length=1)
+    status: Literal["conditional_source_association"] = "conditional_source_association"
+    method_identity: Literal["unresolved"] = "unresolved"
+    persistence_status: Literal["not_established"] = "not_established"
+    uncertainty: tuple[str, ...] = Field(min_length=1)
+
+    def identity_payload(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude={"id", "uncertainty"})
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> SQLTransactionSourceProjection:
+        if self.begin_occurrence_id == self.unresolved_stage_occurrence_id:
+            raise ValueError("source projection roles must be disjoint")
+        if any(not item.strip() for item in self.uncertainty):
+            raise ValueError("source projection uncertainty must not be blank")
+        if self.id != _semantic_hash(self.identity_payload()):
+            raise ValueError("source projection id does not match its identity")
+        return self
+
+
 class SQLTransactionPathSummary(_StrictModel):
     ordered_paths: int = Field(ge=0)
     ordered_flushes: int = Field(ge=0)
@@ -367,13 +426,14 @@ class SQLTransactionPathSummary(_StrictModel):
 class SQLTransactionPathReport(_StrictModel):
     """Content-addressed bounded straight-line and context-exit evidence."""
 
-    schema_version: Literal[4] = 4
+    schema_version: Literal[6] = 6
     status: Literal["diagnostic_only"] = "diagnostic_only"
     effect_audit_hash: Digest
     transaction_report_hash: Digest
     max_pairs: int = Field(ge=1, le=10_000)
     ordered_paths: tuple[SQLTransactionOrderedPath, ...]
     context_paths: tuple[SQLTransactionContextPath, ...]
+    source_projections: tuple[SQLTransactionSourceProjection, ...] = ()
     diagnostics: tuple[SQLTransactionPathDiagnostic, ...]
     summary: SQLTransactionPathSummary
     report_hash: Digest
@@ -393,6 +453,9 @@ class SQLTransactionPathReport(_StrictModel):
         ]
         if context_ids != sorted(set(context_ids)) or len(context_keys) != len(set(context_keys)):
             raise ValueError("context-managed SQL paths must be sorted and unique")
+        projection_ids = [item.id for item in self.source_projections]
+        if projection_ids != sorted(set(projection_ids)):
+            raise ValueError("SQL source projections must be sorted and unique")
         diagnostic_keys = [
             (
                 item.endpoint_id,
@@ -440,6 +503,8 @@ def build_sql_transaction_ordered_path(
     boundary: Literal["flush", "commit", "rollback"],
     begin_occurrence_id: str | None = None,
     begin_scope: TransactionScope | None = None,
+    receiver_relation: Literal["same_receiver", "returned_transaction"] = "same_receiver",
+    boundary_target_scope: SQLTransactionTargetScope = SQLTransactionTargetScope.UNKNOWN,
     limitations: tuple[str, ...],
 ) -> SQLTransactionOrderedPath:
     """Construct one content-addressed ordered-path record."""
@@ -451,6 +516,8 @@ def build_sql_transaction_ordered_path(
         receiver_hash=receiver_hash,
         begin_occurrence_id=begin_occurrence_id,
         begin_scope=begin_scope,
+        receiver_relation=receiver_relation,
+        boundary_target_scope=boundary_target_scope,
         stage_occurrence_id=stage_occurrence_id,
         boundary_occurrence_id=boundary_occurrence_id,
         boundary=boundary,
@@ -464,6 +531,8 @@ def build_sql_transaction_ordered_path(
         receiver_hash=receiver_hash,
         begin_occurrence_id=begin_occurrence_id,
         begin_scope=begin_scope,
+        receiver_relation=receiver_relation,
+        boundary_target_scope=boundary_target_scope,
         stage_occurrence_id=stage_occurrence_id,
         boundary_occurrence_id=boundary_occurrence_id,
         boundary=boundary,
@@ -524,11 +593,13 @@ def build_sql_transaction_path_report(
     diagnostics: tuple[SQLTransactionPathDiagnostic, ...],
     *,
     context_paths: tuple[SQLTransactionContextPath, ...] = (),
+    source_projections: tuple[SQLTransactionSourceProjection, ...] = (),
     max_pairs: int,
 ) -> SQLTransactionPathReport:
     """Construct one validated deterministic path report."""
     sorted_paths = tuple(sorted(ordered_paths, key=lambda item: item.id))
     sorted_context_paths = tuple(sorted(context_paths, key=lambda item: item.id))
+    sorted_source_projections = tuple(sorted(source_projections, key=lambda item: item.id))
     sorted_diagnostics = tuple(
         sorted(
             diagnostics,
@@ -559,6 +630,7 @@ def build_sql_transaction_path_report(
         max_pairs=max_pairs,
         ordered_paths=sorted_paths,
         context_paths=sorted_context_paths,
+        source_projections=sorted_source_projections,
         diagnostics=sorted_diagnostics,
         summary=summary,
         report_hash=f"sha256:{'0' * 64}",
@@ -569,6 +641,7 @@ def build_sql_transaction_path_report(
         max_pairs=max_pairs,
         ordered_paths=sorted_paths,
         context_paths=sorted_context_paths,
+        source_projections=sorted_source_projections,
         diagnostics=sorted_diagnostics,
         summary=summary,
         report_hash=_semantic_hash(provisional.report_payload()),

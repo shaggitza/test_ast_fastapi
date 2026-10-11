@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 from fastapi_endpoint_detector.models.artifact_validation import (
@@ -15,6 +16,16 @@ from fastapi_endpoint_detector.models.artifact_validation import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
+    PhaseManifest,
+    PhaseObservation,
+)
+from fastapi_endpoint_detector.analyzer.runtime_custody import (
+    RuntimeCustodyError,
+    runtime_custody_authority_from_environment,
+    verify_archived_runtime_record_custody,
+)
 
 _FAILURE_PHASES = {
     "dependency",
@@ -53,6 +64,8 @@ _RUNTIME_PROVENANCE_FIELDS = {
     *_COMMON_PROVENANCE_FIELDS,
     "runtime_seccomp_sha256",
     "runtime_policy_sha256",
+    "runtime_attestation_sha256",
+    "runtime_canary_receipt_sha256",
 }
 _ENVIRONMENT_PROVENANCE_FIELDS = {
     "source_sha256",
@@ -171,7 +184,22 @@ def _validate_provenance(value: object, mode: str) -> dict[str, str]:
     return value
 
 
-def _validate(record: dict[str, Any], expected_mode: str) -> None:
+def _validate_result_custody(record: dict[str, Any], expected_mode: str) -> None:
+    if expected_mode != "runtime":
+        if "runtime_custody" in record:
+            raise ComparisonError("secure records forbid runtime custody metadata")
+        return
+    try:
+        verify_archived_runtime_record_custody(
+            record,
+            authority=runtime_custody_authority_from_environment(),
+            now=int(time.time()),
+        )
+    except (RuntimeCustodyError, ValueError) as error:
+        raise ComparisonError(f"runtime result custody rejected: {error}") from error
+
+
+def _validate(record: dict[str, Any], expected_mode: str) -> None:  # noqa: PLR0912, PLR0915
     required = {
         "schema_version",
         "mode",
@@ -182,7 +210,15 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:
         "resources",
         "provenance",
     }
-    allowed = {*required, "failure", "inventory", "impact"}
+    allowed = {
+        *required,
+        "failure",
+        "inventory",
+        "impact",
+        "runtime_custody",
+        "framework_phase_manifest",
+        "framework_phase",
+    }
     if set(record) - allowed:
         raise ComparisonError("record contains unknown top-level fields")
     if required - set(record):
@@ -213,8 +249,71 @@ def _validate(record: dict[str, Any], expected_mode: str) -> None:
         _impact_ids(impact)
         if record.get("failure") is not None:
             raise ComparisonError("successful records forbid failure metadata")
+        _validate_result_custody(record, expected_mode)
+        if expected_mode == "runtime":
+            phase = record.get("framework_phase")
+            manifest_value = record.get("framework_phase_manifest")
+            if not isinstance(phase, dict) or set(phase) != {"manifest", "observations", "role"}:
+                raise ComparisonError("runtime success requires a bound framework phase comparison")
+            if (
+                phase["role"]
+                not in {
+                    "positive_observation_only",
+                    "self_reported_nonpositive",
+                }
+                or phase["manifest"] != manifest_value
+            ):
+                raise ComparisonError("runtime phase manifest identity or truth role is invalid")
+            try:
+                manifest = PhaseManifest.model_validate(manifest_value)
+                observations = phase["observations"]
+                if not isinstance(observations, dict) or set(observations) != {"list", "impact"}:
+                    raise ValueError("missing phase entries or observations")
+                for observation_value in observations.values():
+                    observation = PhaseObservation.model_validate(observation_value)
+                    if observation.manifest_sha256 != manifest.digest:
+                        raise ValueError("observation manifest digest mismatch")
+                    if phase["role"] == "self_reported_nonpositive" and (
+                        observation.role != "self_reported_nonpositive" or observation.observed
+                    ):
+                        raise ValueError(
+                            "application-process observations cannot be positive evidence"
+                        )
+                custody = record.get("runtime_custody")
+                if not isinstance(custody, dict) or set(custody) != {"list", "impact"}:
+                    raise ValueError("missing phase custody receipts")
+                for phase_name, observation_value in observations.items():
+                    bound = custody[phase_name]["result"].get("phase_observation")
+                    if (
+                        bound != observation_value
+                        or custody[phase_name]["result"].get("phase_manifest") != manifest_value
+                    ):
+                        raise ValueError("observation differs from signed custody result")
+            except (TypeError, ValueError, KeyError) as error:
+                raise ComparisonError(f"runtime phase comparison rejected: {error}") from error
+        elif expected_mode == "runtime" and "framework_phase_manifest" in record:
+            raise ComparisonError("runtime phase manifest requires observations")
+        elif "framework_phase" in record:
+            raise ComparisonError("secure records cannot contain runtime phase observations")
+        if "framework_phase_manifest" in record:
+            try:
+                # Snapshot, file and AST segment digests describe different byte
+                # domains. The strict manifest validates each independently;
+                # runtime custody binds the complete manifest and observations.
+                PhaseManifest.model_validate(record["framework_phase_manifest"])
+            except (TypeError, ValueError) as error:
+                raise ComparisonError(f"framework phase manifest rejected: {error}") from error
     else:
         _validate_failure(record.get("failure"))
+        if "framework_phase" in record:
+            raise ComparisonError("failed records forbid runtime phase observations")
+        if "runtime_custody" in record:
+            raise ComparisonError("failed records forbid runtime custody metadata")
+        if "framework_phase_manifest" in record:
+            try:
+                PhaseManifest.model_validate(record["framework_phase_manifest"])
+            except (TypeError, ValueError) as error:
+                raise ComparisonError(f"framework phase manifest rejected: {error}") from error
         if record.get("inventory") is not None or record.get("impact") is not None:
             raise ComparisonError("failed records forbid partial inventory/impact claims")
 
@@ -309,6 +408,10 @@ def _validate_pair_equivalence(secure: dict[str, Any], runtime: dict[str, Any]) 
     for field in _ENVIRONMENT_PROVENANCE_FIELDS:
         if secure["provenance"][field] != runtime["provenance"][field]:
             raise ComparisonError(f"paired records have mismatched provenance.{field}")
+    if (
+        "framework_phase_manifest" in secure or "framework_phase_manifest" in runtime
+    ) and secure.get("framework_phase_manifest") != runtime.get("framework_phase_manifest"):
+        raise ComparisonError("paired phase manifests differ between secure and runtime records")
 
 
 def _compare_loaded(
@@ -346,6 +449,22 @@ def _compare_loaded(
             else None,
         },
     }
+    phase_value = runtime.get("framework_phase")
+    if isinstance(phase_value, dict):
+        observations = phase_value["observations"]
+        result["framework_phase_comparison"] = {
+            "role": "self_reported_nonpositive",
+            "manifest_sha256": PhaseManifest.model_validate(phase_value["manifest"]).digest,
+            "observations": {
+                name: {
+                    "execution_status": observation["execution_status"],
+                    "observed_count": 0,
+                    "unavailable_count": len(phase_value["manifest"]["entries"]),
+                }
+                for name, observation in observations.items()
+            },
+            "absence_is_not_evidence": True,
+        }
     if not quality_eligible:
         result["inventory"] = None
         result["impact_exact"] = None

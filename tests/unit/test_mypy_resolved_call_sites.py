@@ -302,6 +302,8 @@ def test_bounded_callable_returns_parameters_and_partials_are_traced(tmp_path: P
     reached_symbols = {reference.symbol_name for reference in deps.referenced_symbols}
     assert any(symbol.endswith(".returned_effect") for symbol in reached_symbols)
     assert any(symbol.endswith(".parameter_effect") for symbol in reached_symbols)
+    # The exact bound partial target is traced; unrelated handlers and the
+    # later callback argument remain isolated below and in the focused control.
     assert any(symbol.endswith(".partial_effect") for symbol in reached_symbols)
     contextual_callback_sites = [
         site
@@ -319,6 +321,80 @@ def test_bounded_callable_returns_parameters_and_partials_are_traced(tmp_path: P
     other_symbols = {reference.symbol_name for reference in other.referenced_symbols}
     assert any(symbol.endswith(".other_effect") for symbol in other_symbols)
     assert not any(symbol.endswith(".parameter_effect") for symbol in other_symbols)
+
+
+def test_partial_with_bound_callback_does_not_misattribute_later_arguments(
+    tmp_path: Path,
+) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from functools import partial\n"
+        "from typing import Callable\n\n"
+        "def first() -> None: pass\n"
+        "def second() -> None: pass\n"
+        "def invoke(callback: Callable[[], None], other: Callable[[], None]) -> None:\n"
+        "    callback()\n\n"
+        "def handler() -> None:\n"
+        "    bound = partial(invoke, first)\n"
+        "    bound(second)\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, line=8))
+    reached_symbols = {reference.symbol_name for reference in deps.referenced_symbols}
+
+    assert not any(symbol.endswith(".second") for symbol in reached_symbols)
+
+
+def test_uncertain_loop_does_not_export_synthetic_callable_binding(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def first() -> None: pass\n"
+        "def second() -> None: pass\n"
+        "def handler(items: list[int]) -> None:\n"
+        "    callback = first\n"
+        "    for item in items:\n"
+        "        callback = second\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, line=3))
+    callback_sites = [
+        site
+        for site in deps.get_resolved_call_sites(str(main))
+        if site.source_spelling == "callback"
+    ]
+
+    assert len(callback_sites) == 1
+    assert callback_sites[0].canonical_symbol != "main.second"
+
+
+def test_exception_handler_does_not_inherit_callable_from_try_body(tmp_path: Path) -> None:
+    main = tmp_path / "main.py"
+    main.write_text(
+        "def first() -> None: pass\n"
+        "def second() -> None: pass\n"
+        "def risky() -> None: pass\n"
+        "def handler() -> None:\n"
+        "    callback = first\n"
+        "    try:\n"
+        "        risky()\n"
+        "        callback = second\n"
+        "    except Exception:\n"
+        "        callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(_endpoint(main, line=4))
+    callback_sites = [
+        site
+        for site in deps.get_resolved_call_sites(str(main))
+        if site.source_spelling == "callback"
+    ]
+
+    assert len(callback_sites) == 1
+    assert callback_sites[0].canonical_symbol != "main.second"
 
 
 def test_bound_method_alias_on_open_base_parameter_stays_unresolved(tmp_path: Path) -> None:
@@ -1165,3 +1241,63 @@ def test_span_cache_invalidation_detects_same_size_same_mtime_edit(tmp_path: Pat
     )
     assert len(after) == 1
     assert old_callee_id not in analyzer._python_verified_call_spans[str(main.resolve())]
+
+
+def test_partial_preserves_bound_callback_position_before_later_arguments(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "def first_effect() -> None: pass\n"
+        "def second_effect() -> None: pass\n\n"
+        "def run(first, second) -> None:\n"
+        "    first()\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from functools import partial\n"
+        "from effects import first_effect, second_effect, run\n\n"
+        "def handler() -> None:\n"
+        "    bound = partial(run, first_effect)\n"
+        "    bound(second_effect)\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=5))
+    reached = {reference.symbol_name for reference in deps.referenced_symbols}
+
+    assert any(name.endswith(".first_effect") for name in reached)
+    assert not any(name.endswith(".second_effect") for name in reached)
+
+
+def test_try_join_does_not_promote_one_path_callable_assignment(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "def first_effect() -> None: pass\n"
+        "def second_effect() -> None: pass\n"
+        "def risky() -> None: pass\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from effects import first_effect, second_effect, risky\n\n"
+        "def handler() -> None:\n"
+        "    callback = first_effect\n"
+        "    try:\n"
+        "        risky()\n"
+        "        callback = second_effect\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=4))
+    callback_sites = [
+        site
+        for site in deps.get_resolved_call_sites(str(main))
+        if site.source_spelling == "callback"
+    ]
+
+    assert callback_sites
+    assert not any(
+        site.canonical_symbol and site.canonical_symbol.endswith(".second_effect")
+        for site in callback_sites
+    )

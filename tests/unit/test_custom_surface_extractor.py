@@ -1391,6 +1391,20 @@ def test_exception_target_shadows_and_is_deleted_after_handler(tmp_path: Path) -
     assert inventory.endpoints == []
     assert inventory.status == InventoryStatus.CONDITIONAL
     assert inventory.limitations
+
+
+def test_exact_method_alias_keeps_receiver_and_custom_contract_identity(tmp_path: Path) -> None:
+    inventory = _argument_inventory(
+        tmp_path,
+        "from framework import Reactor\n"
+        "reactor = Reactor()\n"
+        "register = reactor.listen\n"
+        "async def process(): pass\n"
+        "register('orders', process)\n",
+    )
+
+    assert inventory.status == InventoryStatus.ESTABLISHED
+    assert [endpoint.identifier for endpoint in inventory.endpoints] == ["REACTOR topic:orders"]
     assert all(
         condition.source_path == (tmp_path / "main.py").resolve()
         for condition in inventory.limitations

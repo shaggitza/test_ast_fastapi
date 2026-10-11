@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
@@ -47,7 +48,7 @@ def _framework_mapper(
     )
 
 
-def test_public_mapper_reports_phase_and_conditions_without_promoting_untyped_evidence(
+def test_public_mapper_binds_typed_phase_without_claiming_runtime_execution(
     tmp_path: Path,
 ) -> None:
     app = _write_app(tmp_path / "target")
@@ -64,17 +65,18 @@ def test_public_mapper_reports_phase_and_conditions_without_promoting_untyped_ev
     record = phase_report.records[0]
     assert record["phase"] == "startup"
     assert record["callback"]["symbol"] == "startup"
-    assert record["status"] == "unavailable"
-    assert record["typed_provider_fingerprint"] is None
+    assert record["status"] == "conditional"
+    assert record["typed_provider_fingerprint"] is not None
+    assert record["typed_callback_symbol"] == "main.startup"
+    assert record["registration_call_site"]["status"] == "exact"
+    assert len(phase_report.runtime_manifest["entries"]) == 1
     assert (
         "framework executes startup callback only when that phase is dispatched"
         in (record["execution_conditions"])
     )
-    assert any(
-        "retained typed provider evidence is absent" in item for item in record["limitations"]
-    )
-    assert phase_report.established_count == phase_report.conditional_count == 0
-    assert phase_report.unavailable_count == 1
+    assert record["limitations"] == []
+    assert phase_report.established_count == phase_report.unavailable_count == 0
+    assert phase_report.conditional_count == 1
     assert mapper.map_framework_phase_report(snapshot_side=SnapshotSide.BASELINE).snapshot_side == (
         "baseline"
     )
@@ -159,3 +161,46 @@ def test_structured_output_adds_framework_report_only_when_selected(tmp_path: Pa
     assert "framework_phase_report:" in selected_yaml
     assert "schema_version: 4" in default_yaml
     assert "schema_version: 5" in selected_yaml
+
+
+def test_public_mapper_rejects_stale_source_inventory_before_phase_typing(tmp_path: Path) -> None:
+    app = _write_app(tmp_path)
+    mapper = _framework_mapper(app)
+    _ = mapper.inventory
+    mapper._mypy_analyzer = mapper.mypy_analyzer
+    app.write_text(app.read_text() + "# changed after census\n")
+    report = mapper.map_framework_phase_report()
+    assert report is not None
+    assert report.backend == "unavailable"
+    assert report.runtime_manifest["entries"] == []
+    assert any("changed before typed build" in item for item in report.limitations)
+
+
+def test_public_mapper_rejects_phase_source_byte_budget(tmp_path: Path) -> None:
+    app = _write_app(tmp_path)
+    mapper = _framework_mapper(app)
+    _ = mapper.inventory
+    mapper._mypy_analyzer = mapper.mypy_analyzer
+    mapper._mypy_analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES = 1
+    report = mapper.map_framework_phase_report()
+    assert report is not None
+    assert report.backend == "unavailable"
+    assert report.runtime_manifest["entries"] == []
+    assert any("byte budget" in item for item in report.limitations)
+
+
+def test_public_mapper_preserves_incomplete_import_scope(tmp_path: Path) -> None:
+    app = _write_app(tmp_path)
+    mapper = _framework_mapper(app)
+    _ = mapper.inventory
+    mapper._mypy_analyzer = mapper.mypy_analyzer
+    mapper.source_inventory = replace(
+        mapper.source_inventory,
+        unresolved_imports=(("main.py", "excluded"),),
+        limitations=("excluded local import",),
+    )
+    report = mapper.map_framework_phase_report()
+    assert report is not None
+    assert report.backend == "unavailable"
+    assert report.runtime_manifest["entries"] == []
+    assert any("unresolved limitations" in item for item in report.limitations)

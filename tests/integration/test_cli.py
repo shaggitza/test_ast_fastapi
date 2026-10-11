@@ -378,6 +378,9 @@ contracts:
             # remain candidates while deferred-body-only edits are removed.
             assert candidates[0]["confidence"] in {"low", "medium"}
         else:
+            # The changed line is 4 in service.py, which numerically overlaps
+            # the route handler's lines 4-6 in app/__init__.py. Public mapping
+            # must not treat a baseline line-number match as same-file evidence.
             assert candidates == []
 
     def test_cli_mypy_module_identity_ignores_checkout_root_name(

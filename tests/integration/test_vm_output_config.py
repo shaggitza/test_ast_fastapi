@@ -1,4 +1,4 @@
-"""VM CLI output configuration is either honored or rejected before runtime."""
+"""VM CLI forwards output settings without executing an application in tests."""
 
 from pathlib import Path
 
@@ -19,7 +19,7 @@ from fastapi_endpoint_detector.executor.vm_executor import VMExecutor
         ("verbose", "true"),
     ],
 )
-def test_vm_rejects_nondefault_output_options_before_runtime(
+def test_vm_forwards_output_options_to_executor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     command: str,
@@ -30,35 +30,35 @@ def test_vm_rejects_nondefault_output_options_before_runtime(
     config.write_text(f"output:\n  {option}: {value}\n", encoding="utf-8")
     app = tmp_path / "app.py"
     app.write_text("from fastapi import FastAPI\napp = FastAPI()\n", encoding="utf-8")
-    output = tmp_path / "result.txt"
-    args = [
-        "--config",
-        str(config),
-        command,
-        "--app",
-        str(app),
-        "--format",
-        "text",
-        "--output",
-        str(output),
-        "--vm",
-    ]
+    args = ["--config", str(config), command, "--app", str(app), "--format", "text", "--vm"]
     if command == "analyze":
         diff = tmp_path / "change.diff"
         diff.write_text("", encoding="utf-8")
         args.extend(["--diff", str(diff)])
 
-    def unexpected_side_effect(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("VM runtime must not start for unsupported output options")
+    received: list[dict[str, object]] = []
 
-    monkeypatch.setattr(VMExecutor, "__init__", unexpected_side_effect)
-    monkeypatch.setattr(VMExecutor, "analyze_in_vm", unexpected_side_effect)
+    def fake_init(self: VMExecutor, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def fake_analyze(self: VMExecutor, **kwargs: object) -> str:
+        received.append(kwargs)
+        return "VM formatted output"
+
+    monkeypatch.setattr(VMExecutor, "__init__", fake_init)
+    monkeypatch.setattr(VMExecutor, "analyze_in_vm", fake_analyze)
 
     result = CliRunner().invoke(cli, args)
 
-    assert result.exit_code != 0
-    assert f"Output option '{option}' cannot be applied with --vm" in result.output
-    assert not output.exists()
+    assert result.exit_code == 0, result.output
+    assert received[0]["output_config"] == {
+        "show_confidence": True,
+        "show_dependency_chain": False,
+        "colorize": True,
+        "verbose": False,
+        option: value == "true",
+    }
+    assert result.output == "VM formatted output"
 
 
 @pytest.mark.parametrize("command", ["analyze", "list"])
@@ -80,7 +80,7 @@ def test_vm_accepts_default_output_options(
     def fake_init(self: VMExecutor, *_args: object, **_kwargs: object) -> None:
         return None
 
-    def fake_analyze(self: VMExecutor, *_args: object, **_kwargs: object) -> str:
+    def fake_analyze(self: VMExecutor, **_kwargs: object) -> str:
         return "VM formatted output"
 
     monkeypatch.setattr(VMExecutor, "__init__", fake_init)

@@ -22,10 +22,10 @@ _EXPECTED_PRESET_HASHES = {
     "message-bus-v1": "sha256:875790c0d08b0f6cb2e8681bf56a9066d67bee39225dd7160cb51a447d18ebc3",
     "filesystem-v1": "sha256:5acc35da9d989ccafda0960090efefbbaa52ca5b70894882c24c4bf1355c2b96",
     "http-clients-v1": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
-    "mongodb-v1": "sha256:7e0f41e452ac61b7340f02215963e8aa765333988b67d441b7aece9dfa53191c",
+    "mongodb-v1": "sha256:534e9ed9242b47ac66f7d2a273fc684fd537c535c4108d02d6f830343d403d0e",
     "object-storage-v1": "sha256:99707cccf212f530bd2437a3cb154d5ebea775857cc7d65c777771f9771cc6c4",
     "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
-    "sqlalchemy-v1": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
+    "sqlalchemy-v1": "sha256:e22fad64f602a3056eefdc5b7365cd6c729a73377a1b4565be60235585446458",
 }
 
 _EXPECTED_CONTRACT_IDS = {
@@ -71,6 +71,9 @@ _EXPECTED_CONTRACT_IDS = {
         "requests-session-put",
     },
     "mongodb-v1": {
+        "motor-delete-one",
+        "motor-insert-one",
+        "motor-update-one",
         "pymongo-delete-one",
         "pymongo-find-one",
         "pymongo-insert-one",
@@ -101,6 +104,10 @@ _EXPECTED_CONTRACT_IDS = {
         "sqlalchemy-session-flush",
         "sqlalchemy-session-merge",
         "sqlalchemy-session-rollback",
+        "sqlalchemy-session-transaction-commit",
+        "sqlalchemy-session-transaction-rollback",
+        "sqlalchemy-async-session-transaction-commit",
+        "sqlalchemy-async-session-transaction-rollback",
     },
 }
 
@@ -111,12 +118,14 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
 
     assert loaded.source_path == BUNDLED_EFFECT_PRESETS[name].resolve()
     expected_version = {
+        "mongodb-v1": "1.2.0",
         "filesystem-v1": "2.0.0",
         "http-clients-v1": "2.0.0",
         "object-storage-v1": "2.0.0",
         "sqlalchemy-v1": "3.0.0",
     }.get(name, "1.0.0")
     expected_revision = {
+        "mongodb-v1": "3",
         "filesystem-v1": "2",
         "http-clients-v1": "2",
         "object-storage-v1": "2",
@@ -214,6 +223,27 @@ def test_sqlalchemy_preset_declares_exact_transaction_and_savepoint_scopes() -> 
         "sqlalchemy-session-begin-nested": "savepoint_release_rollback",
         "sqlalchemy-async-session-begin": "transaction_commit_rollback",
         "sqlalchemy-async-session-begin-nested": "savepoint_release_rollback",
+    }
+    returned_scopes = {
+        contract.id: (
+            contract.behavior.returns_transaction_scope.value
+            if contract.behavior.returns_transaction_scope is not None
+            else None
+        )
+        for contract in loaded.document.contracts
+        if contract.operation.value == "begin"
+    }
+    assert returned_scopes == scopes
+    receiver_targets = {
+        contract.id
+        for contract in loaded.document.contracts
+        if contract.behavior.transaction_target_from_receiver
+    }
+    assert receiver_targets == {
+        "sqlalchemy-session-transaction-commit",
+        "sqlalchemy-session-transaction-rollback",
+        "sqlalchemy-async-session-transaction-commit",
+        "sqlalchemy-async-session-transaction-rollback",
     }
 
 

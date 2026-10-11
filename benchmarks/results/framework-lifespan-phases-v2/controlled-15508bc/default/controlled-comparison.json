@@ -1,0 +1,346 @@
+{
+  "configuration": {
+    "entry": {
+      "app_entry": null,
+      "app_variable": "app",
+      "backend": "mypy",
+      "bootstrap_entry": null
+    },
+    "snapshots": {
+      "baseline": {
+        "app_entry": null,
+        "app_variable": "app",
+        "backend": "mypy",
+        "bootstrap_entry": null,
+        "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5"
+      },
+      "target": {
+        "app_entry": null,
+        "app_variable": "app",
+        "backend": "mypy",
+        "bootstrap_entry": null,
+        "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5"
+      }
+    }
+  },
+  "input_hashes": {
+    "baseline": {
+      "runtime": "sha256:5129eb92616b44d37dcbb903b3fdc5bb0707059c4742e389e56cc98c493f1e39",
+      "secure": "sha256:c9466d4df6aa21e9216e2c6b993a4498521874d2b829e1ecc2427cf3a2548bad"
+    },
+    "target": {
+      "runtime": "sha256:d3143678f2794565e83985003a9ecf0ab6b51e21e540f0788a8a3e4d9996ed80",
+      "secure": "sha256:bbacf0d0fff7f52f77a9fb263c7be44cb167cfc44f7554c5e59d11f912c2c366"
+    }
+  },
+  "lifecycle": {
+    "runtime": null,
+    "secure": {
+      "impact_exact": {
+        "added": [],
+        "baseline_count": 1,
+        "removed": [],
+        "target_count": 1,
+        "unchanged_count": 1
+      },
+      "impact_normalized": {
+        "added": [],
+        "baseline_count": 1,
+        "removed": [],
+        "target_count": 1,
+        "unchanged_count": 1
+      },
+      "inventory": {
+        "added": [],
+        "baseline_count": 3,
+        "removed": [],
+        "target_count": 3,
+        "unchanged_count": 3
+      }
+    }
+  },
+  "operational": {
+    "abstention_count": {
+      "runtime": 2,
+      "secure": 0
+    },
+    "artifact_count": 4,
+    "failure_phase_counts": {
+      "runtime": {
+        "unavailable": 2
+      },
+      "secure": {}
+    },
+    "inventory_strength": {
+      "baseline": {
+        "runtime": null,
+        "secure": "conditional"
+      },
+      "target": {
+        "runtime": null,
+        "secure": "conditional"
+      }
+    },
+    "peak_rss_bytes": {
+      "runtime": {
+        "reason": "one_or_more_snapshot_rss_not_measured",
+        "status": "not_measured"
+      },
+      "secure": {
+        "reason": "one_or_more_snapshot_rss_not_measured",
+        "status": "not_measured"
+      }
+    },
+    "resources": {
+      "baseline": {
+        "runtime": {
+          "peak_rss_bytes": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "peak_rss_bytes": {
+            "reason": "secure_host_process_rss_not_collected",
+            "status": "not_measured"
+          }
+        }
+      },
+      "target": {
+        "runtime": {
+          "peak_rss_bytes": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "peak_rss_bytes": {
+            "reason": "secure_host_process_rss_not_collected",
+            "status": "not_measured"
+          }
+        }
+      }
+    },
+    "success_count": {
+      "runtime": 0,
+      "secure": 2
+    },
+    "timing": {
+      "baseline": {
+        "runtime": {
+          "impact": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          },
+          "list": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "impact": {
+            "seconds": 75.20403091283515,
+            "status": "measured"
+          },
+          "list": {
+            "seconds": 5.357602497097105,
+            "status": "measured"
+          }
+        }
+      },
+      "target": {
+        "runtime": {
+          "impact": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          },
+          "list": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "impact": {
+            "seconds": 72.39342632843181,
+            "status": "measured"
+          },
+          "list": {
+            "seconds": 5.139742303173989,
+            "status": "measured"
+          }
+        }
+      }
+    }
+  },
+  "paired_success_quality": {
+    "eligible_snapshots": [],
+    "metrics": {}
+  },
+  "protocol": "secure-runtime-target-baseline-v1",
+  "provenance_digests": {
+    "baseline": {
+      "runtime": "sha256:246ec91ff863f6da59db05f2165d43eb2eea78c5daf146a8e3258ff453c24ec8",
+      "secure": "sha256:fdc02ef4623404669965305e1f2af91bb150e80cb7f98d86a451ef93ea331bb3"
+    },
+    "target": {
+      "runtime": "sha256:54586a1e9d29ac238eb303cb6411989c3b18a12b4f883851f8d7dfb125415729",
+      "secure": "sha256:62e59438b30a94f0ae0ff9d1329ccd7c36d1b006ba73fa8db0fdd621ddcd8ee5"
+    }
+  },
+  "runtime_role": "positive_observation_comparator_not_truth",
+  "schema_version": 1,
+  "snapshot_pairs": {
+    "baseline": {
+      "configuration": {
+        "app_entry": null,
+        "app_variable": "app",
+        "backend": "mypy",
+        "bootstrap_entry": null,
+        "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5"
+      },
+      "failure": {
+        "runtime": {
+          "message": "static runtime phase coverage is conditional",
+          "phase": "unavailable"
+        },
+        "secure": null
+      },
+      "impact_exact": null,
+      "impact_normalized": null,
+      "input_hashes": {
+        "runtime": "sha256:5129eb92616b44d37dcbb903b3fdc5bb0707059c4742e389e56cc98c493f1e39",
+        "secure": "sha256:c9466d4df6aa21e9216e2c6b993a4498521874d2b829e1ecc2427cf3a2548bad"
+      },
+      "inventory": null,
+      "inventory_strength": {
+        "runtime": null,
+        "secure": "conditional"
+      },
+      "paired_success": false,
+      "provenance_digests": {
+        "runtime": "sha256:246ec91ff863f6da59db05f2165d43eb2eea78c5daf146a8e3258ff453c24ec8",
+        "secure": "sha256:fdc02ef4623404669965305e1f2af91bb150e80cb7f98d86a451ef93ea331bb3"
+      },
+      "quality_eligible": false,
+      "resources": {
+        "runtime": {
+          "peak_rss_bytes": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "peak_rss_bytes": {
+            "reason": "secure_host_process_rss_not_collected",
+            "status": "not_measured"
+          }
+        }
+      },
+      "runtime_role": "positive_observation_comparator_not_truth",
+      "schema_version": 1,
+      "snapshot": "baseline",
+      "status": {
+        "runtime": "failure",
+        "secure": "success"
+      },
+      "timing": {
+        "runtime": {
+          "impact": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          },
+          "list": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "impact": {
+            "seconds": 75.20403091283515,
+            "status": "measured"
+          },
+          "list": {
+            "seconds": 5.357602497097105,
+            "status": "measured"
+          }
+        }
+      }
+    },
+    "target": {
+      "configuration": {
+        "app_entry": null,
+        "app_variable": "app",
+        "backend": "mypy",
+        "bootstrap_entry": null,
+        "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5"
+      },
+      "failure": {
+        "runtime": {
+          "message": "static runtime phase coverage is conditional",
+          "phase": "unavailable"
+        },
+        "secure": null
+      },
+      "impact_exact": null,
+      "impact_normalized": null,
+      "input_hashes": {
+        "runtime": "sha256:d3143678f2794565e83985003a9ecf0ab6b51e21e540f0788a8a3e4d9996ed80",
+        "secure": "sha256:bbacf0d0fff7f52f77a9fb263c7be44cb167cfc44f7554c5e59d11f912c2c366"
+      },
+      "inventory": null,
+      "inventory_strength": {
+        "runtime": null,
+        "secure": "conditional"
+      },
+      "paired_success": false,
+      "provenance_digests": {
+        "runtime": "sha256:54586a1e9d29ac238eb303cb6411989c3b18a12b4f883851f8d7dfb125415729",
+        "secure": "sha256:62e59438b30a94f0ae0ff9d1329ccd7c36d1b006ba73fa8db0fdd621ddcd8ee5"
+      },
+      "quality_eligible": false,
+      "resources": {
+        "runtime": {
+          "peak_rss_bytes": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "peak_rss_bytes": {
+            "reason": "secure_host_process_rss_not_collected",
+            "status": "not_measured"
+          }
+        }
+      },
+      "runtime_role": "positive_observation_comparator_not_truth",
+      "schema_version": 1,
+      "snapshot": "target",
+      "status": {
+        "runtime": "failure",
+        "secure": "success"
+      },
+      "timing": {
+        "runtime": {
+          "impact": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          },
+          "list": {
+            "reason": "phase_not_completed",
+            "status": "not_measured"
+          }
+        },
+        "secure": {
+          "impact": {
+            "seconds": 72.39342632843181,
+            "status": "measured"
+          },
+          "list": {
+            "seconds": 5.139742303173989,
+            "status": "measured"
+          }
+        }
+      }
+    }
+  }
+}

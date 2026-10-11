@@ -1,0 +1,367 @@
+{
+  "configuration": {
+    "app_entry": "main:app",
+    "app_variable": "app",
+    "backend": "mypy",
+    "bootstrap_entry": null,
+    "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5"
+  },
+  "failure": null,
+  "impact": {
+    "candidate_endpoints": [
+      {
+        "call_stacks": [
+          [
+            {
+              "code_context": "Handler: startup",
+              "file_path": "/tmp/secure-runtime-lane-5migdyf1/source/main.py",
+              "function_name": "[ENDPOINT] FRAMEWORK.LIFECYCLE event:startup",
+              "line_number": 6
+            },
+            {
+              "code_context": "",
+              "file_path": "/tmp/secure-runtime-lane-5migdyf1/source/main.py",
+              "function_name": "startup",
+              "line_number": 6
+            },
+            {
+              "caller_file_path": "/tmp/secure-runtime-lane-5migdyf1/source/main.py",
+              "caller_line_number": 7,
+              "code_context": "",
+              "file_path": "/tmp/secure-runtime-lane-5migdyf1/source/main.py",
+              "function_name": "main.startup_helper",
+              "line_number": 3
+            },
+            {
+              "code_context": "    return 'baseline'",
+              "file_path": "/tmp/secure-runtime-lane-5migdyf1/source/main.py",
+              "function_name": "main.startup_helper",
+              "line_number": 4
+            }
+          ]
+        ],
+        "changed_files": [
+          "main.py"
+        ],
+        "confidence": "medium",
+        "contract_evidence": [],
+        "dependency_chain": [
+          "main",
+          "main.py"
+        ],
+        "dependency_chains": [
+          [
+            "main",
+            "main.py"
+          ]
+        ],
+        "effect_evidence": [
+          {
+            "changed_location": {
+              "file_path": "main.py",
+              "line_number": 4
+            },
+            "channel": "unknown",
+            "conditions": [],
+            "disposition": "reachability_only",
+            "effect": "unknown",
+            "limitations": [
+              "Call reachability alone does not establish an externally observable effect."
+            ],
+            "observations": [],
+            "producer": "mypy",
+            "schema_version": 1,
+            "status": "reachability_only",
+            "summary": "Mypy resolves a typed call path; effect evidence is reported separately."
+          }
+        ],
+        "endpoint": {
+          "activation": null,
+          "dependencies": [],
+          "dependency_graph": null,
+          "discovery_conditions": [],
+          "discovery_status": "established",
+          "handler": {
+            "end_line": 7,
+            "file": "/tmp/secure-runtime-lane-5migdyf1/source/main.py",
+            "line": 6,
+            "module": "main",
+            "name": "startup"
+          },
+          "methods": [
+            "CUSTOM"
+          ],
+          "name": null,
+          "native_provenance": null,
+          "path": "event:startup",
+          "surface": {
+            "activates_routes": true,
+            "callback_mode": "either",
+            "callback_range": "full",
+            "conditions": [],
+            "config_hash": "sha256:88f051ad5ba9d432de7cb6e9462d44f7258a5c23eab06812d3375362a0b8bf5e",
+            "contract_hash": "sha256:753f4c1647b4079f5f1458a008bd6664eb1e0801544cf13e92e6060d292741f7",
+            "contract_id": "fastapi-on-event",
+            "contract_source_path": "/tmp/test-ast-gh104-runtime-phase-implementation-20261010/src/fastapi_endpoint_detector/presets/framework_v1.yaml",
+            "execution_mode": "framework",
+            "handler_source_hash": "sha256:2b15988bfe73623308f40eeff476105e86d63d731e2e5a6682a74b31f74ddabf",
+            "match_kind": "exact",
+            "preset_hash": "sha256:5fd586a09f99d26a2da36027237c0f01df7be0d0f5da798abb79cba39f66891e",
+            "raw_hash": "sha256:b709863ac4ecb00f8fccd0c4da9ea2b7f9f85a389e2673bfb4a2be874aa90f26",
+            "registration_column": 1,
+            "registration_file": "/tmp/secure-runtime-lane-5migdyf1/source/main.py",
+            "registration_line": 5,
+            "registration_source_hash": "sha256:c219f713facf90aaef5f6f472d05444410bc1fb4b6fd20ed5ec29002ef9c647f",
+            "registration_symbol": "fastapi.FastAPI.on_event",
+            "resource": "startup",
+            "schema_version": 5,
+            "surface_id": "event:startup",
+            "surface_kind": "framework.lifecycle"
+          },
+          "tags": []
+        },
+        "reason": "Type analysis shows dependency on main.py (lines [4])",
+        "resource_coupling_evidence": []
+      }
+    ]
+  },
+  "inventory": {
+    "endpoints": [
+      {
+        "activation": null,
+        "dependencies": [],
+        "dependency_graph": null,
+        "discovery_conditions": [],
+        "discovery_status": "established",
+        "handler": {
+          "end_line": 10,
+          "file": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+          "line": 9,
+          "module": "main",
+          "name": "shutdown"
+        },
+        "methods": [
+          "CUSTOM"
+        ],
+        "name": null,
+        "native_provenance": null,
+        "path": "event:shutdown",
+        "surface": {
+          "activates_routes": true,
+          "callback_mode": "either",
+          "callback_range": "full",
+          "conditions": [],
+          "config_hash": "sha256:88f051ad5ba9d432de7cb6e9462d44f7258a5c23eab06812d3375362a0b8bf5e",
+          "contract_hash": "sha256:753f4c1647b4079f5f1458a008bd6664eb1e0801544cf13e92e6060d292741f7",
+          "contract_id": "fastapi-on-event",
+          "contract_source_path": "/tmp/test-ast-gh104-runtime-phase-implementation-20261010/src/fastapi_endpoint_detector/presets/framework_v1.yaml",
+          "execution_mode": "framework",
+          "handler_source_hash": "sha256:414d2032cf602c81402d473b446274e9469275525612e121f853d57118092fb4",
+          "match_kind": "exact",
+          "preset_hash": "sha256:5fd586a09f99d26a2da36027237c0f01df7be0d0f5da798abb79cba39f66891e",
+          "raw_hash": "sha256:b709863ac4ecb00f8fccd0c4da9ea2b7f9f85a389e2673bfb4a2be874aa90f26",
+          "registration_column": 1,
+          "registration_file": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+          "registration_line": 8,
+          "registration_source_hash": "sha256:79ed7f2ff1ec52b87a13d3699da12e3e3e004b4e9391b30ef60a3f7a8e42d337",
+          "registration_symbol": "fastapi.FastAPI.on_event",
+          "resource": "shutdown",
+          "schema_version": 5,
+          "surface_id": "event:shutdown",
+          "surface_kind": "framework.lifecycle"
+        },
+        "tags": []
+      },
+      {
+        "activation": null,
+        "dependencies": [],
+        "dependency_graph": null,
+        "discovery_conditions": [],
+        "discovery_status": "established",
+        "handler": {
+          "end_line": 7,
+          "file": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+          "line": 6,
+          "module": "main",
+          "name": "startup"
+        },
+        "methods": [
+          "CUSTOM"
+        ],
+        "name": null,
+        "native_provenance": null,
+        "path": "event:startup",
+        "surface": {
+          "activates_routes": true,
+          "callback_mode": "either",
+          "callback_range": "full",
+          "conditions": [],
+          "config_hash": "sha256:88f051ad5ba9d432de7cb6e9462d44f7258a5c23eab06812d3375362a0b8bf5e",
+          "contract_hash": "sha256:753f4c1647b4079f5f1458a008bd6664eb1e0801544cf13e92e6060d292741f7",
+          "contract_id": "fastapi-on-event",
+          "contract_source_path": "/tmp/test-ast-gh104-runtime-phase-implementation-20261010/src/fastapi_endpoint_detector/presets/framework_v1.yaml",
+          "execution_mode": "framework",
+          "handler_source_hash": "sha256:2b15988bfe73623308f40eeff476105e86d63d731e2e5a6682a74b31f74ddabf",
+          "match_kind": "exact",
+          "preset_hash": "sha256:5fd586a09f99d26a2da36027237c0f01df7be0d0f5da798abb79cba39f66891e",
+          "raw_hash": "sha256:b709863ac4ecb00f8fccd0c4da9ea2b7f9f85a389e2673bfb4a2be874aa90f26",
+          "registration_column": 1,
+          "registration_file": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+          "registration_line": 5,
+          "registration_source_hash": "sha256:c219f713facf90aaef5f6f472d05444410bc1fb4b6fd20ed5ec29002ef9c647f",
+          "registration_symbol": "fastapi.FastAPI.on_event",
+          "resource": "startup",
+          "schema_version": 5,
+          "surface_id": "event:startup",
+          "surface_kind": "framework.lifecycle"
+        },
+        "tags": []
+      },
+      {
+        "activation": null,
+        "dependencies": [],
+        "dependency_graph": null,
+        "discovery_conditions": [
+          {
+            "reason": "module-level execution invokes an unresolved route-state method",
+            "source_line": 5,
+            "source_path": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py"
+          },
+          {
+            "reason": "module-level execution invokes an unresolved route-state method",
+            "source_line": 8,
+            "source_path": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py"
+          }
+        ],
+        "discovery_status": "conditional",
+        "handler": {
+          "end_line": 13,
+          "file": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+          "line": 12,
+          "module": "main",
+          "name": "probe"
+        },
+        "methods": [
+          "GET"
+        ],
+        "name": null,
+        "native_provenance": {
+          "assembly_chain": [],
+          "object_chain": [
+            {
+              "dependency_expressions": [],
+              "module": "main",
+              "object_kind": "app",
+              "resolved_prefix": "",
+              "side": "target",
+              "source_span": {
+                "end_column": 15,
+                "end_line": 2,
+                "file_path": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+                "start_column": 0,
+                "start_line": 2
+              },
+              "symbol": "app@2:0:2:15"
+            }
+          ],
+          "registration": {
+            "dependency_expressions": [],
+            "kind": "decorator",
+            "occurrence_order": 11000001,
+            "operation": "get",
+            "owner_module": "main",
+            "owner_symbol": "app@2:0:2:15",
+            "side": "target",
+            "source_span": {
+              "end_column": 18,
+              "end_line": 11,
+              "file_path": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+              "start_column": 1,
+              "start_line": 11
+            }
+          },
+          "root": {
+            "bootstrap_span": null,
+            "module": "main",
+            "selection_kind": "app_entry_object",
+            "side": "target",
+            "source_span": {
+              "end_column": 15,
+              "end_line": 2,
+              "file_path": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+              "start_column": 0,
+              "start_line": 2
+            },
+            "symbol": "app@2:0:2:15"
+          },
+          "schema_version": 1,
+          "side": "target",
+          "source_owners": [
+            {
+              "confidence": "established",
+              "expression": "def probe",
+              "owner_kind": "decorator_signature",
+              "qualified_binding": "main.probe",
+              "related_binding": null,
+              "side": "target",
+              "source_span": {
+                "end_column": 37,
+                "end_line": 12,
+                "file_path": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+                "start_column": 0,
+                "start_line": 11
+              }
+            },
+            {
+              "confidence": "established",
+              "expression": "FastAPI()",
+              "owner_kind": "assignment_rhs",
+              "qualified_binding": "main.app",
+              "related_binding": null,
+              "side": "target",
+              "source_span": {
+                "end_column": 15,
+                "end_line": 2,
+                "file_path": "/tmp/secure-runtime-lane-9yq6xbmo/source/main.py",
+                "start_column": 6,
+                "start_line": 2
+              }
+            }
+          ]
+        },
+        "path": "/probe",
+        "surface": null,
+        "tags": []
+      }
+    ],
+    "inventory_status": "conditional"
+  },
+  "mode": "secure",
+  "provenance": {
+    "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5",
+    "effective_invocation_sha256": "sha256:c3798e5f19d2f7ce9f851f608a6ec1ee8e3b890f48b65357895025e8c831769c",
+    "runtime_image_digest": "test-ast-runtime-phase-15508bc@sha256:8c2d95773208aab2a4391316ba4bd6446ac6d896ba581420545053822d9f24e4",
+    "runtime_sbom_sha256": "sha256:150519b5360cc6e47acf198191e514bcc879fb4b6c71272b075cec4181d61961",
+    "source_sha256": "sha256:f55d361536cc72bd4c2de731b122577d7641e0d3b14054f569fb26453a4c4df8",
+    "tool_sha256": "sha256:3671e01e191ff71245820362a6bfb98ed5859cd321cd0f582bd36605e7d49e6b"
+  },
+  "resources": {
+    "peak_rss_bytes": {
+      "reason": "secure_host_process_rss_not_collected",
+      "status": "not_measured"
+    }
+  },
+  "schema_version": 1,
+  "snapshot": "baseline",
+  "status": "success",
+  "timing": {
+    "impact": {
+      "seconds": 84.25112484022975,
+      "status": "measured"
+    },
+    "list": {
+      "seconds": 5.3411346944049,
+      "status": "measured"
+    }
+  }
+}

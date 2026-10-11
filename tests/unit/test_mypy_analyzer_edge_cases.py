@@ -520,6 +520,42 @@ def handler():
 
 
 class TestExecutionReachability:
+    def test_unknown_branch_lambda_invocation_is_possible_execution(self, tmp_path: Path) -> None:
+        effects = tmp_path / "effects.py"
+        effects.write_text("def leaf() -> int:\n    return 1\n", encoding="utf-8")
+        service = tmp_path / "service.py"
+        service.write_text(
+            "from effects import leaf\n\n"
+            "def worker(flag: bool) -> int:\n"
+            "    callback = lambda: leaf()\n"
+            "    if flag:\n"
+            "        callback()\n"
+            "    return 0\n",
+            encoding="utf-8",
+        )
+        main = tmp_path / "main.py"
+        main.write_text(
+            "from service import worker\n\n"
+            "def handler(flag: bool) -> int:\n"
+            "    return worker(flag)\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
+        )
+
+        spans = (
+            MypyAnalyzer(tmp_path)
+            .analyze_endpoint(endpoint)
+            .get_source_evidence_spans(str(service))
+        )
+
+        assert any(span.execution_state == "possible_execution" for span in spans)
+        assert any(span.execution_state == "lexical_reference" for span in spans)
+        assert all(span.provenance for span in spans)
+
     def test_dead_and_deferred_bodies_are_not_reported(self, tmp_path: Path) -> None:
         (tmp_path / "effects.py").write_text("def changed():\n    return 1\n")
         main = tmp_path / "main.py"
@@ -614,11 +650,20 @@ def handler(flag: bool):
         if expected_state is None:
             assert spans == []
         else:
-            assert len(spans) == 1
-            assert spans[0].execution_state == expected_state
-            lambda_line = service.read_text(encoding="utf-8").splitlines()[spans[0].start_line - 1]
+            body_states = {span.execution_state for span in spans}
+            expected_public_state = (
+                "established_execution" if executes_effect else "deferred_execution"
+            )
+            assert expected_public_state in body_states
+            if not executes_effect:
+                assert "lexical_reference" in body_states
+            body_span = next(
+                span for span in spans if span.execution_state == expected_public_state
+            )
+            lambda_line = service.read_text(encoding="utf-8").splitlines()[body_span.start_line - 1]
             lambda_bytes = lambda_line.encode("utf-8")
-            assert lambda_bytes[spans[0].start_column : spans[0].end_column] == b"leaf_alias()"
+            assert lambda_bytes[body_span.start_column : body_span.end_column] == b"leaf_alias()"
+            assert body_span.provenance
         assert deps.references_file(str(effects)) is executes_effect
 
         cache = tmp_path / "analysis-cache.json"
@@ -837,3 +882,23 @@ def handler(flag: bool):
 
         assert deps.references_lines(str(main), {5, 9, 13, 18, 23}) == set()
         assert not deps.references_file(str(effects))
+
+    def test_literal_false_loop_preserves_live_else_without_dead_body(self, tmp_path: Path) -> None:
+        effects = tmp_path / "effects.py"
+        effects.write_text(
+            "def dead():\n    return 1\n\ndef live():\n    return 2\n", encoding="utf-8"
+        )
+        main = tmp_path / "main.py"
+        main.write_text(
+            "from effects import dead, live\n\ndef handler():\n"
+            "    while False:\n        dead()\n    else:\n        live()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/test",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=3),
+        )
+        deps = MypyAnalyzer(tmp_path).analyze_endpoint(endpoint)
+        assert deps.references_lines(str(effects), {1, 2}) == set()
+        assert deps.references_lines(str(effects), {4, 5})

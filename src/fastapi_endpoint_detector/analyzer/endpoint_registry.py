@@ -70,8 +70,10 @@ class EndpointRegistry:
                     if item.confidence == "established"
                 ),
             ]
-            if provenance.root.bootstrap_span is not None:
-                occurrences.append(("bootstrap", provenance.root.bootstrap_span))
+            # The selected bootstrap root is invocation provenance, not
+            # ownership of every statement in its body for every app route.
+            # Exact registration/assembly and source-owner spans above carry
+            # the descendant occurrences that the bootstrap materialized.
             seen: set[tuple[str, Path, int, int]] = set()
             for kind, span in occurrences:
                 identity = (kind, span.file_path, span.start_line, span.end_line)

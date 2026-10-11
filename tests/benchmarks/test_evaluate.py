@@ -355,6 +355,88 @@ def test_prediction_coverage_excludes_not_evaluable_truth(
     assert result["not_evaluable_prs"] == 1
     assert result["unknown_label_prs"] == 1
     assert result["prediction_coverage"] == 1.0
+    assert result["coverage"]["completed"]["numerator"] == 1
+
+
+def test_legacy_partial_prediction_with_no_diagnostics_is_not_completed(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    truth.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def prediction(status: str) -> dict:
+        return {
+            "schema_version": 2,
+            "repository": "owner/repo",
+            "pr": 1,
+            "candidate": "synthetic",
+            "status": status,
+            "affected_entrypoints": [],
+            "unresolved": [],
+        }
+
+    predictions.write_text(json.dumps(prediction("partial")) + "\n", encoding="utf-8")
+    artifact = read_primary_artifact(predictions, "prediction")
+    assert artifact.records[0]["status"] == "partial"
+    assert evaluate.prediction_is_completed(artifact.records[0]) is False
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["evaluate.py", "--ground-truth", str(truth), "--predictions", str(predictions)],
+    )
+    evaluate.main()
+    partial_result = json.loads(capsys.readouterr().out)
+    assert partial_result["coverage"]["record"] == {
+        "numerator": 1,
+        "denominator": 1,
+        "rate": 1.0,
+    }
+    assert partial_result["coverage"]["completed"]["numerator"] == 0
+    assert partial_result["negative_control_specificity"]["completed_controls"] == 0
+
+    predictions.write_text(json.dumps(prediction("completed")) + "\n", encoding="utf-8")
+    evaluate.main()
+    completed = json.loads(capsys.readouterr().out)["coverage"]
+    assert completed["record"] == {"numerator": 1, "denominator": 1, "rate": 1.0}
+    assert completed["completed"] == {
+        "numerator": 1,
+        "denominator": 1,
+        "rate": 1.0,
+        "definition": "validated completed predictions with no unresolved diagnostics",
+    }
+    assert evaluate.prediction_is_completed({"unresolved": ["legacy unresolved"]}) is False
+    assert evaluate.prediction_status({"unresolved": ["legacy unresolved"]}) == "completed"
+
+
+@pytest.mark.parametrize("status", ["unknown", None, {"invalid": True}])
+def test_legacy_prediction_rejects_invalid_status_values(tmp_path: Path, status: object) -> None:
+    path = tmp_path / "predictions.jsonl"
+    row = {
+        "schema_version": 2,
+        "repository": "owner/repo",
+        "pr": 1,
+        "candidate": "synthetic",
+        "status": status,
+        "affected_entrypoints": [],
+        "unresolved": [],
+    }
+    path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="legacy prediction status"):
+        read_primary_artifact(path, "prediction")
 
 
 @pytest.mark.parametrize(

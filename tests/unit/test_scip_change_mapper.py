@@ -621,6 +621,100 @@ def test_deleted_helper_uses_baseline_index_and_unchanged_target_endpoint(
     assert not orphans
 
 
+def test_baseline_depth_limit_downgrades_deleted_candidate_and_is_structured(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    (baseline / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom service import run\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return run()\n",
+        encoding="utf-8",
+    )
+    (baseline / "service.py").write_text("def run():\n    return 1\n", encoding="utf-8")
+    (target / "main.py").write_text(
+        "from fastapi import FastAPI\napp = FastAPI()\n"
+        "@app.get('/items')\ndef items():\n    return 0\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(
+        target,
+        baseline_app_path=baseline,
+        use_cache=False,
+        secure_ast=True,
+        use_scip=False,
+    )
+    mapper.config.parser.max_depth = 1
+
+    report = mapper.analyze_diff(
+        "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n"
+        "@@ -1,5 +1,4 @@\n"
+        " from fastapi import FastAPI\n-from service import run\n"
+        " app = FastAPI()\n @app.get('/items')\n def items():\n-    return run()\n+    return 0\n"
+        "diff --git a/service.py b/service.py\ndeleted file mode 100644\n"
+        "--- a/service.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def run():\n-    return 1\n"
+    )
+
+    candidate = next(item for item in report.candidate_endpoints if item.endpoint.path == "/items")
+    assert candidate.confidence == ConfidenceLevel.LOW
+    assert report.analysis_completeness == "partial"
+    assert any(
+        item.cap == "MAX_DEPTH" and item.file_path.endswith("baseline/main.py")
+        for item in report.analysis_limitations
+    )
+
+
+def test_line_less_scip_rename_seeds_endpoint_file_ownership(tmp_path: Path) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    baseline.mkdir()
+    target.mkdir()
+    source = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items():\n"
+        "    return 1\n"
+    )
+    (baseline / "main.py").write_text(source, encoding="utf-8")
+    (target / "new_main.py").write_text(source, encoding="utf-8")
+    diff_file = DiffParser.parse_string(
+        "diff --git a/main.py b/new_main.py\n"
+        "similarity index 100%\n"
+        "rename from main.py\n"
+        "rename to new_main.py\n"
+    )[0]
+
+    class EmptyIndex(ReferenceAnalyzerMixin):
+        def ensure_index(self, *, force: bool = False) -> None:
+            assert force
+
+        def definitions_at(self, _file_path: Path, _lines: set[int]):
+            return ()
+
+        def reverse_call_edges(self, _seed: SCIPDefinition):
+            return ()
+
+    mapper = ChangeMapper(
+        target,
+        use_cache=False,
+        secure_ast=True,
+        use_scip=True,
+        baseline_app_path=baseline,
+    )
+    mapper._scip_analyzer = EmptyIndex()  # type: ignore[assignment]
+    mapper._baseline_scip_analyzer = EmptyIndex()  # type: ignore[assignment]
+
+    affected, orphans = mapper._analyze_with_scip([diff_file], [], None)
+
+    assert [item.endpoint.identifier for item in affected] == ["GET /items"]
+    assert affected[0].endpoint.handler.file_path == target / "new_main.py"
+    assert affected[0].confidence == ConfidenceLevel.HIGH
+    assert not orphans
+
+
 def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> None:
     target = tmp_path / "target"
     baseline = tmp_path / "baseline"
