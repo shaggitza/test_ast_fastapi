@@ -42,6 +42,11 @@ from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
     prepare_cache_run,
     remove_run,
 )
+from fastapi_endpoint_detector.analyzer.typed_consumer_trace import (
+    audited_typeinfo_get,
+    observe_call_site,
+    observe_type_access,
+)
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
@@ -2167,7 +2172,9 @@ class MypyAnalyzer:
 
     def _get_type_from_node(self, node: Any) -> Any:
         """Get the type of an AST node from mypy's type map."""
-        return self._types_map.get(node)
+        typed_value = self._types_map.get(node)
+        observe_type_access(node, typed_value)
+        return typed_value
 
     def _import_map_for_tree(self, tree: Any, module_name: str) -> dict[str, str]:
         """Build local-to-full symbol aliases for one module's imports."""
@@ -3483,7 +3490,7 @@ class MypyAnalyzer:
             return None
         class_name, member_name = qualified.split(".")
         info = self._project_type_info(f"{module}.{class_name}")
-        member = info.get(member_name) if info is not None else None
+        member = audited_typeinfo_get(info, member_name) if info is not None else None
         return self._callable_declaration(member.node) if member is not None else None
 
     def _join_finite_values(
@@ -3629,7 +3636,7 @@ class MypyAnalyzer:
             if "." in name:
                 class_name, member_name = name.split(".", maxsplit=1)
                 info = self._exact_finite_project_type_info(f"{module}.{class_name}")
-                member = info.get(member_name) if info is not None else None
+                member = audited_typeinfo_get(info, member_name) if info is not None else None
                 return self._callable_declaration(member.node) if member is not None else None
             found = self._find_func_in_tree(tree, name, qualified_name=name)
             if found is not None:
@@ -4241,7 +4248,7 @@ class MypyAnalyzer:
         if not fullname or fullname in stack:
             return None
         value = _FinitePointsTo((fullname,))
-        member = info.get("__init__")
+        member = audited_typeinfo_get(info, "__init__")
         function = getattr(member, "node", None) if member is not None else None
         if function is None:
             return value
@@ -4441,7 +4448,7 @@ class MypyAnalyzer:
         declarations: set[tuple[str, InvocationKind]] = set()
         for fullname in receiver.types:
             info = self._exact_finite_project_type_info(fullname)
-            member = info.get(member_name) if info is not None else None
+            member = audited_typeinfo_get(info, member_name) if info is not None else None
             declaration = self._callable_declaration(member.node) if member is not None else None
             if declaration is None:
                 return None
@@ -4839,7 +4846,7 @@ class MypyAnalyzer:
             resolutions: set[tuple[str, InvocationKind]] = set()
             dynamically_final = True
             for info in receiver_infos:
-                member = info.get(callee.name)
+                member = audited_typeinfo_get(info, callee.name)
                 declaration = (
                     self._callable_declaration(member.node) if member is not None else None
                 )
@@ -4934,15 +4941,27 @@ class MypyAnalyzer:
             )
             if site is None:
                 return None
-            return site.model_copy(
+            site = site.model_copy(
                 update={"arguments": self._call_argument_evidence(call, string_environment)}
             )
-        cache_key = id(call)
-        if cache_key not in self._resolved_call_site_cache:
-            self._resolved_call_site_cache[cache_key] = self._resolved_call_site_uncached(
-                call, current_file, import_map
+        else:
+            cache_key = id(call)
+            if cache_key not in self._resolved_call_site_cache:
+                self._resolved_call_site_cache[cache_key] = self._resolved_call_site_uncached(
+                    call, current_file, import_map
+                )
+            site = self._resolved_call_site_cache[cache_key]
+        if site is not None:
+            observe_call_site(
+                site,
+                next(
+                    iter(
+                        self._modules_by_canonical_path.get(str(Path(current_file).resolve()), ())
+                    ),
+                    "",
+                ),
             )
-        return self._resolved_call_site_cache[cache_key]
+        return site
 
     @staticmethod
     def _finite_string_values(
@@ -5281,7 +5300,7 @@ class MypyAnalyzer:
             else None
         )
         try:
-            return ResolvedCallSite(
+            site = ResolvedCallSite(
                 file_path=str(Path(current_file).resolve()),
                 line=line,
                 column=column,
@@ -5299,7 +5318,7 @@ class MypyAnalyzer:
                 receiver_origin=receiver_origin,
             )
         except ValueError:
-            return ResolvedCallSite(
+            site = ResolvedCallSite(
                 file_path=str(Path(current_file).resolve()),
                 line=line,
                 column=column,
@@ -5313,6 +5332,7 @@ class MypyAnalyzer:
                 reason_code="invalid_symbol_identity",
                 arguments=self._call_argument_evidence(call),
             )
+        return site
 
     def _trace_references(self, *args: Any, **kwargs: Any) -> None:
         """Keep source and endpoint context scoped across recursive traces."""

@@ -23,6 +23,9 @@ from fastapi_endpoint_detector.analyzer.framework_phase_bridge import (
     SourceIdentity,
     canonical_framework_phase,
 )
+from fastapi_endpoint_detector.analyzer.typed_consumer_trace import (
+    observe_framework_registration,
+)
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
     ResolvedCallSite,
@@ -253,6 +256,7 @@ def _typed_registration(
     if len(matched) != 1:
         return None
     site = matched[0]
+    observe_framework_registration(site)
     trusted_source = _trusted_framework_source(site, typed_build, source_root)
     if trusted_source is None:
         return None
