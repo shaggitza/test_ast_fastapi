@@ -238,6 +238,82 @@ def test_nested_global_declaration_without_write_preserves_exact_call(tmp_path: 
     )
     handler_call = next(site for site in sites if site.source_spelling == "client.get")
     assert handler_call.status == CallResolutionStatus.EXACT
+
+
+def test_function_local_module_import_write_abstains(tmp_path: Path) -> None:
+    """A local import aliases the same module object and its writes are visible."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def mutate(replacement: object) -> None:\n"
+        "    import httpx as local_httpx\n"
+        "    local_httpx.get = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.AMBIGUOUS
+    assert handler_call.canonical_symbol is None
+
+
+def test_local_import_name_does_not_capture_unrelated_parameter(tmp_path: Path) -> None:
+    """A local import alias is active only in the function that imports it."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def read_only() -> None:\n"
+        "    import httpx as local_httpx\n"
+        "def unrelated(local_httpx: object, replacement: object) -> None:\n"
+        "    local_httpx.get = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.EXACT
+    assert handler_call.canonical_symbol == "httpx._api.get"
+
+
+def test_annotation_only_class_name_does_not_shadow_module_lookup(tmp_path: Path) -> None:
+    """A bare class annotation leaves LOAD_NAME free to resolve the global module."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "class Holder:\n"
+        "    client: object\n"
+        "    client.get = object()\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.AMBIGUOUS
+    assert handler_call.canonical_symbol is None
+
+
+def test_class_value_and_unmutated_local_import_keep_scope(tmp_path: Path) -> None:
+    """Real class bindings and read-only function imports do not poison globals."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "class Unrelated:\n"
+        "    client = object()\n"
+        "    client.get = object()\n"
+        "def read_only() -> None:\n"
+        "    import httpx as local_httpx\n"
+        "    local_httpx.get\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.EXACT
+    assert handler_call.canonical_symbol == "httpx._api.get"
     assert handler_call.canonical_symbol == "httpx._api.get"
 
 
