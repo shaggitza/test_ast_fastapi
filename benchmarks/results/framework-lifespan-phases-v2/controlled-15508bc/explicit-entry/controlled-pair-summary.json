@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "baseline-runtime": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-explicit-entry-validation-20261010/controlled-artifacts/baseline-runtime.json",
+      "sha256": "sha256:446c88d2a0df09c3d66cfe926ed97e851bdb86cdb471272ec4682379e15a6463"
+    },
+    "baseline-secure": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-explicit-entry-validation-20261010/controlled-artifacts/baseline-secure.json",
+      "sha256": "sha256:f969862e7bae1cf7cf12da0d6a25c96b9c3825a6ee7a5e4e916fb1e704de315c"
+    },
+    "target-runtime": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-explicit-entry-validation-20261010/controlled-artifacts/target-runtime.json",
+      "sha256": "sha256:fcd035b70da449824846264555c12125785910d81eeb704fef32bce19430c864"
+    },
+    "target-secure": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-explicit-entry-validation-20261010/controlled-artifacts/target-secure.json",
+      "sha256": "sha256:4055d6254705f6683bdc87b8aac731c7bd987ada01cd530d54abeba9860d2e5e"
+    }
+  },
+  "comparison_sha256": "sha256:30674159d212e73f4f95cd2ea9d83314df2486b9810c8c9d10eb9c670b855767",
+  "image": "test-ast-runtime-phase-15508bc@sha256:8c2d95773208aab2a4391316ba4bd6446ac6d896ba581420545053822d9f24e4",
+  "producer_revision": "15508bc8a477fb6fad170df0be0b95e0b2e3fc79",
+  "scope": "controlled synthetic local-operator signed comparison only; no external approval/canonical truth/real-world acceptance"
+}

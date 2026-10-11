@@ -51,11 +51,25 @@ An ordered path requires exact audited stage and flush/commit/rollback
 occurrences in the same source file, direct function body, and lexical order.
 A stage-to-flush path establishes only that pending SQL may be issued before a
 later transaction outcome; it never promotes the evidence to durable persistence.
-Both calls must
-use the same finite `Name`/`Attribute` receiver expression, with no intervening
-assignment to that expression or one of its lexical ancestors. A nearest prior
+By default both calls must use the same finite `Name`/`Attribute` receiver
+expression, with no intervening assignment to that expression or one of its
+lexical ancestors. The only cross-receiver exception is an exact transaction
+object returned by a matched begin contract and assigned directly to one local
+name. A nearest prior
 same-receiver `begin` may be attached together with its declared transaction or
-savepoint scope. Calls under branches, loops, `try`,
+savepoint scope. This `begin_scope` describes the nearby begin declaration; it
+does not establish that the later boundary targets that transaction or
+savepoint. `boundary_target_scope` is `unknown` unless the analyzer proves an exact
+returned-transaction binding and a matched transaction-object boundary contract.
+In particular, `session.commit()` after `session.begin_nested()` is not labeled
+as savepoint-targeted. A transaction object returned by a configured begin call
+is eligible only when assigned directly to one local name and used by an exact
+matched commit/rollback call with no intervening control flow or rebinding.
+Aliases, dynamic receivers, and unmatched methods remain unassociated. Real
+SQLAlchemy call sites receive target attribution only when the configured
+contract and typed resolver both identify the returned transaction method
+exactly; open dispatch remains unresolved. Calls
+under branches, loops, `try`,
 `with`, comprehensions, lambdas, nested scopes, dynamic receivers, mismatched
 receivers, reversed boundaries, and reassigned receivers remain explicit
 unresolved diagnostics.
@@ -72,7 +86,9 @@ without exact context-exit semantics fail closed.
 The pair cap is checked atomically before source analysis. Exceeding it fails
 explicitly without a partial report. Receiver hashes expose no source value and
 prove spelling stability only—not alias, session, connection, or runtime
-transaction identity. Every explicit or context-managed outcome retains the
+transaction identity. An exact returned-object relation proves only source-level
+ownership by a declared begin contract, not execution or outcome success. Every
+explicit or context-managed outcome retains the
 `not_established` persistence status because runtime execution, outcome success,
 and database durability are outside this evidence.
 

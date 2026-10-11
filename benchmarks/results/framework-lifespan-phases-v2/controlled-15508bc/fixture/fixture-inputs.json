@@ -1,0 +1,11 @@
+{
+  "baseline_revision": "ac3441ab4325b182ce017601e7f5f991d503b190",
+  "diff_sha256": "0e1f7aee4d78408c1efa9ef662f465f4073782bd4a664adc12644fb4ca20096b",
+  "scope": "controlled synthetic input only; no execution or runtime observation yet",
+  "source_file": "main.py",
+  "source_hashes": {
+    "baseline": "35869e2aee91ec307b01184509e4672e62a1671fd40a51879cf118f42d7f80e6",
+    "target": "32874e12b0877cea644f76da45d2752374fa1da8c437cc259c3a7e9e2db59a05"
+  },
+  "target_revision": "d59d54db9a80f7384f0f1bc52093b98e574ec26c"
+}

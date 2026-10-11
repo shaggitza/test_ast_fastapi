@@ -163,7 +163,8 @@ class TextFormatter(BaseFormatter):
                 f"{paths.summary.ordered_paths} explicit boundaries "
                 f"({paths.summary.ordered_flushes} flushes) / "
                 f"{paths.summary.context_manager_paths} context exits / "
-                f"{paths.summary.unresolved_pairs} unresolved pairs "
+                f"{paths.summary.unresolved_pairs} unresolved pairs / "
+                f"{len(paths.source_projections)} source projections "
                 "(lexical and conditional only; persistence not established)"
             )
         if report.source_observations is not None:

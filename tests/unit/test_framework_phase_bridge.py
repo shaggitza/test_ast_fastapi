@@ -59,7 +59,7 @@ def test_runtime_phase_receipt_is_unavailable_without_validated_artifacts(tmp_pa
     assert "receipt validation failed" in result.reason
 
 
-def test_valid_aggregate_pair_still_cannot_claim_phase_comparison(tmp_path: Path) -> None:
+def test_unsigned_aggregate_pair_cannot_claim_phase_comparison(tmp_path: Path) -> None:
     def digest(char: str) -> str:
         return "sha256:" + char * 64
 
@@ -126,6 +126,19 @@ def test_valid_aggregate_pair_still_cannot_claim_phase_comparison(tmp_path: Path
 
     result = compare_phase_artifacts(secure_path, runtime_path, phase=FrameworkPhase.STARTUP)
 
+    assert result.status == "unavailable"
+    assert result.paired_comparison_status is None
+    assert "receipt validation failed" in result.reason
+
+
+def test_validated_aggregate_seam_still_requires_phase_receipts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "fastapi_endpoint_detector.analyzer.framework_phase_comparison.compare",
+        lambda *_args: {"paired_success": True},
+    )
+    result = compare_phase_artifacts(tmp_path / "secure", tmp_path / "runtime")
     assert result.status == "unavailable"
     assert result.paired_comparison_status == "validated_aggregate_only"
     assert "no phase callback receipts" in result.reason
