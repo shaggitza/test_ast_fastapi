@@ -159,12 +159,14 @@ def test_enabled_graphify_cli_emits_side_bound_low_lexical_overlay(tmp_path: Pat
     assert overlay["evidence_scope"] == "validated_offline_snapshots"
     assert overlay["baseline_snapshot"]["side"] == "baseline"
     assert overlay["target_snapshot"]["side"] == "target"
-    assert overlay["baseline_snapshot"]["graph_sha256"] == hashlib.sha256(
-        baseline_graph.read_bytes()
-    ).hexdigest()
-    assert overlay["target_snapshot"]["graph_sha256"] == hashlib.sha256(
-        target_graph.read_bytes()
-    ).hexdigest()
+    assert (
+        overlay["baseline_snapshot"]["graph_sha256"]
+        == hashlib.sha256(baseline_graph.read_bytes()).hexdigest()
+    )
+    assert (
+        overlay["target_snapshot"]["graph_sha256"]
+        == hashlib.sha256(target_graph.read_bytes()).hexdigest()
+    )
 
     evidence_by_side = {item["side"]: item for item in overlay["evidence"]}
     assert set(evidence_by_side) == {"baseline", "target"}

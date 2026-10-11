@@ -73,7 +73,12 @@ class TestCLI:
         result = runner.invoke(
             cli,
             [
-                "analyze", "--app", str(app), "--diff", str(diff), "--graphify",
+                "analyze",
+                "--app",
+                str(app),
+                "--diff",
+                str(diff),
+                "--graphify",
                 "--secure-ast",
             ],
         )
