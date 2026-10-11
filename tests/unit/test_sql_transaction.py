@@ -148,8 +148,8 @@ def test_ordered_paths_are_content_addressed_and_bounded() -> None:
         max_pairs=4,
     )
 
-    assert report.schema_version == 5
-    assert flush_path.schema_version == 3
+    assert report.schema_version == 6
+    assert flush_path.schema_version == 4
     assert report.summary.ordered_flushes == 1
     assert report.summary.ordered_commits == 1
     assert report.max_pairs == 4
