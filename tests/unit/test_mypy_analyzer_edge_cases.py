@@ -6,6 +6,8 @@ various edge cases that might be missed in the standard implementation.
 """
 
 import ast
+import hashlib
+import os
 from pathlib import Path
 
 import mypy.build
@@ -838,6 +840,177 @@ def handler(flag: bool):
         assert (
             analyzer._lambda_body_source_span(worker, lambda_node, str(large), "deferred") is None
         )
+
+    def test_bounded_source_read_accepts_exact_limit_with_one_byte_sentinel(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "boundary.py"
+        expected = b"x" * 32
+        source.write_bytes(expected)
+        analyzer = MypyAnalyzer(tmp_path)
+        original_read = os.read
+        observations: list[tuple[int, int]] = []
+
+        def record_read(descriptor: int, requested: int) -> bytes:
+            data = original_read(descriptor, requested)
+            observations.append((requested, len(data)))
+            return data
+
+        monkeypatch.setattr(os, "read", record_read)
+
+        snapshot = analyzer.framework_phase_source_bytes(source, max_bytes=len(expected))
+
+        assert snapshot == expected
+        assert observations
+        assert max(requested for requested, _actual in observations) <= len(expected) + 1
+        assert sum(actual for _requested, actual in observations) == len(expected)
+
+    def test_bounded_source_read_rejects_one_byte_over_limit(self, tmp_path: Path) -> None:
+        source = tmp_path / "oversized.py"
+        source.write_bytes(b"x" * 33)
+        analyzer = MypyAnalyzer(tmp_path)
+
+        assert analyzer.framework_phase_source_bytes(source, max_bytes=32) is None
+
+    def test_bounded_source_read_detects_growth_after_initial_short_read(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "growing.py"
+        source.write_bytes(b"x" * 8)
+        analyzer = MypyAnalyzer(tmp_path)
+        original_read = os.read
+        observations: list[tuple[int, int]] = []
+        grew = False
+
+        def append_after_first_read(descriptor: int, requested: int) -> bytes:
+            nonlocal grew
+            data = original_read(descriptor, requested)
+            observations.append((requested, len(data)))
+            if not grew:
+                with source.open("ab") as handle:
+                    handle.write(b"y")
+                grew = True
+            return data
+
+        monkeypatch.setattr(os, "read", append_after_first_read)
+
+        assert analyzer.framework_phase_source_bytes(source, max_bytes=8) is None
+        assert observations == [(9, 8), (1, 1)]
+        assert sum(actual for _requested, actual in observations) == 9
+
+    def test_bounded_source_read_rejects_path_replaced_during_read(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "replaced.py"
+        source.write_bytes(b"x" * 8)
+        analyzer = MypyAnalyzer(tmp_path)
+        original_read = os.read
+        replaced = False
+
+        def replace_after_open(descriptor: int, requested: int) -> bytes:
+            nonlocal replaced
+            data = original_read(descriptor, requested)
+            if not replaced:
+                replacement = source.with_suffix(".replacement")
+                replacement.write_bytes(b"y" * 8)
+                replacement.replace(source)
+                replaced = True
+            return data
+
+        monkeypatch.setattr(os, "read", replace_after_open)
+
+        assert analyzer.framework_phase_source_bytes(source, max_bytes=8) is None
+        assert source.read_bytes() == b"y" * 8
+
+    def test_bounded_source_read_rejects_in_place_drift_during_read(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "mutated.py"
+        source.write_bytes(b"x" * 8)
+        analyzer = MypyAnalyzer(tmp_path)
+        original_read = os.read
+        mutated = False
+
+        def mutate_after_read(descriptor: int, requested: int) -> bytes:
+            nonlocal mutated
+            data = original_read(descriptor, requested)
+            if not mutated:
+                source.write_bytes(b"y" * 8)
+                mutated = True
+            return data
+
+        monkeypatch.setattr(os, "read", mutate_after_read)
+
+        assert analyzer.framework_phase_source_bytes(source, max_bytes=8) is None
+        assert source.read_bytes() == b"y" * 8
+
+    def test_bounded_source_read_failure_discards_partial_snapshot(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "unreadable.py"
+        source.write_bytes(b"x" * 8)
+        analyzer = MypyAnalyzer(tmp_path)
+        original_read = os.read
+        observations: list[tuple[int, int]] = []
+
+        def fail_after_short_read(descriptor: int, requested: int) -> bytes:
+            if observations:
+                raise OSError("injected source read failure")
+            data = original_read(descriptor, 4)
+            observations.append((requested, len(data)))
+            return data
+
+        monkeypatch.setattr(os, "read", fail_after_short_read)
+
+        assert analyzer.framework_phase_source_bytes(source, max_bytes=8) is None
+        assert observations == [(9, 4)]
+
+    def test_streaming_source_digest_matches_large_file_without_large_reads(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "large-digest.py"
+        contents = b"z" * 150_000
+        source.write_bytes(contents)
+        analyzer = MypyAnalyzer(tmp_path)
+        original_read = os.read
+        observations: list[int] = []
+
+        def record_read(descriptor: int, requested: int) -> bytes:
+            observations.append(requested)
+            return original_read(descriptor, requested)
+
+        monkeypatch.setattr(os, "read", record_read)
+
+        digests = analyzer._source_file_digests(source)
+
+        assert digests == (
+            hashlib.sha1(contents).hexdigest(),
+            hashlib.sha256(contents).hexdigest(),
+        )
+        assert len(observations) > 1
+        assert max(observations) <= analyzer.SOURCE_DIGEST_READ_BYTES
+
+    def test_streaming_source_digest_rejects_in_place_drift_during_read(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        source = tmp_path / "mutated-digest.py"
+        source.write_bytes(b"x" * 8)
+        analyzer = MypyAnalyzer(tmp_path)
+        original_read = os.read
+        mutated = False
+
+        def mutate_after_read(descriptor: int, requested: int) -> bytes:
+            nonlocal mutated
+            data = original_read(descriptor, requested)
+            if not mutated:
+                source.write_bytes(b"y" * 8)
+                mutated = True
+            return data
+
+        monkeypatch.setattr(os, "read", mutate_after_read)
+
+        assert analyzer._source_file_digests(source) is None
+        assert source.read_bytes() == b"y" * 8
 
     def test_invoked_wrappers_do_not_own_dead_deferred_or_unawaited_body_lines(
         self, tmp_path: Path

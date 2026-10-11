@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -926,6 +927,7 @@ def test_package_applicability_is_reported_but_not_used_for_matching(tmp_path: P
         "source_changed",
         "source_removed",
         "source_unreadable",
+        "source_replaced",
     ],
 )
 def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold evidence fixture
@@ -982,64 +984,87 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
         ),
         encoding="utf-8",
     )
-    original_read = Path.read_bytes
-    reads = 0
+    capture_reads = 0
+    digest_reads = 0
+    final_fingerprint_started = False
+    source_replaced_during_read = False
+    original_capture = MypyAnalyzer._read_regular_source
+    original_digest = MypyAnalyzer._source_file_digests
+    original_read = os.read
 
-    def raced_read(path: Path) -> bytes:
-        nonlocal reads
-        if path != metadata:
-            return original_read(path)
-        reads += 1
-        if mutation == "unreadable" and reads > 1:
-            raise PermissionError("synthetic final metadata read denial")
-        raw = original_read(path)
-        if reads == 1:
+    def count_capture(self: MypyAnalyzer, path: Path, max_bytes: int) -> bytes | None:
+        nonlocal capture_reads
+        if path == metadata:
+            capture_reads += 1
+        return original_capture(self, path, max_bytes)
+
+    def count_digest(self: MypyAnalyzer, path: Path) -> tuple[str, str] | None:
+        nonlocal digest_reads
+        if path == metadata:
+            digest_reads += 1
+        return original_digest(self, path)
+
+    def deny_final_digest_read(descriptor: int, requested: int) -> bytes:
+        nonlocal source_replaced_during_read
+        try:
+            opened_path = Path(f"/proc/self/fd/{descriptor}").readlink()
+        except OSError:
+            opened_path = Path()
+        if final_fingerprint_started and mutation in {"unreadable", "source_unreadable"}:
+            denied_path = stub if mutation == "source_unreadable" else metadata
+            if opened_path == denied_path:
+                raise PermissionError("synthetic final digest read denial")
+        if (
+            final_fingerprint_started
+            and mutation == "source_replaced"
+            and opened_path == stub
+            and not source_replaced_during_read
+        ):
+            replacement = stub.with_suffix(".replacement")
+            replacement.write_text("def emit(value: int) -> None: ...\n", encoding="utf-8")
+            replacement.replace(stub)
+            source_replaced_during_read = True
+        return original_read(descriptor, requested)
+
+    monkeypatch.setattr(MypyAnalyzer, "_read_regular_source", count_capture)
+    monkeypatch.setattr(MypyAnalyzer, "_source_file_digests", count_digest)
+    monkeypatch.setattr(os, "read", deny_final_digest_read)
+
+    original_fingerprint = MypyAnalyzer._fingerprint_typed_environment
+
+    def mutate_before_final_digest(
+        self: MypyAnalyzer,
+        *,
+        authenticated_metadata_hashes: dict[str, str] | None = None,
+        authenticated_metadata_roots: set[Path] | None = None,
+    ) -> str:
+        nonlocal final_fingerprint_started
+        if authenticated_metadata_hashes is not None:
+            final_fingerprint_started = True
             if mutation == "changed":
-                path.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
+                metadata.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
             elif mutation == "removed":
-                path.unlink()
-        return raw
-
-    monkeypatch.setattr(Path, "read_bytes", raced_read)
-    if mutation == "added" or mutation.startswith("source_"):
-        original_fingerprint = MypyAnalyzer._fingerprint_typed_environment
-
-        def add_before_final_snapshot(
-            self: MypyAnalyzer,
-            *,
-            authenticated_metadata_hashes: dict[str, str] | None = None,
-            authenticated_metadata_roots: set[Path] | None = None,
-        ) -> str:
-            if authenticated_metadata_hashes is not None and mutation.startswith("source_"):
+                metadata.unlink()
+            if mutation.startswith("source_"):
                 assert self.verified_mypy_source_hashes
                 if mutation == "source_changed":
                     stub.write_text("def emit(value: int) -> None: ...\n", encoding="utf-8")
                 elif mutation == "source_removed":
                     stub.unlink()
-                else:
-
-                    def deny_source_read(path: Path) -> bytes:
-                        if path == stub:
-                            raise PermissionError("synthetic final source read denial")
-                        return raced_read(path)
-
-                    monkeypatch.setattr(Path, "read_bytes", deny_source_read)
-            if authenticated_metadata_hashes is not None and mutation == "added":
+            if mutation == "added":
                 assert str(metadata.resolve()) in authenticated_metadata_hashes
                 added = dist.parent / "race-pkg-2.0.dist-info"
                 added.mkdir()
                 added_metadata = added / "METADATA"
                 assert str(added_metadata.resolve()) not in authenticated_metadata_hashes
                 added_metadata.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
-            return original_fingerprint(
-                self,
-                authenticated_metadata_hashes=authenticated_metadata_hashes,
-                authenticated_metadata_roots=authenticated_metadata_roots,
-            )
-
-        monkeypatch.setattr(
-            MypyAnalyzer, "_fingerprint_typed_environment", add_before_final_snapshot
+        return original_fingerprint(
+            self,
+            authenticated_metadata_hashes=authenticated_metadata_hashes,
+            authenticated_metadata_roots=authenticated_metadata_roots,
         )
+
+    monkeypatch.setattr(MypyAnalyzer, "_fingerprint_typed_environment", mutate_before_final_digest)
     analyzer = MypyAnalyzer(tmp_path)
     dependencies = analyzer.analyze_endpoint(endpoint)
     sites = [site for site in dependencies.resolved_call_sites if site.line == 3]
@@ -1060,7 +1085,8 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
     )
     occurrence = audit.occurrences[0]
     if mutation == "stable":
-        assert reads == 2
+        assert capture_reads == 1
+        assert digest_reads == 1
         assert occurrence.audit_status == AuditCallStatus.MATCHED
         assert analyzer.verified_package_versions["race-pkg"] == "1.0"
     else:
