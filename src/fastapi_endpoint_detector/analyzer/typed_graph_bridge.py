@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +29,82 @@ if TYPE_CHECKING:
 
 class TypedGraphBridgeError(RuntimeError):
     """The retained mypy result cannot be authenticated as this inventory."""
+
+
+@dataclass(frozen=True)
+class DirectEdgeDiagnostic:
+    """One exact direct call from a physical handler occurrence to a changed symbol."""
+
+    occurrence_id: str
+    witness_id: str
+    caller_span: SourceSpan
+    changed_symbol: str
+    changed_span: SourceSpan | None
+
+
+@dataclass(frozen=True)
+class ShadowSideComparison:
+    """Side-bound graph evidence compared descriptively with combined legacy IDs."""
+
+    side: GraphSide
+    graph_occurrence_ids: tuple[str, ...]
+    graph_endpoint_ids: tuple[str, ...]
+    direct_evidence: tuple[DirectEdgeDiagnostic, ...]
+    legacy_candidate_ids: tuple[str, ...]
+    shared_endpoint_ids: tuple[str, ...]
+    graph_only_endpoint_ids: tuple[str, ...]
+    comparison_scope: str = "legacy candidates are combined across snapshots; not a parity oracle"
+
+
+def compare_shadow_side(
+    side: GraphSide, graph: TypedReverseGraph, result: Any, legacy_candidates: Iterable[Any]
+) -> ShadowSideComparison:
+    """Describe exact side evidence against the unsplit legacy candidate set.
+
+    `direct_evidence` records only proven direct physical edge witnesses, with their
+    source spans. Uncertain/deferred evidence stays in the graph query unchanged.
+    """
+    rows: list[DirectEdgeDiagnostic] = []
+    occurrence_ids: set[str] = set()
+    endpoint_ids: set[str] = set()
+    graph_witness_ids = {witness.witness_id for witness in graph.edges}
+    for evidence in (*result.evidence, *result.uncertain_evidence):
+        if evidence.side != side:
+            continue
+        occurrence_ids.add(evidence.occurrence.occurrence_id)
+        endpoint_ids.add(evidence.occurrence.endpoint_id)
+        witnesses = getattr(evidence, "witnesses", getattr(evidence, "supporting_witnesses", ()))
+        for witness in witnesses:
+            if (
+                witness.witness_id not in graph_witness_ids
+                or witness.caller != evidence.occurrence.symbol
+                or witness.callee != evidence.seed.symbol
+            ):
+                continue
+            span = witness.span
+            if span is not None:
+                rows.append(
+                    DirectEdgeDiagnostic(
+                        evidence.occurrence.occurrence_id,
+                        witness.witness_id,
+                        span,
+                        evidence.seed.symbol,
+                        evidence.seed.span,
+                    )
+                )
+    legacy = {candidate.endpoint.identifier for candidate in legacy_candidates}
+    graph_ids = set(endpoint_ids)
+    return ShadowSideComparison(
+        side=side,
+        graph_occurrence_ids=tuple(sorted(occurrence_ids)),
+        graph_endpoint_ids=tuple(sorted(graph_ids)),
+        direct_evidence=tuple(
+            sorted(set(rows), key=lambda item: (item.occurrence_id, item.witness_id))
+        ),
+        legacy_candidate_ids=tuple(sorted(legacy)),
+        shared_endpoint_ids=tuple(sorted(graph_ids & legacy)),
+        graph_only_endpoint_ids=tuple(sorted(graph_ids - legacy)),
+    )
 
 
 def retained_typed_build(  # noqa: PLR0912, PLR0915
@@ -239,15 +316,52 @@ def query_changed_lines(
     side: GraphSide,
 ) -> Any:
     """Reverse-query exact graph symbols whose source spans contain changed lines."""
+    return graph.query(
+        seeds_for_changed_lines(graph, inventory, changed_lines, side=side), side=side
+    )
+
+
+def seeds_for_changed_lines(
+    graph: TypedReverseGraph,
+    inventory: Any,
+    changed_lines: Iterable[tuple[str, int]],
+    *,
+    side: GraphSide,
+) -> tuple[ChangedSeed, ...]:
+    """Seed only the narrowest AST symbol definition containing each changed line."""
     paths = {record.relative_path: str(Path(record.path).resolve()) for record in inventory.files}
     seeds: set[ChangedSeed] = set()
     for relative, line in changed_lines:
         path = paths.get(Path(relative).as_posix())
         if path is None:
             continue
-        for symbol in graph.symbols:
+        containing = [
+            symbol
+            for symbol in graph.symbols
+            if symbol.span is not None
+            and symbol.span.path == path
+            and symbol.span.start_line <= line <= symbol.span.end_line
+        ]
+        if not containing:
+            continue
+        narrowest = min(
+            (
+                symbol.span.end_line - symbol.span.start_line,
+                symbol.span.end_column - symbol.span.start_column,
+            )
+            for symbol in containing
+            if symbol.span is not None
+        )
+        for symbol in containing:
             span = symbol.span
-            if span is not None and span.path == path and span.start_line <= line <= span.end_line:
+            if (
+                span is not None
+                and (
+                    span.end_line - span.start_line,
+                    span.end_column - span.start_column,
+                )
+                == narrowest
+            ):
                 seeds.add(ChangedSeed(side, symbol.fullname, span))
     ordered_seeds = tuple(
         sorted(
@@ -261,4 +375,4 @@ def query_changed_lines(
             ),
         )
     )
-    return graph.query(ordered_seeds, side=side)
+    return ordered_seeds
