@@ -6,6 +6,7 @@ from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import pytest
+from benchmarks.real_world import compare_evaluations as comparison
 from benchmarks.real_world.compare_evaluations import _load, compare
 from benchmarks.real_world.semantic_normalization import ALIAS_VERSION
 
@@ -466,3 +467,144 @@ def test_non_evaluable_only_selection_keeps_denominators_without_quality_scores(
             assert measure["baseline"] is measure["candidate"] is measure["delta"] is None
             assert measure["interval"] is None
             assert measure["undefined_samples"] == 10_000
+
+
+def _refresh_selected_identities(report):
+    evidence = report["comparison_evidence"]
+    evidence["selection_keys"] = sorted(
+        [{"repository": row["repository"], "pr": row["pr"]} for row in evidence["per_pr"]],
+        key=lambda item: (item["repository"], item["pr"]),
+    )
+    evidence["selection_sha256"] = hashlib.sha256(
+        json.dumps(evidence["selection_keys"], sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def test_repository_macro_preserves_repeated_repository_draws(monkeypatch):
+    monkeypatch.setattr(comparison, "SAMPLES", 1)
+    monkeypatch.setattr(comparison, "_sample_repositories", lambda _repos, _rng: ["A", "A", "B"])
+    keys = [("A", 1), ("B", 2)]
+    baseline, candidate = {}, {}
+    for mapping in (baseline, candidate):
+        for repository, pr in keys:
+            mapping[(repository, pr)] = {
+                "repository": repository,
+                "pr": pr,
+                "truth_positive": True,
+                "terminal_status": "evaluable",
+                "prediction_status": "completed",
+                "raw": {"tp": 1, "fp": 0, "fn": 1},
+                "normalized": {"tp": 1, "fp": 0, "fn": 1},
+            }
+    baseline[("B", 2)]["raw"] = baseline[("B", 2)]["normalized"] = {"tp": 1, "fp": 0, "fn": 0}
+    candidate[("A", 1)]["raw"] = candidate[("A", 1)]["normalized"] = {"tp": 1, "fp": 0, "fn": 0}
+    result = comparison._macro_metrics(baseline, candidate, keys, seed=13)
+    for metric in ("raw", "normalized"):
+        recall = result[metric]["repository_macro"]["recall"]
+        assert recall["baseline"] == pytest.approx(0.75)
+        assert recall["candidate"] == pytest.approx(0.75)
+        assert recall["delta"] == pytest.approx(0.0)
+        assert recall["paired_repository_cluster_interval"] == pytest.approx([1 / 6, 1 / 6])
+
+
+def test_negative_control_fp_does_not_enter_positive_macro(monkeypatch):
+    monkeypatch.setattr(comparison, "SAMPLES", 16)
+    baseline, candidate = reports(n=2)
+    for report in (baseline, candidate):
+        for row in report["comparison_evidence"]["per_pr"]:
+            row["repository"] = f"owner/repo-{row['pr']}"
+        _refresh_selected_identities(report)
+    without_control = compare(baseline, candidate, seed=23)
+    for report in (baseline, candidate):
+        report["comparison_evidence"]["per_pr"].append(
+            {
+                "repository": "owner/control",
+                "pr": 99,
+                "truth_status": "adjudicated",
+                "truth_positive": False,
+                "terminal_status": "evaluable",
+                "truth_sha256": "f" * 64,
+                "prediction_status": "completed",
+                "unresolved_count": 0,
+                "raw": {"tp": 0, "fp": int(report is candidate), "fn": 0},
+                "normalized": {"tp": 0, "fp": int(report is candidate), "fn": 0},
+            }
+        )
+        _refresh_selected_identities(report)
+    with_control = compare(baseline, candidate, seed=23)
+    assert with_control["macro_metrics"] == without_control["macro_metrics"]
+    assert with_control["metrics"]["raw"]["measures"]["false_positive_pr_rate"]["delta"] == 1
+    assert with_control["diagnostics"]["macro_subset_count"] == 2
+
+
+@pytest.mark.parametrize("eligible_repository_count", [0, 1, 2])
+def test_fp_interval_uses_eligible_negative_repository_clusters(
+    monkeypatch, eligible_repository_count
+):
+    monkeypatch.setattr(comparison, "SAMPLES", 24)
+    baseline, candidate = reports(n=3)
+    for report in (baseline, candidate):
+        rows = report["comparison_evidence"]["per_pr"]
+        for row in rows:
+            row["repository"] = f"owner/repo-{row['pr']}"
+        for index in range(1, eligible_repository_count + 1):
+            rows.append(
+                {
+                    "repository": f"owner/repo-{index}",
+                    "pr": index + 10,
+                    "truth_status": "adjudicated",
+                    "truth_positive": False,
+                    "terminal_status": "evaluable",
+                    "truth_sha256": f"{index + 10:064x}",
+                    "prediction_status": "completed",
+                    "unresolved_count": 0,
+                    "raw": {"tp": 0, "fp": int(report is candidate), "fn": 0},
+                    "normalized": {"tp": 0, "fp": int(report is candidate), "fn": 0},
+                }
+            )
+        _refresh_selected_identities(report)
+    result = compare(baseline, candidate, seed=31)
+    for metric in ("raw", "normalized"):
+        measures = result["metrics"][metric]["measures"]
+        fp = measures["false_positive_pr_rate"]
+        assert fp["eligible_repository_clusters"] == eligible_repository_count
+        assert all(
+            measures[name]["decision"] != "unsupported" for name in ("precision", "recall", "f1")
+        )
+        if eligible_repository_count == 2:
+            assert fp["baseline"] == 0 and fp["candidate"] == 1
+            assert fp["decision"] == "fail"
+            assert fp["interval"] == [1.0, 1.0]
+        else:
+            assert fp["decision"] == "unsupported"
+            assert fp["interval"] is None
+            assert fp["unsupported_reason"] == (
+                "no_negative_control_rows"
+                if not eligible_repository_count
+                else "fewer_than_two_negative_control_repositories"
+            )
+            if eligible_repository_count:
+                assert fp["baseline"] == 0 and fp["candidate"] == 1
+            else:
+                assert fp["baseline"] is None and fp["candidate"] is None
+
+
+def test_normalized_zero_denominator_does_not_relabel_positive_truth_as_control(monkeypatch):
+    monkeypatch.setattr(comparison, "SAMPLES", 8)
+    baseline, candidate = reports(n=2)
+    for report in (baseline, candidate):
+        for row in report["comparison_evidence"]["per_pr"]:
+            row["repository"] = f"owner/repo-{row['pr']}"
+            row["normalized"] = {"tp": 0, "fp": 0, "fn": 0}
+        _refresh_selected_identities(report)
+    fp = compare(baseline, candidate)["metrics"]["normalized"]["measures"]["false_positive_pr_rate"]
+    assert fp["baseline"] is None and fp["candidate"] is None
+    assert fp["unsupported_reason"] == "no_negative_control_rows"
+
+
+def test_comparator_result_schema_is_distinct_from_input_evidence(monkeypatch):
+    monkeypatch.setattr(comparison, "SAMPLES", 8)
+    report, _ = reports(n=2)
+    result = comparison.compare(report, report)
+    assert report["comparison_evidence"]["schema_version"] == 2
+    assert result["schema_version"] == 3

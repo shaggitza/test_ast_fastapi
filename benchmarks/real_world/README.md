@@ -378,15 +378,25 @@ the same behavior.
 
 ## Terminal evaluation evidence
 
+The comparator result uses schema 3. Its positive-only macro estimates preserve
+repeated repository draws, and false-positive-rate intervals report eligible
+negative-control repository counts and explicit unsupported reasons. Input
+comparison evidence remains schema 2.
+
 `evaluate.py` emits comparison-evidence schema 2 with exactly one row for each
 selected truth identity. `terminal_denominators` and the corresponding
 comparison report keep total, evaluable, positive, negative, unknown,
 not-evaluable, and prediction terminal-status counts visible. Unknown and
 not-evaluable truth rows have null confusion counts; missing, partial, and
 unresolved predictions remain explicit and are not counted as completed
-negative results. Comparative micro and macro metrics use paired completed
-predictions only. The comparator also reports seeded repository-cluster
-intervals and leave-one-repository-out sensitivity.
+negative results. Omitted adjudicated predictions remain in truth denominators
+as missing terminal rows with null confusion counts. Comparative micro metrics
+use paired completed evaluable predictions; PR and repository macros use their
+truth-positive subset, keeping negative-control FP diagnostics separate.
+Repeated repository bootstrap draws retain their multiplicity. FP intervals
+resample eligible paired negative-control repository clusters and are
+unsupported with fewer than two such clusters. The comparator also reports
+seeded intervals and leave-one-repository-out sensitivity.
 
 The comparator remains `report_only`: its input attestations and embedded
 hashes are not independently anchored to source artifact bytes. Its inherited

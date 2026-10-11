@@ -96,7 +96,7 @@ def _rates(rows: list[dict[str, Any]], metric: str) -> dict[str, float | None]:
     precision = tp / (tp + fp) if tp + fp else None
     recall = tp / (tp + fn) if tp + fn else None
     f1 = 2 * precision * recall / (precision + recall) if precision and recall else 0.0
-    negative = [row for row in rows if row[metric]["tp"] + row[metric]["fn"] == 0]
+    negative = [row for row in rows if row.get("truth_positive") is False]
     fp_rate = sum(row[metric]["fp"] > 0 for row in negative) / len(negative) if negative else None
     return {
         "precision": precision,
@@ -153,7 +153,12 @@ def _pr_rates(row: dict[str, Any], metric: str) -> dict[str, float | None]:
     return {"precision": precision, "recall": recall, "f1": f1}
 
 
-def _macro_values(rows: list[dict[str, Any]], metric: str) -> dict[str, Any]:
+def _macro_values(
+    rows: list[dict[str, Any]],
+    metric: str,
+    *,
+    repository_clusters: list[str | int] | None = None,
+) -> dict[str, Any]:
     pr_values = [_pr_rates(row, metric) for row in rows]
     names = ("precision", "recall", "f1")
 
@@ -162,9 +167,14 @@ def _macro_values(rows: list[dict[str, Any]], metric: str) -> dict[str, Any]:
         return sum(defined) / len(defined) if defined else None
 
     pr_macro = {name: mean(pr_values, name) for name in names}
-    by_repository: dict[str, list[dict[str, float | None]]] = defaultdict(list)
-    for row, values in zip(rows, pr_values, strict=True):
-        by_repository[row["repository"]].append(values)
+    clusters = (
+        [row["repository"] for row in rows] if repository_clusters is None else repository_clusters
+    )
+    if len(clusters) != len(rows):
+        raise ValueError("repository cluster labels must match the sampled rows")
+    by_repository: dict[str | int, list[dict[str, float | None]]] = defaultdict(list)
+    for cluster, values in zip(clusters, pr_values, strict=True):
+        by_repository[cluster].append(values)
     repo_values = [
         {name: mean(values, name) for name in names} for values in by_repository.values()
     ]
@@ -188,7 +198,9 @@ def _macro_metrics(
                         "candidate": None,
                         "delta": None,
                         "paired_repository_cluster_interval": None,
-                        "interval_status": "unsupported: no paired completed evaluable predictions",
+                        "interval_status": (
+                            "unsupported: no paired completed evaluable positive predictions"
+                        ),
                     }
                     for name in ("precision", "recall", "f1")
                 }
@@ -217,9 +229,23 @@ def _macro_metrics(
         else:
             for _ in range(SAMPLES):
                 sampled = _sample_repositories(repositories, rng)
-                sampled_keys = [key for repository in sampled for key in by_repository[repository]]
-                left_values = _macro_values([baseline[key] for key in sampled_keys], raw_metric)
-                right_values = _macro_values([candidate[key] for key in sampled_keys], raw_metric)
+                sampled_pairs = [
+                    (key, draw_index)
+                    for draw_index, repository in enumerate(sampled)
+                    for key in by_repository[repository]
+                ]
+                sampled_keys = [key for key, _cluster in sampled_pairs]
+                sampled_clusters = [cluster for _key, cluster in sampled_pairs]
+                left_values = _macro_values(
+                    [baseline[key] for key in sampled_keys],
+                    raw_metric,
+                    repository_clusters=sampled_clusters,
+                )
+                right_values = _macro_values(
+                    [candidate[key] for key in sampled_keys],
+                    raw_metric,
+                    repository_clusters=sampled_clusters,
+                )
                 for aggregation in ("pr_macro", "repository_macro"):
                     for name in ("precision", "recall", "f1"):
                         left = left_values[aggregation][name]
@@ -446,6 +472,12 @@ def compare(  # noqa: PLR0912, PLR0915
     # subset. Selected repositories with no eligible rows belong in the full
     # terminal denominators, but must not create empty quality bootstrap draws.
     repositories = sorted({repository for repository, _ in scoring_keys})
+    macro_keys = [key for key in scoring_keys if a[key]["truth_positive"] is True]
+    negative_keys = [key for key in scoring_keys if a[key]["truth_positive"] is False]
+    negative_repositories = sorted({repository for repository, _ in negative_keys})
+    # FP draws use their own eligible whole repository clusters and RNG. The
+    # quality draws and their seed sequence remain independent of this measure.
+    fp_rng = random.Random(seed)
     intervals: dict[str, dict[str, Any]] = {}
     for metric in ("raw", "normalized"):
         base_rates = _rates([a[key] for key in scoring_keys], metric)
@@ -471,11 +503,32 @@ def compare(  # noqa: PLR0912, PLR0915
                 sampled_b = [b[key] for key in sampled_keys]
                 left_rates, right_rates = _rates(sampled_a, metric), _rates(sampled_b, metric)
                 for name, samples in deltas.items():
+                    if name == "false_positive_pr_rate":
+                        continue
                     left_value, right_value = left_rates[name], right_rates[name]
                     if left_value is None or right_value is None:
                         undefined[name] += 1
                     else:
                         samples.append(right_value - left_value)
+        if len(negative_repositories) < 2:
+            undefined["false_positive_pr_rate"] = SAMPLES
+        else:
+            for _ in range(SAMPLES):
+                sampled_repos = _sample_repositories(negative_repositories, fp_rng)
+                sampled_keys = [
+                    key
+                    for repository in sampled_repos
+                    for key in scoring_keys
+                    if key[0] == repository
+                ]
+                left_fp = _rates([a[key] for key in sampled_keys], metric)["false_positive_pr_rate"]
+                right_fp = _rates([b[key] for key in sampled_keys], metric)[
+                    "false_positive_pr_rate"
+                ]
+                if left_fp is None or right_fp is None:
+                    undefined["false_positive_pr_rate"] += 1
+                else:
+                    deltas["false_positive_pr_rate"].append(right_fp - left_fp)
         measures: dict[str, Any] = {}
         for name, samples in deltas.items():
             supported = not undefined[name] and len(samples) == SAMPLES
@@ -509,6 +562,16 @@ def compare(  # noqa: PLR0912, PLR0915
                 "decision": "pass" if passed else "fail" if supported else "unsupported",
                 "undefined_samples": undefined[name],
             }
+            if name == "false_positive_pr_rate":
+                measures[name]["eligible_repository_clusters"] = len(negative_repositories)
+                if not supported:
+                    measures[name]["unsupported_reason"] = (
+                        "no_negative_control_rows"
+                        if not negative_keys
+                        else "fewer_than_two_negative_control_repositories"
+                        if len(negative_repositories) < 2
+                        else "zero_denominator_bootstrap_replicate"
+                    )
         intervals[metric] = {
             "method": "paired repository-cluster bootstrap percentile interval",
             "supported": all(item["decision"] != "unsupported" for item in measures.values()),
@@ -522,7 +585,7 @@ def compare(  # noqa: PLR0912, PLR0915
     }
     missing_delta = candidate_status["counts"]["missing"] - baseline_status["counts"]["missing"]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "method": "paired repository-cluster bootstrap percentile interval",
         "samples": SAMPLES,
         "seed": seed,
@@ -546,11 +609,14 @@ def compare(  # noqa: PLR0912, PLR0915
             },
             **rate_deltas,
         },
-        "macro_metrics": _macro_metrics(a, b, scoring_keys, seed),
+        "macro_metrics": _macro_metrics(a, b, macro_keys, seed),
         "leave_one_repository_out": _leave_one_repository_out(a, b, keys),
         "diagnostics": {
             "quality_subset": "evaluable truth identities with completed predictions in both runs",
             "quality_subset_count": len(scoring_keys),
+            "macro_subset": "paired completed evaluable truth-positive identities",
+            "macro_subset_count": len(macro_keys),
+            "fp_repository_cluster_count": len(negative_repositories),
             "baseline": baseline_status,
             "candidate": candidate_status,
             "deltas_candidate_minus_baseline": {

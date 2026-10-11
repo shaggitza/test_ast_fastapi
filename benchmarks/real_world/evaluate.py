@@ -1044,11 +1044,6 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     not_evaluable_prs = sum(
         1 for record in truth.values() if record.get("status") == "not_evaluable"
     )
-    missing_prediction_keys = adjudicated_keys - prediction_keys
-    if missing_prediction_keys:
-        raise ValueError(
-            f"predictions are missing selected adjudicated keys: {sorted(missing_prediction_keys)}"
-        )
     census: dict[tuple[str, int], dict[str, Any]] | None = None
     census_sha256: str | None = None
     if args.route_census is not None:
@@ -1094,6 +1089,26 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             continue
         evaluated += 1
         expected = entrypoints(expected_record)
+        if expected:
+            truth_positive_prs += 1
+        if record_key not in predictions:
+            per_pr_evidence[record_key] = {
+                "repository": record_key[0],
+                "pr": record_key[1],
+                "truth_status": expected_record.get("status", "adjudicated"),
+                "truth_positive": bool(expected),
+                "terminal_status": "evaluable",
+                "truth_sha256": hashlib.sha256(
+                    json.dumps(
+                        truth_source_by_key[record_key], sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest(),
+                "prediction_status": "missing",
+                "unresolved_count": None,
+                "raw": None,
+                "normalized": None,
+            }
+            continue
         reachability_only = {
             item["id"] for item in expected_record.get("reachability_only_entrypoints", [])
         }
@@ -1140,9 +1155,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             for metric, count in exact_stage.items():
                 exact_stage_totals[metric] += count
                 exact_stage_repositories[record_key[0]][metric] += count
-        if expected:
-            truth_positive_prs += 1
-        else:
+        if not expected:
             if predicted:
                 negative_controls_with_fp += 1
             if low_predicted:
