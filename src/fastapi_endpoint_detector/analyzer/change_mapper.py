@@ -1775,7 +1775,11 @@ class ChangeMapper:
         if removed_lines and self.baseline_app_path is not None and self._baseline_failure is None:
             source_path = diff_file.source_path or diff_file.path
             baseline_file = diff_file.model_copy(update={"path": source_path})
-            for endpoint in self.baseline_mypy_registry:
+            # Direct-handler evidence is file-local: source line numbers only
+            # identify a handler when the changed path is that handler's file.
+            # Dependency tracing below remains cross-file and therefore still
+            # visits every baseline endpoint.
+            for endpoint in self.baseline_mypy_registry.get_by_file(source_path):
                 direct = self._check_direct_handler_change(
                     endpoint, baseline_file, [], removed_lines
                 )
@@ -1789,6 +1793,8 @@ class ChangeMapper:
                     processed_removed_lines.update(
                         line for line in removed_lines if handler.line_number <= line <= handler_end
                     )
+
+            for endpoint in self.baseline_mypy_registry:
                 result = self._check_mypy_dependency(
                     endpoint, baseline_file, [], removed_lines, self.baseline_mypy_analyzer
                 )
