@@ -1,0 +1,154 @@
+{
+  "changed_files": [
+    {
+      "additions": 8,
+      "changes": 12,
+      "deletions": 4,
+      "path": "app/job_watch.py",
+      "status": "modified",
+      "target_git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4"
+    },
+    {
+      "additions": 118,
+      "changes": 118,
+      "deletions": 0,
+      "path": "tests/test_job_watch.py",
+      "status": "modified",
+      "target_git_blob_sha": "e4c2f19939e6f062f2e6b3cfdd6a9f00e400491c"
+    }
+  ],
+  "commits": {
+    "baseline_source_snapshot_sha": "296f36f2950ddce3aa15f9efbf0c2b4b18785038",
+    "merge_commit_sha": "27900274b8caf6ffb6911a4e78339212340ed17c",
+    "merge_parent_shas": [
+      "296f36f2950ddce3aa15f9efbf0c2b4b18785038",
+      "a9ed628316d2088ac2372466bb3d76983df63da0"
+    ],
+    "merge_tree_sha": "48c45af6ef69447cfa72b367c2dc81e5854e71b7",
+    "pull_base_sha": "a9546538b0ee976ea81989d732f6da3a857fb3f4",
+    "pull_head_is_merge_parent": true,
+    "pull_head_sha": "a9ed628316d2088ac2372466bb3d76983df63da0",
+    "target_source_snapshot_sha": "27900274b8caf6ffb6911a4e78339212340ed17c"
+  },
+  "license": {
+    "copyright": "Copyright (c) 2026 wagga40",
+    "fixture_copy": "source/context/LICENSE.txt",
+    "notice": "Only complete files from app/ and tests/ are included. Third-party bundled content was not copied.",
+    "sha256": "469f855ef6b5dfb722c07392c26df72725deeb7187a311203552c8be7e0e5e28",
+    "spdx": "MIT",
+    "upstream_path": "LICENSE"
+  },
+  "merged_at": "2026-10-10T14:01:12Z",
+  "network": {
+    "aggregate_source_limit_bytes": 8388608,
+    "attempt_log": "/tmp/gh99-r6-attempts.jsonl",
+    "attempt_log_correction_records": 1,
+    "attempt_log_sha256": "d5cebb939e490c472a8bd2378efd4cc5dd15f75391bb57fd29ab908e7dda3d7b",
+    "attempts": 35,
+    "metadata_search_response_bytes": 868208,
+    "metadata_search_response_sha256": "5416398dd45c8d8012d2d43dfec7b3146086d53a30ba4ab952bf73c6e4eeb104",
+    "one_overshoot": {
+      "attempt": 5,
+      "bytes": 2097153,
+      "excess_bytes": 1,
+      "kind": "recursive Git tree metadata",
+      "saved_or_parsed": false
+    },
+    "per_attempt_limit_bytes": 2097152,
+    "source_blob_decoded_bytes": 246424
+  },
+  "patch": {
+    "bytes": 8762,
+    "encoded_sha256": "a559e1f882e0d2bc47469e396543863826f8625536547019a912c6930410dc1a",
+    "encoding": "base64; decoded bytes are the exact GitHub API patch",
+    "note": "Contains exact GitHub API patch hunks with standard diff headers; full baseline/target source snapshots are stored separately.",
+    "path": "github-pr.patch.base64",
+    "sha256": "6df3a9fe01565b2054e40b5a0b6aa015fce82ea651c859f4f81ad3ba6dd5fa0d"
+  },
+  "pull_request": 7,
+  "repository": "wagga40/LogsTotal",
+  "schema": "gh99-real-pr-source-fixture-v1",
+  "scope": {
+    "runtime_or_durable_claimed": false,
+    "source_is_complete_files": true,
+    "typed_sqlalchemy_positive_claimed": false,
+    "upstream_executed": false,
+    "upstream_imported": false,
+    "upstream_installed": false,
+    "whole_project_snapshot": false
+  },
+  "selection": {
+    "exclusion_ledger_path": "/tmp/gh99-r6-complete-exclusion-ledger-v2-20261011.json",
+    "exclusion_ledger_sha256": "3fd2a41063e3bcb5215415170cd06d56b5c083b27ced1f54ce5a48509360566d",
+    "preprediction_label_path": "expected-static-labels-before-prediction.json",
+    "preprediction_label_sha256": "9dcd1bbe3462e57d66e316f5862f017c95a9b7d6dfc6929aeebdc3216b50b68b",
+    "selected_identity_excluded": false,
+    "selection_rule": "metadata title only; first eligible merged PR outside this analyzer repository whose title explicitly named a SQL savepoint/transaction boundary; no backfill",
+    "shortlist_path": "/tmp/gh99-r6-metadata-shortlist-20261011.json",
+    "shortlist_sha256": "dfce62e2a5f8e9cf3d08dd273c52016effab208a31ff70883847a0eb7859c109"
+  },
+  "source_files": {
+    "source/base/app/job_watch.py.txt": {
+      "bytes": 16585,
+      "git_blob_sha1": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+      "git_mode": "100644",
+      "sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    "source/base/tests/test_job_watch.py.txt": {
+      "bytes": 28990,
+      "git_blob_sha1": "377cf404143623b2c3f89bf8d9047b426924c533",
+      "git_mode": "100644",
+      "sha256": "5322865ca690d2c267da61a5e5397478d698e2ee3d11157674c13306a304f8c4"
+    },
+    "source/context/LICENSE.txt": {
+      "bytes": 1401,
+      "git_blob_sha1": "efd176a5955096239c689026f11aab54d7772fd0",
+      "git_mode": "100644",
+      "sha256": "469f855ef6b5dfb722c07392c26df72725deeb7187a311203552c8be7e0e5e28"
+    },
+    "source/context/app/activity.py.txt": {
+      "bytes": 17779,
+      "git_blob_sha1": "39d6beb1493c1f61a820899ab312a703dacc6cf4",
+      "git_mode": "100644",
+      "sha256": "a8b2c044802782ce3047651ffc5bd73a8ba5300afb9278cbb8423e603c2dfad1"
+    },
+    "source/context/app/database.py.txt": {
+      "bytes": 11948,
+      "git_blob_sha1": "3c3f7cf9c65c705a235139f6fb33222289288271",
+      "git_mode": "100644",
+      "sha256": "9c08ff447961a9322cd27b59a7b012fa71df22f776fb1bf43b51a3c3bbaee6c6"
+    },
+    "source/context/app/main.py.txt": {
+      "bytes": 20906,
+      "git_blob_sha1": "5f0c043f995c4cb78b9e95566aece6737ab37928",
+      "git_mode": "100644",
+      "sha256": "84a02afafef4e8af7f67f11aacdaae050424ff206e32581f669ff444c5cf1c6e"
+    },
+    "source/context/app/routers/jobs.py.txt": {
+      "bytes": 91798,
+      "git_blob_sha1": "3c815c4f2ede9b388384b6c41e31afd2449e344d",
+      "git_mode": "100644",
+      "sha256": "50d33635629a70c2e43b45f55bd54204a9d2bf470d5a0684e4c9ae4c7957717e"
+    },
+    "source/context/pyproject.toml.txt": {
+      "bytes": 5177,
+      "git_blob_sha1": "b7bd6fc2175eafa68305175b9f196a06e56d7a05",
+      "git_mode": "100644",
+      "sha256": "8ddddf7ad6552a8405bb133ee2d8a04dc6046e58426dc3dcb48d123a9920e28e"
+    },
+    "source/target/app/job_watch.py.txt": {
+      "bytes": 16968,
+      "git_blob_sha1": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+      "git_mode": "100644",
+      "sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    "source/target/tests/test_job_watch.py.txt": {
+      "bytes": 34872,
+      "git_blob_sha1": "e4c2f19939e6f062f2e6b3cfdd6a9f00e400491c",
+      "git_mode": "100644",
+      "sha256": "82bf19678ec7017fffaee112d4d8135872953c6c36c35738bdd8a00ff356b7e7"
+    }
+  },
+  "title": "[medium] fix(job-watch): add the new row inside its savepoint so a lost insert race stays contained",
+  "url": "https://github.com/wagga40/LogsTotal/pull/7"
+}
