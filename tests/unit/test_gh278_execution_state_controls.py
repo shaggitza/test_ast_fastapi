@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.config import Config, ParserConfig
 
 
 def _diff(path: str, line: int) -> str:
@@ -18,6 +19,16 @@ def _diff(path: str, line: int) -> str:
     )
 
 
+def _mapper(tmp_path: Path, *, use_cache: bool = False) -> ChangeMapper:
+    """Keep semantic fixtures local and bounded while retaining real mypy analysis."""
+    return ChangeMapper(
+        tmp_path,
+        config=Config(parser=ParserConfig(follow_imports=False)),
+        secure_ast=True,
+        use_cache=use_cache,
+    )
+
+
 def test_execution_semantics_cache_rejects_previous_policy_and_accepts_warm_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -27,7 +38,7 @@ def test_execution_semantics_cache_rejects_previous_policy_and_accepts_warm_cach
         "app=FastAPI()\n@app.get('/cache')\ndef handler():\n    return target()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=True)
+    mapper = _mapper(tmp_path, use_cache=True)
     endpoints = mapper.registry.get_all()
     mapper.mypy_analyzer.analyze_endpoints(endpoints, use_cache=False)
     mapper.mypy_analyzer._save_cache()
@@ -71,7 +82,7 @@ def test_partial_bound_callback_does_not_shift_second_argument_to_first(tmp_path
         "    return bound(second)\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
 
     first_change = mapper.analyze_diff(_diff("helpers.py", 2))
     second_change = mapper.analyze_diff(_diff("helpers.py", 5))
@@ -96,7 +107,7 @@ def test_partial_invocation_keyword_overrides_creation_capture(tmp_path: Path) -
         "    return bound(callback=second)\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     assert {
         item.endpoint.identifier
         for item in mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints
@@ -118,7 +129,7 @@ def test_invalid_partial_positional_keyword_duplicate_is_not_promoted(tmp_path: 
         "    return bound(callback=second)\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     deps = mapper.mypy_analyzer.analyze_endpoints(mapper.registry.get_all(), use_cache=False)
     endpoint_deps = next(iter(deps.values()))
     assert any(
@@ -144,7 +155,7 @@ def test_partial_keeps_creation_time_callback_across_rebinding(tmp_path: Path) -
         "    return bound()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     assert {
         item.endpoint.identifier
         for item in mapper.analyze_diff(_diff("helpers.py", 1)).candidate_endpoints
@@ -167,7 +178,7 @@ def test_partial_captures_finite_string_argument_at_creation(tmp_path: Path) -> 
         "    path = '/new'\n    return bound()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     assert {
         item.endpoint.identifier
         for item in mapper.analyze_diff(_diff("helpers.py", 1)).candidate_endpoints
@@ -187,7 +198,7 @@ def test_partial_keyword_positional_collision_is_not_traced(tmp_path: Path) -> N
         "    bound = partial(run, callback=first)\n    return bound(second)\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     endpoint_dependencies = mapper.mypy_analyzer.analyze_endpoints(
         mapper.registry.get_all(), use_cache=False
     )
@@ -211,7 +222,7 @@ def test_literal_true_loop_break_uses_mandatory_assignment(tmp_path: Path) -> No
         "    return callback()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     assert {
         item.endpoint.identifier
         for item in mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints
@@ -227,7 +238,7 @@ def test_mandatory_loop_lambda_execution_is_established(tmp_path: Path) -> None:
         "        callback()\n        break\n    return 0\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     lambda_diff = (
         "diff --git a/main.py b/main.py\n"
         "--- a/main.py\n+++ b/main.py\n"
@@ -260,7 +271,7 @@ def test_handler_joins_callable_state_at_each_raising_call(tmp_path: Path) -> No
         "        callback()\n    return 0\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     for line in (2, 3):
         report = mapper.analyze_diff(_diff("helpers.py", line))
         assert {item.endpoint.identifier for item in report.candidate_endpoints} == {
@@ -286,7 +297,7 @@ def test_handler_keeps_intermediate_callable_at_raising_expression(
         "    except Exception:\n        callback()\n    return 0\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
 
     intermediate = mapper.analyze_diff(_diff("helpers.py", 2))
     assert {item.endpoint.identifier for item in intermediate.candidate_endpoints} == {
@@ -309,7 +320,7 @@ def test_exposing_partial_invalidates_its_captured_callback(tmp_path: Path) -> N
         "    mutate(bound)\n    return bound()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     report = mapper.analyze_diff(_diff("helpers.py", 2))
     assert report.candidate_endpoints == []
 
@@ -322,7 +333,7 @@ def test_true_loop_rejects_earlier_continue_and_dead_body_calls(tmp_path: Path) 
         "        continue\n        target()\n        break\n    return 0\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     report = mapper.analyze_diff(_diff("helpers.py", 1))
     assert report.candidate_endpoints == []
 
@@ -335,7 +346,7 @@ def test_comprehension_callback_is_possible_execution(tmp_path: Path) -> None:
         "    [callback() for item in ()]\n    return 0\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     report = mapper.analyze_diff(
         "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n"
         "@@ -5,1 +5,1 @@\n-    callback = lambda: target()\n+    callback = lambda: target() + 1\n"
@@ -362,7 +373,7 @@ def test_handler_preserves_pre_try_callable_as_exception_target(tmp_path: Path) 
         "        callback()\n    return 0\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     assert {
         item.endpoint.identifier
         for item in mapper.analyze_diff(_diff("helpers.py", 1)).candidate_endpoints
@@ -385,7 +396,7 @@ def test_handler_keeps_callable_before_resolved_unbound_local_load(tmp_path: Pat
         "    return 0\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
 
     intermediate = mapper.analyze_diff(_diff("helpers.py", 2))
     assert {item.endpoint.identifier for item in intermediate.candidate_endpoints} == {
@@ -436,7 +447,7 @@ def test_exception_snapshots_preserve_local_binding_guards(
         ]
     )
     (tmp_path / "main.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
 
     second = mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints
     third = mapper.analyze_diff(_diff("helpers.py", 3)).candidate_endpoints
@@ -456,9 +467,7 @@ def test_conditional_break_loop_remains_conservative(tmp_path: Path) -> None:
         "        break\n    return callback()\n",
         encoding="utf-8",
     )
-    report = ChangeMapper(tmp_path, secure_ast=True, use_cache=False).analyze_diff(
-        _diff("helpers.py", 2)
-    )
+    report = _mapper(tmp_path).analyze_diff(_diff("helpers.py", 2))
     assert {item.endpoint.identifier for item in report.candidate_endpoints} == {"GET /loop"}
     assert all(item.confidence.value != "high" for item in report.candidate_endpoints)
 
@@ -477,7 +486,7 @@ def test_unknown_branch_callable_join_keeps_both_possible_targets(tmp_path: Path
         "    return callback()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
 
     first = mapper.analyze_diff(_diff("helpers.py", 2))
     second = mapper.analyze_diff(_diff("helpers.py", 5))
@@ -510,9 +519,7 @@ def test_try_assignment_keeps_normal_and_exception_callable_targets(tmp_path: Pa
         "    return callback()\n",
         encoding="utf-8",
     )
-    report = ChangeMapper(tmp_path, secure_ast=True, use_cache=False).analyze_diff(
-        _diff("helpers.py", 5)
-    )
+    report = _mapper(tmp_path).analyze_diff(_diff("helpers.py", 5))
 
     assert {item.endpoint.identifier for item in report.candidate_endpoints} == {"GET /try"}
 
@@ -535,7 +542,7 @@ def test_callable_union_cap_is_endpoint_scoped_and_cached(tmp_path: Path) -> Non
         "    return callback()\n\n@app.get('/plain')\ndef plain():\n    return unrelated()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=True)
+    mapper = _mapper(tmp_path, use_cache=True)
     mapper.mypy_analyzer.MAX_POINTS_TO_TARGETS = 2
     endpoint_list = mapper.registry.get_all()
     dependencies = mapper.mypy_analyzer.analyze_endpoints(endpoint_list, use_cache=False)
@@ -584,7 +591,7 @@ def test_finite_object_union_overflow_is_endpoint_incomplete(tmp_path: Path) -> 
         "    return service.run()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     mapper.mypy_analyzer.MAX_POINTS_TO_TARGETS = 2
     endpoint = mapper.registry.get_all()[0]
     dependencies = mapper.mypy_analyzer.analyze_endpoints([endpoint], use_cache=False)
@@ -611,7 +618,7 @@ def test_depth_limit_counts_only_resolved_project_targets(tmp_path: Path) -> Non
         "    return outer()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+    mapper = _mapper(tmp_path)
     mapper.mypy_analyzer.max_depth = 1
     endpoints = mapper.registry.get_all()
     dependencies = mapper.mypy_analyzer.analyze_endpoints(endpoints, use_cache=False)
