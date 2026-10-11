@@ -598,7 +598,7 @@ class MypyAnalyzer:
     # Schema 27 distinguishes typed execution evidence and creation-time partial
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
-    EXECUTION_STATE_POLICY = "conditional-elif-try-else-finally-v8-partial-function-capture"
+    EXECUTION_STATE_POLICY = "v9-conditional-finally-partial-capture-declared-dependency-overrides"
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
     MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
@@ -2734,6 +2734,23 @@ class MypyAnalyzer:
             _path_index=path_index,
         )
         self._active_endpoint_dependencies = deps
+        graph = endpoint.dependency_graph
+        dependency_overrides_visible = graph is not None and any(
+            item.code == "dependency_overrides_visible" for item in graph.limitations
+        )
+        if graph is not None and dependency_overrides_visible:
+            # The runtime graph describes declared providers, not the visible
+            # replacement mapping. Retain those providers as conditional
+            # reachability without claiming they remain effective.
+            for item in graph.limitations:
+                if item.code == "dependency_overrides_visible":
+                    deps.add_analysis_limitation(
+                        AnalysisLimitation(
+                            str(item.source_path.resolve()),
+                            item.source_line,
+                            "DEPENDENCY_OVERRIDES_UNMODELED",
+                        )
+                    )
 
         handler = endpoint.handler
         if not handler.file_path or not self._trees:
@@ -2847,8 +2864,11 @@ class MypyAnalyzer:
                 dependency_fullname,
                 dependency_start,
                 dependency_end,
+                low_confidence=dependency_overrides_visible,
             )
-            visited[(dependency_fullname, False, None, (), (), ())] = dependency_depth
+            visited[(dependency_fullname, dependency_overrides_visible, None, (), (), ())] = (
+                dependency_depth
+            )
             if dependency_depth < self.max_depth:
                 self._trace_references(
                     dependency_node,
@@ -2866,6 +2886,7 @@ class MypyAnalyzer:
                     visited,
                     self._import_map_for_tree(dependency_tree, dependency_module),
                     depth=dependency_depth,
+                    low_confidence_path=dependency_overrides_visible,
                 )
             elif dependency_module in self._project_modules:
                 call_site = next(
@@ -6063,6 +6084,7 @@ class MypyAnalyzer:
                             lambda_name,
                             lambda_line,
                             lambda_line,
+                            low_confidence=low_confidence_path,
                         )
                         deps.add_call_stack(lambda_path, lambda_stack)
                         lambda_imports = self._import_map_for_tree(
@@ -6293,6 +6315,7 @@ class MypyAnalyzer:
                                 alias_fullname,
                                 header_start,
                                 header_end,
+                                low_confidence=low_confidence_path,
                             )
                         traced = True
 
@@ -6516,6 +6539,7 @@ class MypyAnalyzer:
                         call_site.canonical_symbol,
                         header_start,
                         header_end,
+                        low_confidence=low_confidence_path,
                     )
 
             # A returned lambda can retain a typed exact NameExpr while its
