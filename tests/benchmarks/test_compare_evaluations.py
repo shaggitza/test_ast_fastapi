@@ -607,4 +607,104 @@ def test_comparator_result_schema_is_distinct_from_input_evidence(monkeypatch):
     report, _ = reports(n=2)
     result = comparison.compare(report, report)
     assert report["comparison_evidence"]["schema_version"] == 2
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
+
+
+def _quality_cluster_reports(*, control_fp=0):
+    baseline, candidate = reports(n=3)
+    for report in (baseline, candidate):
+        rows = report["comparison_evidence"]["per_pr"]
+        for row in rows:
+            row["repository"] = f"owner/repo-{row['pr']}"
+        rows[-1].update(
+            truth_positive=False,
+            raw={"tp": 0, "fp": control_fp, "fn": 0},
+            normalized={"tp": 0, "fp": control_fp, "fn": 0},
+        )
+        _refresh_selected_identities(report)
+    return baseline, candidate
+
+
+@pytest.mark.parametrize("control_fp", [0, 1])
+def test_quality_intervals_use_their_denominator_bearing_clusters(monkeypatch, control_fp):
+    monkeypatch.setattr(comparison, "SAMPLES", 24)
+    baseline, candidate = _quality_cluster_reports(control_fp=control_fp)
+    result = compare(baseline, candidate, seed=19)
+    assert result["denominators"]["total"] == 3
+    assert result["gate_decision"] == "report_only"
+    for metric in ("raw", "normalized"):
+        measures = result["metrics"][metric]["measures"]
+        for name in ("precision", "recall", "f1"):
+            measure = measures[name]
+            expected = 3 if control_fp and name in {"precision", "f1"} else 2
+            assert measure["eligible_repository_clusters"] == expected
+            assert measure["undefined_samples"] == 0
+            assert measure["decision"] != "unsupported"
+            assert measure["interval"] is not None
+            assert measure["interval_scope"] == "paired denominator-bearing repository clusters"
+            assert measure["degenerate_single_cluster"] is False
+        assert measures["false_positive_pr_rate"]["eligible_repository_clusters"] == 1
+        assert measures["false_positive_pr_rate"]["decision"] == "unsupported"
+
+
+def test_quality_intervals_retain_one_sided_denominator_contributions(monkeypatch):
+    monkeypatch.setattr(comparison, "SAMPLES", 8)
+    baseline, candidate = reports(n=2)
+    for report in (baseline, candidate):
+        rows = report["comparison_evidence"]["per_pr"]
+        for row in rows:
+            row["repository"] = f"owner/repo-{row['pr']}"
+            row["raw"] = row["normalized"] = {"tp": 0, "fp": 0, "fn": 1}
+        _refresh_selected_identities(report)
+    baseline["comparison_evidence"]["per_pr"][0]["raw"] = {"tp": 1, "fp": 0, "fn": 0}
+    candidate["comparison_evidence"]["per_pr"][1]["raw"] = {"tp": 1, "fp": 0, "fn": 0}
+    monkeypatch.setattr(
+        comparison, "_sample_repositories", lambda repos, _rng: [repos[0], repos[0]]
+    )
+    result = compare(baseline, candidate)
+    precision = result["metrics"]["raw"]["measures"]["precision"]
+    assert precision["eligible_repository_clusters"] == 2
+    assert precision["undefined_samples"] == 8
+    assert precision["decision"] == "unsupported"
+    assert precision["interval"] is None
+    assert precision["unsupported_reason"] == "zero_denominator_bootstrap_replicate"
+
+
+def test_clean_negative_only_quality_has_no_fabricated_f1(monkeypatch):
+    monkeypatch.setattr(comparison, "SAMPLES", 8)
+    baseline, candidate = reports(n=2)
+    for report in (baseline, candidate):
+        for row in report["comparison_evidence"]["per_pr"]:
+            row["repository"] = f"owner/repo-{row['pr']}"
+            row.update(
+                truth_positive=False,
+                raw={"tp": 0, "fp": 0, "fn": 0},
+                normalized={"tp": 0, "fp": 0, "fn": 0},
+            )
+        _refresh_selected_identities(report)
+    result = compare(baseline, candidate)
+    for metric in ("raw", "normalized"):
+        for name in ("precision", "recall", "f1"):
+            measure = result["metrics"][metric]["measures"][name]
+            assert measure["eligible_repository_clusters"] == 0
+            assert measure["baseline"] is measure["candidate"] is measure["interval"] is None
+            assert measure["decision"] == "unsupported"
+            assert measure["undefined_samples"] == 8
+            assert measure["unsupported_reason"] == "no_denominator_bearing_repositories"
+
+
+def test_single_denominator_cluster_is_explicitly_degenerate(monkeypatch):
+    monkeypatch.setattr(comparison, "SAMPLES", 8)
+    baseline, candidate = _quality_cluster_reports()
+    for report in (baseline, candidate):
+        rows = report["comparison_evidence"]["per_pr"]
+        rows[1]["repository"] = rows[0]["repository"]
+        _refresh_selected_identities(report)
+    result = compare(baseline, candidate)
+    for metric in ("raw", "normalized"):
+        for name in ("precision", "recall", "f1"):
+            measure = result["metrics"][metric]["measures"][name]
+            assert measure["eligible_repository_clusters"] == 1
+            assert measure["undefined_samples"] == 0
+            assert measure["interval"] is not None
+            assert measure["degenerate_single_cluster"] is True

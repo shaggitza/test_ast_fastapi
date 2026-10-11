@@ -95,7 +95,8 @@ def _rates(rows: list[dict[str, Any]], metric: str) -> dict[str, float | None]:
     fn = sum(row[metric]["fn"] for row in rows)
     precision = tp / (tp + fp) if tp + fp else None
     recall = tp / (tp + fn) if tp + fn else None
-    f1 = 2 * precision * recall / (precision + recall) if precision and recall else 0.0
+    f1_denominator = 2 * tp + fp + fn
+    f1 = 2 * tp / f1_denominator if f1_denominator else None
     negative = [row for row in rows if row.get("truth_positive") is False]
     fp_rate = sum(row[metric]["fp"] > 0 for row in negative) / len(negative) if negative else None
     return {
@@ -460,7 +461,6 @@ def compare(  # noqa: PLR0912, PLR0915
     # booleans are self-asserted, and the comparator cannot verify them against an
     # independent trust root or the original artifact bytes.
     attested = False
-    rng = random.Random(seed)
     scoring_keys = [
         key
         for key in keys
@@ -486,30 +486,41 @@ def compare(  # noqa: PLR0912, PLR0915
             name: [] for name in ("precision", "recall", "f1", "false_positive_pr_rate")
         }
         undefined: dict[str, int] = dict.fromkeys(deltas, 0)
-        if not repositories:
-            # With no quality clusters, every quality interval is unsupported.
-            # Retain terminal denominators instead of fabricating zero scores.
-            undefined = dict.fromkeys(deltas, SAMPLES)
-        else:
+        repository_rates = {
+            repository: (
+                _rates([a[key] for key in scoring_keys if key[0] == repository], metric),
+                _rates([b[key] for key in scoring_keys if key[0] == repository], metric),
+            )
+            for repository in repositories
+        }
+        quality_repositories: dict[str, list[str]] = {}
+        for name in ("precision", "recall", "f1"):
+            eligible = [
+                repository
+                for repository, (left, right) in repository_rates.items()
+                if left[name] is not None or right[name] is not None
+            ]
+            quality_repositories[name] = eligible
+            if not eligible:
+                undefined[name] = SAMPLES
+                continue
+            # Exclude only clusters with no denominator on either system.
+            # Keep one-sided contributions and every row in each repeated draw.
+            measure_rng = random.Random(seed)
             for _ in range(SAMPLES):
-                sampled_repos = _sample_repositories(repositories, rng)
+                sampled_repos = _sample_repositories(eligible, measure_rng)
                 sampled_keys = [
                     key
                     for repository in sampled_repos
                     for key in scoring_keys
                     if key[0] == repository
                 ]
-                sampled_a = [a[key] for key in sampled_keys]
-                sampled_b = [b[key] for key in sampled_keys]
-                left_rates, right_rates = _rates(sampled_a, metric), _rates(sampled_b, metric)
-                for name, samples in deltas.items():
-                    if name == "false_positive_pr_rate":
-                        continue
-                    left_value, right_value = left_rates[name], right_rates[name]
-                    if left_value is None or right_value is None:
-                        undefined[name] += 1
-                    else:
-                        samples.append(right_value - left_value)
+                left_value = _rates([a[key] for key in sampled_keys], metric)[name]
+                right_value = _rates([b[key] for key in sampled_keys], metric)[name]
+                if left_value is None or right_value is None:
+                    undefined[name] += 1
+                else:
+                    deltas[name].append(right_value - left_value)
         if len(negative_repositories) < 2:
             undefined["false_positive_pr_rate"] = SAMPLES
         else:
@@ -532,7 +543,7 @@ def compare(  # noqa: PLR0912, PLR0915
         measures: dict[str, Any] = {}
         for name, samples in deltas.items():
             supported = not undefined[name] and len(samples) == SAMPLES
-            bounds = _interval(samples) if samples else None
+            bounds = _interval(samples) if supported else None
             threshold = -THRESHOLD if name in {"precision", "recall", "f1"} else THRESHOLD
             bound = None
             if bounds:
@@ -562,6 +573,17 @@ def compare(  # noqa: PLR0912, PLR0915
                 "decision": "pass" if passed else "fail" if supported else "unsupported",
                 "undefined_samples": undefined[name],
             }
+            if name != "false_positive_pr_rate":
+                eligible_count = len(quality_repositories[name])
+                measures[name]["eligible_repository_clusters"] = eligible_count
+                measures[name]["interval_scope"] = "paired denominator-bearing repository clusters"
+                measures[name]["degenerate_single_cluster"] = eligible_count == 1 and supported
+                if not supported:
+                    measures[name]["unsupported_reason"] = (
+                        "no_denominator_bearing_repositories"
+                        if not eligible_count
+                        else "zero_denominator_bootstrap_replicate"
+                    )
             if name == "false_positive_pr_rate":
                 measures[name]["eligible_repository_clusters"] = len(negative_repositories)
                 if not supported:
@@ -585,7 +607,7 @@ def compare(  # noqa: PLR0912, PLR0915
     }
     missing_delta = candidate_status["counts"]["missing"] - baseline_status["counts"]["missing"]
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "method": "paired repository-cluster bootstrap percentile interval",
         "samples": SAMPLES,
         "seed": seed,

@@ -288,14 +288,24 @@ broader cross-surface research score. Raw exact and normalized metrics are both
 reported. Primary metrics are micro recall, precision, F1, positive-PR macro
 metrics, negative-control specificity, unresolved diagnostics, and separately
 named coverage rates. Evaluation rejects duplicate rows, malformed candidates,
-unknown schema-v3 keys, and missing selected adjudicated predictions before
-producing its aggregate score. In comparison evidence, baseline and candidate
+unknown schema-v3 keys, and missing selected adjudicated truth rows. Missing
+predictions for selected adjudicated truth remain terminal `missing` rows with
+null confusion counts and are retained in the full selection denominators;
+quality aggregates use only submitted completed predictions. In comparison
+evidence, baseline and candidate
 are paired by truth identity and truth hash while each run may independently
 report `completed`, `partial`, `unresolved`, or `missing`. Coverage, abstention,
 failure, and missing counts are reported per run with candidate-minus-baseline
 deltas over the full paired selection. Quality metrics, cluster intervals, and
 leave-one-repository-out quality results use only evaluable truth identities
-completed in both runs. A missing, partial, or unresolved prediction contributes
+completed in both runs. Micro quality intervals resample whole repository
+clusters that contribute a denominator to that measure on either system,
+retaining all rows and repeated repository draws. Full-data point estimates
+and terminal denominators still use the full applicable subset. Eligible
+cluster counts and undefined draw counts are reported; one-cluster intervals
+are degenerate diagnostics, not decision-grade uncertainty estimates. A draw
+undefined on either system leaves the interval unsupported. A missing,
+partial, or unresolved prediction contributes
 no confusion counts and is never interpreted as a negative. Missing,
 `unknown`, and `not_evaluable` labels are never treated as negatives. Versioned
 scope membership and source hashes live under `scopes/`.
@@ -378,7 +388,7 @@ the same behavior.
 
 ## Terminal evaluation evidence
 
-The comparator result uses schema 3. Its positive-only macro estimates preserve
+The comparator result uses schema 4. Its positive-only macro estimates preserve
 repeated repository draws, and false-positive-rate intervals report eligible
 negative-control repository counts and explicit unsupported reasons. Input
 comparison evidence remains schema 2.
