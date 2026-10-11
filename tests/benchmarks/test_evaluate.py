@@ -1404,10 +1404,6 @@ def test_evaluator_requires_exact_selected_prediction_coverage(tmp_path: Path, m
     with pytest.raises(ValueError, match="absent from ground truth"):
         evaluate.main()
 
-    predictions.write_text("")
-    with pytest.raises(ValueError, match="no records"):
-        evaluate.main()
-
 
 def test_macro_specificity_coverage_and_timing_protocols_are_separate(
     tmp_path: Path, monkeypatch, capsys
@@ -1650,3 +1646,128 @@ def test_prediction_manifest_authenticates_exact_bytes_and_candidate(tmp_path: P
     manifest.write_text(manifest_content)
     predictions.write_text(content + "\n")
     assert evaluate.read_prediction_manifest(manifest, artifact) == result
+
+
+def test_empty_prediction_artifact_reaches_public_evaluator(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    truth.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [{"id": "HTTP GET /expected", "kind": "http"}],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    predictions.write_bytes(b"")
+    artifact = read_primary_artifact(predictions, "prediction")
+    assert artifact.records == []
+    assert artifact.content == b""
+    assert artifact.sha256 == hashlib.sha256(b"").hexdigest()
+    with pytest.raises(ValueError, match="no records"):
+        read_primary_artifact(predictions, "ground_truth")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["evaluate.py", "--ground-truth", str(truth), "--predictions", str(predictions)],
+    )
+
+    evaluate.main()
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["coverage"]["record"] == {"numerator": 0, "denominator": 1, "rate": 0.0}
+    assert result["coverage"]["completed"]["numerator"] == 0
+    row = result["comparison_evidence"]["per_pr"][0]
+    assert row["truth_positive"] is True
+    assert row["prediction_status"] == "missing"
+    assert row["terminal_status"] == "evaluable"
+    assert row["raw"] is row["normalized"] is None
+
+
+@pytest.mark.parametrize("schema_version", [2, 3])
+@pytest.mark.parametrize("status", ["partial", "unresolved"])
+@pytest.mark.parametrize("positive", [True, False])
+def test_incomplete_predictions_keep_coverage_without_quality(
+    tmp_path: Path, monkeypatch, capsys, schema_version: int, status: str, positive: bool
+) -> None:
+    truth = tmp_path / "truth.jsonl"
+    predictions = tmp_path / "predictions.jsonl"
+    endpoint = {"id": "HTTP GET /expected", "kind": "http"}
+    truth.write_text(
+        json.dumps(
+            {
+                "repository": "owner/repo",
+                "pr": 1,
+                "status": "adjudicated",
+                "affected_entrypoints": [endpoint] if positive else [],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    row = {
+        "schema_version": schema_version,
+        "repository": "owner/repo",
+        "pr": 1,
+        "candidate": "synthetic",
+        "adapter": "fastapi-adapter-v1",
+        "status": status,
+        "affected_entrypoints": [{**endpoint, "evidence": []}],
+        "candidate_entrypoints": [
+            {**endpoint, "confidence": "medium", "effect_evidence": []},
+        ],
+        "unresolved": ["bounded failure"] if status == "unresolved" or schema_version == 3 else [],
+        "timing_seconds": {"cold_no_cache_analyzer_wall": 2.0},
+    }
+    predictions.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["evaluate.py", "--ground-truth", str(truth), "--predictions", str(predictions)],
+    )
+    evaluate.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result["coverage"]["record"]["numerator"] == 1
+    assert result["coverage"]["completed"]["numerator"] == 0
+    assert result["comparison_evidence"]["per_pr"][0]["prediction_status"] == status
+    assert result["comparison_evidence"]["per_pr"][0]["raw"] is None
+    assert result["comparison_evidence"]["per_pr"][0]["normalized"] is None
+    for quality in (result, result["normalized"]):
+        assert {name: quality["micro"][name] for name in ("tp", "fp", "fn")} == {
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+        }
+        assert quality["macro"]["sample_prs"] == {"precision": 0, "recall": 0, "f1": 0}
+        assert quality["by_repository"] == {}
+        assert quality["by_kind"] == {}
+        assert quality["confidence"]["by_repository"] == {}
+    assert result["normalized"]["matches_by_rule"] == {}
+    assert result["unresolved_items"] == int(status == "unresolved" or schema_version == 3)
+    protocols = result["performance"]["protocols"]
+    timing_name = (
+        "cold_no_cache_analyzer_wall"
+        if schema_version == 3
+        else "legacy_unattested_cold_no_cache_analyzer_wall"
+    )
+    assert protocols[timing_name]["samples"] == 1
+    assert result["negative_control_specificity"]["completed_controls"] == 0
+
+    row.update(status="completed", unresolved=[])
+    predictions.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    evaluate.main()
+    completed = json.loads(capsys.readouterr().out)
+    assert completed["coverage"]["completed"]["numerator"] == 1
+    for quality in (completed, completed["normalized"]):
+        assert quality["micro"]["tp"] == int(positive)
+        assert quality["micro"]["fp"] == int(not positive)
+        assert quality["micro"]["fn"] == 0
+        assert quality["macro"]["sample_prs"]["precision"] == int(positive)
+        assert quality["by_repository"]["owner/repo"]["tp"] == int(positive)
+    assert completed["comparison_evidence"]["per_pr"][0]["raw"] is not None
