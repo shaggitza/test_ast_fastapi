@@ -56,9 +56,7 @@ def _project(root: Path) -> tuple[Path, Path]:
                             "python": ">=3.0,<4",
                             "source_hashes": {
                                 "helpers.py": "sha256:"
-                                + hashlib.sha256(
-                                    (root / "helpers.py").read_bytes()
-                                ).hexdigest()
+                                + hashlib.sha256((root / "helpers.py").read_bytes()).hexdigest()
                             },
                         },
                     }

@@ -666,7 +666,6 @@ def test_baseline_depth_limit_downgrades_deleted_candidate_and_is_structured(
     )
 
 
-
 def test_line_less_scip_rename_seeds_endpoint_file_ownership(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline"
     target = tmp_path / "target"
@@ -714,6 +713,7 @@ def test_line_less_scip_rename_seeds_endpoint_file_ownership(tmp_path: Path) -> 
     assert affected[0].endpoint.handler.file_path == target / "new_main.py"
     assert affected[0].confidence == ConfidenceLevel.HIGH
     assert not orphans
+
 
 def test_scip_mapper_reaches_direct_and_depends_endpoints(tmp_path: Path) -> None:
     target = tmp_path / "target"
