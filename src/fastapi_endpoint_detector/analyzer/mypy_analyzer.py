@@ -2733,11 +2733,11 @@ class MypyAnalyzer:
             tree: ast.Module, module_name: str
         ) -> tuple[
             dict[str, str],
-            dict[tuple[str, int], dict[str, str]],
+            dict[tuple[str, int], list[tuple[int, int, str, str | None]]],
         ]:
-            """Find function-local imports without merging their lexical identities."""
+            """Record ordered function-local import and rebinding events."""
             aliases: dict[str, str] = {}
-            aliases_by_scope: dict[tuple[str, int], dict[str, str]] = {}
+            events_by_scope: dict[tuple[str, int], list[tuple[int, int, str, str | None]]] = {}
             package = module_name.rpartition(".")[0].split(".") if "." in module_name else []
 
             class Imports(ast.NodeVisitor):
@@ -2752,7 +2752,20 @@ class MypyAnalyzer:
                         self.visit(statement)
 
                 def _scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-                    found: dict[str, str] = {}
+                    events: list[tuple[int, int, str, str | None]] = []
+
+                    def record(statement: ast.AST, local: str, imported: str | None) -> None:
+                        events.append(
+                            (
+                                getattr(statement, "lineno", 0),
+                                getattr(statement, "col_offset", 0),
+                                local,
+                                imported,
+                            )
+                        )
+                        if imported is not None:
+                            prior = aliases.get(local)
+                            aliases[local] = imported if prior in {None, imported} else "*"
 
                     class LocalImports(ast.NodeVisitor):
                         def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
@@ -2772,7 +2785,11 @@ class MypyAnalyzer:
                         def visit_Import(self, child: ast.Import) -> None:
                             for item in child.names:
                                 local = item.asname or item.name.split(".")[0]
-                                found[local] = item.name if item.asname else item.name.split(".")[0]
+                                record(
+                                    child,
+                                    local,
+                                    item.name if item.asname else item.name.split(".")[0],
+                                )
 
                         def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
                             imported = child.module or ""
@@ -2781,18 +2798,49 @@ class MypyAnalyzer:
                                 imported = ".".join([*parent, imported] if imported else parent)
                             for item in child.names:
                                 if item.name != "*":
-                                    found[item.asname or item.name] = (
-                                        f"{imported}.{item.name}".strip(".")
+                                    record(
+                                        child,
+                                        item.asname or item.name,
+                                        f"{imported}.{item.name}".strip("."),
                                     )
+
+                        def _record_targets(
+                            self, child: ast.AST, targets: Sequence[ast.AST]
+                        ) -> None:
+                            for target in targets:
+                                for name in ast.walk(target):
+                                    if isinstance(name, ast.Name) and isinstance(
+                                        name.ctx, ast.Store
+                                    ):
+                                        record(child, name.id, None)
+
+                        def visit_Assign(self, child: ast.Assign) -> None:
+                            self._record_targets(child, child.targets)
+                            self.generic_visit(child)
+
+                        def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+                            self._record_targets(child, [child.target])
+                            self.generic_visit(child)
+
+                        def visit_AugAssign(self, child: ast.AugAssign) -> None:
+                            self._record_targets(child, [child.target])
+                            self.generic_visit(child)
+
+                        def visit_NamedExpr(self, child: ast.NamedExpr) -> None:
+                            self._record_targets(child, [child.target])
+                            self.generic_visit(child)
+
+                        def visit_Delete(self, child: ast.Delete) -> None:
+                            for target in child.targets:
+                                for name in ast.walk(target):
+                                    if isinstance(name, ast.Name):
+                                        record(child, name.id, None)
 
                     scanner = LocalImports()
                     for statement in node.body:
                         scanner.visit(statement)
                     scope = (node.name, node.lineno)
-                    aliases_by_scope[scope] = found
-                    for local, imported in found.items():
-                        prior = aliases.get(local)
-                        aliases[local] = imported if prior in {None, imported} else "*"
+                    events_by_scope[scope] = sorted(events)
 
                     for child in node.body:
                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -2806,7 +2854,7 @@ class MypyAnalyzer:
                                     self.visit(nested)
 
             Imports().visit(tree)
-            return aliases, aliases_by_scope
+            return aliases, events_by_scope
 
         def target_is_mutation(
             target: ast.expr, aliases: dict[str, str], imported_names: set[str]
@@ -2863,21 +2911,41 @@ class MypyAnalyzer:
             def __init__(self, aliases: dict[str, str]) -> None:
                 self.shadowed: set[str] = set()
                 self.by_node: dict[int, frozenset[str]] = {}
+                self.global_names_by_node: dict[int, frozenset[str]] = {}
                 self.local_imports_by_node: dict[int, frozenset[str]] = {}
                 self.local_aliases_by_node: dict[int, dict[str, str]] = {}
                 self.class_local_store_targets: set[int] = set()
-                self.local_imports_by_scope: dict[tuple[str, int], dict[str, str]] = {}
+                self.local_import_events_by_scope: dict[
+                    tuple[str, int], list[tuple[int, int, str, str | None]]
+                ] = {}
                 self._current_local_imports: frozenset[str] = frozenset()
                 self._current_local_aliases: dict[str, str] = {}
+                self._active_import_events: list[tuple[int, int, str, str | None]] = []
+                self._import_event_index = 0
+                self._local_alias_base: dict[str, str] = {}
+                self._current_global_names: frozenset[str] = frozenset()
                 self.unsupported_nonlocal = False
                 self.unsupported_module_alias = False
                 self.aliases = aliases
 
             def visit(self, node: ast.AST) -> Any:
+                if self._active_import_events:
+                    position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+                    while self._import_event_index < len(self._active_import_events):
+                        line, column, name, imported = self._active_import_events[
+                            self._import_event_index
+                        ]
+                        if (line, column) > position:
+                            break
+                        if imported is None:
+                            self._current_local_aliases.pop(name, None)
+                        else:
+                            self._current_local_aliases[name] = imported
+                        self._import_event_index += 1
                 self.by_node[id(node)] = frozenset(self.shadowed)
-                self.local_imports_by_node[id(node)] = getattr(
-                    self, "_current_local_imports", frozenset()
-                )
+                self.global_names_by_node[id(node)] = self._current_global_names
+                self._current_local_imports = frozenset(self._current_local_aliases)
+                self.local_imports_by_node[id(node)] = self._current_local_imports
                 self.local_aliases_by_node[id(node)] = dict(self._current_local_aliases)
                 return super().visit(node)
 
@@ -2889,7 +2957,7 @@ class MypyAnalyzer:
 
             def _visit_function_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
                 self.by_node[id(node)] = frozenset(self.shadowed)
-                local_aliases = local_imports_by_scope.get((node.name, node.lineno), {})
+                import_events = self.local_import_events_by_scope.get((node.name, node.lineno), [])
                 local_names: set[str] = {
                     arg.arg
                     for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
@@ -2974,29 +3042,56 @@ class MypyAnalyzer:
                     for name, imported in self._current_local_aliases.items()
                     if name not in local_names and name not in global_names
                 }
-                visible_aliases = {**inherited_aliases, **local_aliases}
-                visible_imports = frozenset(visible_aliases)
                 previous = self.shadowed
                 previous_imports: frozenset[str] = self._current_local_imports
                 previous_aliases = self._current_local_aliases
+                previous_events = self._active_import_events
+                previous_index = self._import_event_index
+                previous_base = self._local_alias_base
+                previous_globals = self._current_global_names
+                self._local_alias_base = inherited_aliases
+                self._current_local_aliases = dict(inherited_aliases)
+                self._active_import_events = import_events
+                self._import_event_index = 0
+                self._current_global_names = frozenset(global_names)
                 self.shadowed = (previous - global_names) | local_names
                 for statement in node.body:
-                    self._current_local_imports = visible_imports
-                    self._current_local_aliases = visible_aliases
                     self.visit(statement)
                     self.shadowed = (previous - global_names) | local_names
                 self.shadowed = previous
                 self._current_local_imports = previous_imports
                 self._current_local_aliases = previous_aliases
+                self._active_import_events = previous_events
+                self._import_event_index = previous_index
+                self._local_alias_base = previous_base
+                self._current_global_names = previous_globals
 
             def visit_ClassDef(self, node: ast.ClassDef) -> None:
                 self.by_node[id(node)] = frozenset(self.shadowed)
                 local_names: set[str] = set()
                 scope_owner = [self]
+                class_global_names: set[str] = set()
+
+                class GlobalNames(ast.NodeVisitor):
+                    def visit_Global(self, child: ast.Global) -> None:
+                        class_global_names.update(child.names)
+
+                    def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                        return
+
+                    def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                        return
+
+                    def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                        return
+
+                global_names = GlobalNames()
+                for statement in node.body:
+                    global_names.visit(statement)
 
                 class ClassBindings(ast.NodeVisitor):
                     def visit_Name(self, child: ast.Name) -> None:
-                        if isinstance(child.ctx, ast.Store):
+                        if isinstance(child.ctx, ast.Store) and child.id not in class_global_names:
                             local_names.add(child.id)
                             scope_owner[0].class_local_store_targets.add(id(child))
 
@@ -3058,7 +3153,20 @@ class MypyAnalyzer:
                         self.shadowed = previous
                     collected_names = set(local_names)
                     local_names.clear()
-                    ClassBindings().visit(statement)
+                    deleted_names: set[str] = set()
+
+                    class StatementBindings(ClassBindings):
+                        def __init__(self, deleted: set[str]) -> None:
+                            self.deleted = deleted
+
+                        def visit_Name(self, child: ast.Name) -> None:
+                            if isinstance(child.ctx, ast.Del):
+                                self.deleted.add(child.id)
+                            else:
+                                super().visit_Name(child)
+
+                    StatementBindings(deleted_names).visit(statement)
+                    seen_class_names.difference_update(deleted_names)
                     seen_class_names.update(local_names)
                     local_names.clear()
                     local_names.update(collected_names)
@@ -3122,8 +3230,24 @@ class MypyAnalyzer:
             )
 
         def aliases_at_node(node: ast.AST, scopes: ScopeBindings) -> dict[str, str]:
-            """Overlay imports bound by this function on module-level imports."""
-            return {**aliases, **scopes.local_aliases_by_node.get(id(node), {})}
+            """Apply lexical shadows, then overlay imports active at this node."""
+            local_aliases = scopes.local_aliases_by_node.get(id(node), {})
+            result = dict(aliases)
+            for name in scopes.by_node.get(id(node), frozenset()):
+                if name not in local_aliases:
+                    result[name] = "!shadowed_local"
+            result.update(local_aliases)
+            return result
+
+        def imported_module_at_node(
+            node: ast.AST, expression: ast.expr, scopes: ScopeBindings
+        ) -> str | None:
+            """Resolve a module object even when its local name shadows a global."""
+            path = imported_path(expression, aliases_at_node(node, scopes))
+            if path is None or path == "*":
+                return None
+            resolved = self._resolve_fullname_to_file(path)
+            return path if resolved is not None and resolved[1] == path else None
 
         for module_name in sorted(self._project_modules):
             path = self._module_to_path.get(module_name)
@@ -3144,7 +3268,9 @@ class MypyAnalyzer:
                 uncertain = True
                 break
             aliases = module_aliases(tree.body, module_name)
-            local_module_aliases, local_imports_by_scope = scoped_import_aliases(tree, module_name)
+            local_module_aliases, local_import_events_by_scope = scoped_import_aliases(
+                tree, module_name
+            )
             imported_names = {
                 item.asname or item.name.split(".")[0]
                 for statement in tree.body
@@ -3159,7 +3285,7 @@ class MypyAnalyzer:
                 if item.name != "*"
             )
             scopes = ScopeBindings(aliases)
-            scopes.local_imports_by_scope = local_imports_by_scope
+            scopes.local_import_events_by_scope = local_import_events_by_scope
             scopes.visit(bounded_nodes[0])
             if scopes.unsupported_nonlocal or scopes.unsupported_module_alias:
                 uncertain = True
@@ -3195,9 +3321,11 @@ class MypyAnalyzer:
                         and target_root.id
                         in scopes.local_imports_by_node.get(id(node), frozenset())
                     )
-                    if isinstance(
-                        target, ast.Name
-                    ) and target.id in scopes.local_imports_by_node.get(id(node), frozenset()):
+                    if (
+                        isinstance(target, ast.Name)
+                        and target.id in scopes.local_imports_by_node.get(id(node), frozenset())
+                        and target.id not in scopes.global_names_by_node.get(id(node), frozenset())
+                    ):
                         # Rebinding a function-local import name changes only
                         # that local binding; it does not mutate the module.
                         continue
@@ -3240,7 +3368,10 @@ class MypyAnalyzer:
                     # Passing an imported module into analyzed callable code escapes
                     # the local proof: that code can rebind its attributes.
                     if any(
-                        not is_shadowed(node, argument, scopes)
+                        (
+                            not is_shadowed(node, argument, scopes)
+                            or imported_module_at_node(node, argument, scopes) is not None
+                        )
                         and (argument_path := imported_path(argument, node_aliases)) is not None
                         and argument_path != "*"
                         and argument_path in node_aliases.values()
@@ -3260,6 +3391,7 @@ class MypyAnalyzer:
                         receiver = (
                             None
                             if is_shadowed(node, node.args[0], scopes)
+                            and imported_module_at_node(node, node.args[0], scopes) is None
                             else imported_path(node.args[0], node_aliases)
                         )
                         attribute = node.args[1]
