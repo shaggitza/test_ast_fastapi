@@ -13,7 +13,7 @@ import json
 import math
 import random
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 SAMPLES = 10_000
 THRESHOLD = 0.02
@@ -45,7 +45,7 @@ def _evidence(report: object) -> dict[str, Any]:
     normalization_version = evidence.get("normalization_version")
     if type(normalization_version) is not int or normalization_version < 1:
         raise ValueError("invalid or missing normalization_version provenance")
-    return evidence
+    return cast("dict[str, Any]", evidence)
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -55,7 +55,7 @@ def _load(path: Path) -> dict[str, Any]:
         parse_constant=_reject_constant,
     )
     _evidence(value)
-    return value
+    return cast("dict[str, Any]", value)
 
 
 def _rows(report: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
@@ -76,10 +76,39 @@ def _rows(report: dict[str, Any]) -> dict[tuple[str, int], dict[str, Any]]:
     return mapped
 
 
-def _precision(rows: list[dict[str, Any]], metric: str) -> float | None:
+def _rates(rows: list[dict[str, Any]], metric: str) -> dict[str, float | None]:
     tp = sum(row[metric]["tp"] for row in rows)
     fp = sum(row[metric]["fp"] for row in rows)
-    return tp / (tp + fp) if tp + fp else None
+    fn = sum(row[metric]["fn"] for row in rows)
+    precision = tp / (tp + fp) if tp + fp else None
+    recall = tp / (tp + fn) if tp + fn else None
+    f1 = 2 * precision * recall / (precision + recall) if precision and recall else 0.0
+    negative = [row for row in rows if row[metric]["tp"] + row[metric]["fn"] == 0]
+    fp_rate = sum(row[metric]["fp"] > 0 for row in negative) / len(negative) if negative else None
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "false_positive_pr_rate": fp_rate,
+    }
+
+
+def _sample_repositories(repositories: list[str], rng: random.Random) -> list[str]:
+    return [repositories[rng.randrange(len(repositories))] for _ in repositories]
+
+
+def _rows_for_clusters(
+    rows_by_repository: dict[str, list[dict[str, Any]]], repositories: list[str]
+) -> list[dict[str, Any]]:
+    return [row for repository in repositories for row in rows_by_repository[repository]]
+
+
+def _interval(deltas: list[float]) -> list[float]:
+    deltas.sort()
+    return [
+        deltas[max(0, int((1 - CONFIDENCE) / 2 * len(deltas)) - 1)],
+        deltas[min(len(deltas) - 1, int((1 + CONFIDENCE) / 2 * len(deltas)) - 1)],
+    ]
 
 
 def _sha256(value: object) -> bool:
@@ -177,49 +206,76 @@ def compare(  # noqa: PLR0912, PLR0915
     # independent trust root or the original artifact bytes.
     attested = False
     rng = random.Random(seed)
+    repositories = sorted({repository for repository, _ in a})
+    baseline_by_repository: dict[str, list[dict[str, Any]]] = {
+        repository: [] for repository in repositories
+    }
+    candidate_by_repository: dict[str, list[dict[str, Any]]] = {
+        repository: [] for repository in repositories
+    }
+    for key in keys:
+        baseline_by_repository[key[0]].append(a[key])
+        candidate_by_repository[key[0]].append(b[key])
     intervals: dict[str, dict[str, Any]] = {}
     for metric in ("raw", "normalized"):
-        base_precision = _precision([a[key] for key in keys], metric)
-        candidate_precision = _precision([b[key] for key in keys], metric)
-        if base_precision is None or candidate_precision is None:
-            intervals[metric] = {"supported": False, "reason": "undefined aggregate precision"}
-            continue
-        deltas: list[float] = []
-        undefined = 0
+        base_rates = _rates([a[key] for key in keys], metric)
+        candidate_rates = _rates([b[key] for key in keys], metric)
+        deltas: dict[str, list[float]] = {
+            name: [] for name in ("precision", "recall", "f1", "false_positive_pr_rate")
+        }
+        undefined: dict[str, int] = dict.fromkeys(deltas, 0)
         for _ in range(SAMPLES):
-            sample_keys = [keys[rng.randrange(len(keys))] for _ in keys]
-            baseline_precision = _precision([a[key] for key in sample_keys], metric)
-            candidate_sample_precision = _precision([b[key] for key in sample_keys], metric)
-            if baseline_precision is None or candidate_sample_precision is None:
-                undefined += 1
-                continue
-            deltas.append(candidate_sample_precision - baseline_precision)
-        if undefined:
-            intervals[metric] = {
-                "supported": False,
-                "reason": "bootstrap samples contained undefined precision",
-                "undefined_samples": undefined,
+            sampled_repos = _sample_repositories(repositories, rng)
+            sampled_a = _rows_for_clusters(baseline_by_repository, sampled_repos)
+            sampled_b = _rows_for_clusters(candidate_by_repository, sampled_repos)
+            left_rates, right_rates = _rates(sampled_a, metric), _rates(sampled_b, metric)
+            for name, samples in deltas.items():
+                left_value, right_value = left_rates[name], right_rates[name]
+                if left_value is None or right_value is None:
+                    undefined[name] += 1
+                else:
+                    samples.append(right_value - left_value)
+        measures: dict[str, Any] = {}
+        for name, samples in deltas.items():
+            supported = not undefined[name] and len(samples) == SAMPLES
+            bounds = _interval(samples) if samples else None
+            threshold = -THRESHOLD if name in {"precision", "recall", "f1"} else THRESHOLD
+            bound = None
+            if bounds:
+                bound = bounds[1] if name == "false_positive_pr_rate" else bounds[0]
+            passed = False
+            if supported and bound is not None:
+                passed = (
+                    bound >= threshold if name != "false_positive_pr_rate" else bound <= threshold
+                )
+            if supported and bound is not None and math.isclose(bound, threshold, abs_tol=1e-12):
+                passed = True
+            baseline_rate, candidate_rate = base_rates[name], candidate_rates[name]
+            measures[name] = {
+                "baseline": base_rates[name],
+                "candidate": candidate_rates[name],
+                "delta": (
+                    candidate_rate - baseline_rate
+                    if baseline_rate is not None and candidate_rate is not None
+                    else None
+                ),
+                "confidence": CONFIDENCE,
+                "interval": bounds,
+                "threshold": threshold,
+                "bound_test": (
+                    "upper_at_most" if name == "false_positive_pr_rate" else "lower_at_least"
+                ),
+                "decision": "pass" if passed else "fail" if supported else "unsupported",
+                "undefined_samples": undefined[name],
             }
-            continue
-        deltas.sort()
-        # Conservative nearest-rank two-sided percentile interval.
-        lower = deltas[max(0, int((1 - CONFIDENCE) / 2 * SAMPLES) - 1)]
-        upper = deltas[min(SAMPLES - 1, int((1 + CONFIDENCE) / 2 * SAMPLES) - 1)]
-        passed = lower >= -THRESHOLD or math.isclose(lower, -THRESHOLD, abs_tol=1e-12)
         intervals[metric] = {
-            "supported": True,
-            "baseline_precision": base_precision,
-            "candidate_precision": candidate_precision,
-            "delta": candidate_precision - base_precision,
-            "confidence": CONFIDENCE,
-            "interval": [lower, upper],
-            "threshold": -THRESHOLD,
-            "decision": "pass" if passed else "fail",
-            "lower_bound_equal_to_threshold_passes": True,
+            "method": "paired repository-cluster bootstrap percentile interval",
+            "supported": all(item["decision"] != "unsupported" for item in measures.values()),
+            "measures": measures,
         }
     return {
         "schema_version": 1,
-        "method": "paired PR bootstrap percentile interval",
+        "method": "paired repository-cluster bootstrap percentile interval",
         "samples": SAMPLES,
         "seed": seed,
         "pairing": "same selected repository/PR identities and truth record hashes",

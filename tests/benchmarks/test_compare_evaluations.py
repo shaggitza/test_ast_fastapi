@@ -63,7 +63,8 @@ def test_known_precision_regression_fails_and_repeats_with_seed():
     second = compare(baseline, candidate, seed=17)
     assert first == second
     assert first["samples"] == 10_000
-    assert first["metrics"]["raw"]["decision"] == "fail"
+    assert first["metrics"]["raw"]["measures"]["precision"]["decision"] == "fail"
+    assert first["metrics"]["raw"]["method"].startswith("paired repository-cluster")
     assert first["gate_decision"] == "report_only"
     assert first["attested"] is False
 
@@ -75,8 +76,8 @@ def test_two_point_tie_passes_threshold():
             row["raw"] = {"tp": tp, "fp": fp, "fn": fn}
             row["normalized"] = {"tp": tp, "fp": fp, "fn": fn}
     result = compare(baseline, candidate)
-    assert result["metrics"]["raw"]["interval"][0] == pytest.approx(-0.02)
-    assert result["metrics"]["raw"]["decision"] == "pass"
+    assert result["metrics"]["raw"]["measures"]["precision"]["interval"][0] == pytest.approx(-0.02)
+    assert result["metrics"]["raw"]["measures"]["precision"]["decision"] == "pass"
     assert result["gate_decision"] == "report_only"
     assert result["attested"] is False
 
@@ -106,7 +107,7 @@ def test_missing_rows_and_not_evaluable_coverage_fail_closed():
 def test_unattested_artifacts_are_report_only():
     baseline, candidate = reports(attested=False)
     result = compare(baseline, candidate)
-    assert result["metrics"]["raw"]["decision"] == "fail"
+    assert result["metrics"]["raw"]["measures"]["precision"]["decision"] == "fail"
     assert result["gate_decision"] == "report_only"
 
 
@@ -149,10 +150,7 @@ def test_all_negative_corpus_has_undefined_precision_and_fails_closed():
             row["raw"] = {"tp": 0, "fp": 0, "fn": 3}
             row["normalized"] = {"tp": 0, "fp": 0, "fn": 3}
     result = compare(baseline, candidate)
-    assert result["metrics"]["raw"] == {
-        "supported": False,
-        "reason": "undefined aggregate precision",
-    }
+    assert result["metrics"]["raw"]["measures"]["precision"]["decision"] == "unsupported"
     assert result["gate_decision"] == "report_only"
 
 
@@ -227,6 +225,56 @@ def test_serialized_evaluator_version_can_be_loaded_and_compared(tmp_path: Path)
     for path, report in zip(paths, (baseline, candidate), strict=True):
         path.write_text(json.dumps(report), encoding="utf-8")
     result = compare(_load(paths[0]), _load(paths[1]))
-    assert result["metrics"]["raw"]["baseline_precision"] == 1.0
-    assert result["metrics"]["raw"]["candidate_precision"] == 0.8
+    assert result["metrics"]["raw"]["measures"]["precision"]["baseline"] == 1.0
+    assert result["metrics"]["raw"]["measures"]["precision"]["candidate"] == 0.8
     assert result["gate_decision"] == "report_only"
+
+
+def test_repository_cluster_bootstrap_reports_fp_and_recall_gates():
+    baseline, candidate = reports(n=4)
+    for report in (baseline, candidate):
+        rows = report["comparison_evidence"]["per_pr"]
+        for index, row in enumerate(rows):
+            repository = f"owner/repo-{index % 2}"
+            row["repository"] = repository
+            report["comparison_evidence"]["selection_keys"][index]["repository"] = repository
+    keys = sorted(
+        report["comparison_evidence"]["selection_keys"],
+        key=lambda item: (item["repository"], item["pr"]),
+    )
+    serialized_keys = json.dumps(keys, sort_keys=True, separators=(",", ":")).encode()
+    digest = hashlib.sha256(serialized_keys).hexdigest()
+    for report in (baseline, candidate):
+        report["comparison_evidence"]["selection_sha256"] = digest
+    result = compare(baseline, candidate, seed=5)
+    measures = result["metrics"]["raw"]["measures"]
+    assert set(measures) == {"precision", "recall", "f1", "false_positive_pr_rate"}
+    assert measures["recall"]["delta"] == pytest.approx(-2 / 11)
+    assert measures["recall"]["decision"] == "fail"
+    assert measures["false_positive_pr_rate"]["bound_test"] == "upper_at_most"
+
+
+def test_cluster_bootstrap_repeats_and_negative_control_fp_gate_is_numeric():
+    baseline, candidate = reports(n=6)
+    rows_a = baseline["comparison_evidence"]["per_pr"]
+    rows_b = candidate["comparison_evidence"]["per_pr"]
+    keys = baseline["comparison_evidence"]["selection_keys"]
+    for index, (left, right, key) in enumerate(zip(rows_a, rows_b, keys, strict=True)):
+        repository = f"owner/repo-{index // 3}"
+        left["repository"] = right["repository"] = key["repository"] = repository
+        if index in {0, 3}:
+            for row in (left, right):
+                row["raw"] = row["normalized"] = {"tp": 0, "fp": 0, "fn": 0}
+            right["raw"] = right["normalized"] = {"tp": 0, "fp": 1, "fn": 0}
+    canonical_keys = sorted(keys, key=lambda item: (item["repository"], item["pr"]))
+    digest = hashlib.sha256(
+        json.dumps(canonical_keys, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    for report in (baseline, candidate):
+        report["comparison_evidence"]["selection_sha256"] = digest
+    first = compare(baseline, candidate, seed=91)
+    second = compare(baseline, candidate, seed=91)
+    assert first == second
+    fp_gate = first["metrics"]["raw"]["measures"]["false_positive_pr_rate"]
+    assert fp_gate["delta"] == pytest.approx(1.0)
+    assert fp_gate["decision"] == "fail"
