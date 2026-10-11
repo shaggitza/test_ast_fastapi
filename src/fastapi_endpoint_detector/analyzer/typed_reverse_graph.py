@@ -891,6 +891,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     endpoint_bindings: tuple[EndpointOccurrenceBinding, ...] | list[EndpointOccurrenceBinding],
     *,
     config_fingerprint: str,
+    source_snapshots: dict[str, bytes] | None = None,
 ) -> TypedReverseGraph:
     """Build one immutable typed graph from inventory bytes and retained mypy ASTs."""
     inventory_root = Path(inventory.root)
@@ -915,7 +916,13 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
             raise ValueError(f"inventory relative path mismatch: {record.module}")
         if record.module in module_paths or resolved.suffix != ".py":
             raise ValueError(f"invalid or duplicate canonical module identity: {record.module}")
-        raw = resolved.read_bytes()
+        raw = (
+            source_snapshots.get(record.module)
+            if source_snapshots is not None
+            else resolved.read_bytes()
+        )
+        if raw is None:
+            raise ValueError(f"source snapshot is missing for {record.module}")
         digest = hashlib.sha256(raw).hexdigest()
         if digest != record.sha256:
             raise ValueError(f"source hash mismatch: {record.module}")

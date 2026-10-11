@@ -58,6 +58,10 @@ from fastapi_endpoint_detector.analyzer.sql_transaction import (
 from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
     build_sql_transaction_path_diagnostics,
 )
+from fastapi_endpoint_detector.analyzer.typed_graph_bridge import (
+    build_shadow_graph,
+    query_changed_lines,
+)
 from fastapi_endpoint_detector.config import Config
 from fastapi_endpoint_detector.models.endpoint import (
     Endpoint,
@@ -570,6 +574,7 @@ class ChangeMapper:
         use_scip: bool = False,
         baseline_app_path: Path | None = None,
         bootstrap_entry: str | None = None,
+        typed_graph_shadow: bool = False,
     ) -> None:
         """
         Initialize the change mapper.
@@ -584,6 +589,7 @@ class ChangeMapper:
             use_scip: Use SCIP rather than mypy for reverse dependency analysis.
             baseline_app_path: Explicit baseline snapshot used for removed SCIP lines.
             bootstrap_entry: Exact secure-AST MODULE:FUNCTION registration seed.
+            typed_graph_shadow: Opt in to the unvalidated private typed-graph diagnostic.
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
@@ -608,6 +614,7 @@ class ChangeMapper:
         self.app_variable = app_variable
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
+        self.typed_graph_shadow = typed_graph_shadow
         self.use_cache = use_cache
         self.secure_ast = secure_ast
         self.use_scip = use_scip
@@ -640,6 +647,7 @@ class ChangeMapper:
         self._resource_coupling_graph: ResourceCouplingGraph | None = None
         self._sql_transaction_report: SQLTransactionReport | None = None
         self._sql_transaction_path_report: SQLTransactionPathReport | None = None
+        self._typed_graph_shadow: tuple[tuple[str, Any, Any], ...] = ()
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._baseline_mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
@@ -2211,6 +2219,8 @@ class ChangeMapper:
         warnings: list[str] = []
         # Failures describe this attempt; a recovered snapshot must be retried.
         self._baseline_failure = None
+        # This private opt-in diagnostic is per-run state, never stale report data.
+        self._typed_graph_shadow = ()
 
         def report_progress(current: int, total: int, desc: str) -> None:
             if progress_callback:
@@ -2335,6 +2345,7 @@ class ChangeMapper:
                     f"baseline snapshot could not be analyzed ({exc}); removed lines remain "
                     "unresolved."
                 )
+        self._run_typed_graph_shadow(python_files, has_mypy_removals)
         self._effect_contract_audit = self._build_effect_contract_audit()
         if self.config.analysis.sql_transaction_diagnostics:
             if self._effect_contracts is None or self._effect_contract_audit is None:
@@ -2550,6 +2561,75 @@ class ChangeMapper:
                 )
             if analyzer.get_endpoint_dependencies(endpoint) is None:
                 analyzer.analyze_endpoint(endpoint)
+
+    def _run_typed_graph_shadow(
+        self,
+        diff_files: list[Any],
+        has_removals: bool,
+    ) -> None:
+        """Run a diagnostic graph query while legacy mapper evidence stays authoritative."""
+        self._typed_graph_shadow = ()
+        if not self.typed_graph_shadow:
+            return
+        try:
+            self._collect_typed_graph_shadow(diff_files, has_removals)
+        except Exception:
+            # The shadow is unvalidated and must never prevent the authoritative report.
+            self._typed_graph_shadow = ()
+
+    def _collect_typed_graph_shadow(
+        self,
+        diff_files: list[Any],
+        has_removals: bool,
+    ) -> None:
+        """Build target/baseline diagnostics; caller isolates all ordinary failures."""
+        shadow: list[tuple[str, Any, Any]] = []
+        target_changes = [
+            (item.path.as_posix(), line)
+            for item in diff_files
+            for line in DiffParser.get_changed_line_numbers(item)[0]
+        ]
+        if target_changes and not (
+            self.source_inventory.limitations
+            or self.source_inventory.unresolved_imports
+            or self.source_inventory.module_collisions
+        ):
+            graph = build_shadow_graph(
+                self.mypy_analyzer,
+                _mypy_inventory(self.source_inventory)[0],
+                self.registry.get_all(),
+            )
+            result = query_changed_lines(
+                graph,
+                _mypy_inventory(self.source_inventory)[0],
+                target_changes,
+                side="target",
+            )
+            shadow.append(("target", graph, result))
+        if has_removals and self.baseline_app_path is not None and self._baseline_failure is None:
+            baseline_changes = [
+                (item.path.as_posix(), line)
+                for item in diff_files
+                for line in DiffParser.get_changed_line_numbers(item)[1]
+            ]
+            if baseline_changes and not (
+                self.baseline_source_inventory.limitations
+                or self.baseline_source_inventory.unresolved_imports
+                or self.baseline_source_inventory.module_collisions
+            ):
+                graph = build_shadow_graph(
+                    self.baseline_mypy_analyzer,
+                    _mypy_inventory(self.baseline_source_inventory)[0],
+                    self.baseline_mypy_registry.get_all(),
+                )
+                result = query_changed_lines(
+                    graph,
+                    _mypy_inventory(self.baseline_source_inventory)[0],
+                    baseline_changes,
+                    side="baseline",
+                )
+                shadow.append(("baseline", graph, result))
+        self._typed_graph_shadow = tuple(shadow)
 
     def get_endpoints(self) -> list[Endpoint]:
         """Get all endpoints in the application."""
