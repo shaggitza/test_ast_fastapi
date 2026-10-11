@@ -9,6 +9,7 @@ import pytest
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.config import Config, ParserConfig
 from fastapi_endpoint_detector.models.endpoint import SnapshotSide
 from fastapi_endpoint_detector.parser.secure_ast_extractor import (
     SecureASTExtractor,
@@ -187,6 +188,7 @@ def test_native_dependency_helper_diff_reaches_only_public_descendant_routes(
 
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         secure_ast=True,
         use_cache=False,
@@ -244,6 +246,7 @@ def test_callable_instance_dependency_change_reaches_only_its_route(
 
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         secure_ast=True,
         use_cache=False,
@@ -309,6 +312,7 @@ def test_callable_instance_ancestor_base_change_reaches_only_dependent_route(
     target_main = target / "main.py"
     report = ChangeMapper(
         target_main,
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         secure_ast=True,
         use_cache=False,
@@ -320,7 +324,12 @@ def test_callable_instance_ancestor_base_change_reaches_only_dependent_route(
     assert affected == {"GET /items"}
     endpoint = next(
         item
-        for item in ChangeMapper(target_main, secure_ast=True, use_cache=False).inventory.endpoints
+        for item in ChangeMapper(
+            target_main,
+            config=Config(parser=ParserConfig(follow_imports=False)),
+            secure_ast=True,
+            use_cache=False,
+        ).inventory.endpoints
         if item.identifier == "GET /items"
     )
     owners = native_route_structural_owners(endpoint, target_main, {changed_line})
@@ -382,6 +391,7 @@ def test_callable_instance_inherited_call_body_change_reaches_only_dependent_rou
     )
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         secure_ast=True,
         use_cache=False,
@@ -450,6 +460,7 @@ def test_callable_instance_unexecuted_inherited_body_edits_stay_unaffected(
     )
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         secure_ast=True,
         use_cache=False,
@@ -539,6 +550,7 @@ def test_mounted_child_dependency_diff_respects_mount_ownership_boundary(
 
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         secure_ast=True,
         use_cache=False,
@@ -1503,6 +1515,7 @@ def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
     )
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         secure_ast=True,
         use_cache=False,
@@ -1585,6 +1598,7 @@ def test_public_mapper_ignores_unrelated_statement_inside_invoked_bootstrap_help
     )
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         bootstrap_entry="main:run",
         secure_ast=True,
@@ -1655,6 +1669,7 @@ def test_public_mapper_retains_bootstrap_route_input_provenance(
     )
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         bootstrap_entry="main:run",
         secure_ast=True,
@@ -1689,6 +1704,7 @@ def test_public_mapper_does_not_own_unrelated_bootstrap_statement(tmp_path: Path
     )
     report = ChangeMapper(
         target / "main.py",
+        config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
         bootstrap_entry="main:run",
         secure_ast=True,
