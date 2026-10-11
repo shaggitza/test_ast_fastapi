@@ -18,6 +18,27 @@ ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "benchmarks/real_world/nonpython_v1"
 
 
+def _force_historical_commit_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    missing = f"{evaluator.SCANNER_COMMIT}^{{commit}}"
+
+    def fake_git(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        if args == ["git", "rev-parse", "--show-toplevel"]:
+            return SimpleNamespace(stdout=f"{ROOT}\n")
+        if args == ["git", "rev-parse", missing]:
+            raise subprocess.CalledProcessError(
+                128, args, stderr=b"fatal: ambiguous argument: unknown revision\n"
+            )
+        if args == ["git", "cat-file", "-e", missing]:
+            return SimpleNamespace(
+                returncode=128,
+                stdout=b"",
+                stderr=b"fatal: Not a valid object name " + missing.encode() + b"\n",
+            )
+        raise AssertionError(f"unexpected Git command: {args!r}")
+
+    monkeypatch.setattr(subprocess, "run", fake_git)
+
+
 def test_r6_pins_exact_scanner_commit_and_module_hashes() -> None:
     assert evaluator._require_trusted_scanner_commit(evaluator.SCANNER_COMMIT) == (
         "d4eec140bed84d3ff8cea8374f7f9e589b0e6def"
@@ -55,6 +76,7 @@ def test_archive_rejects_counterfeit_scanner_modules(
 def test_archive_uses_hash_pinned_bundle_when_commit_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _force_historical_commit_absent(monkeypatch)
     client_hash, deployment_hash = evaluator._archive_scanner(
         ROOT, evaluator.SCANNER_COMMIT, tmp_path
     )
@@ -76,6 +98,7 @@ def test_archive_rejects_modified_pinned_bundle(
     shutil.copytree(FIXTURE / "pinned_scanner", bundled)
     (bundled / relative).write_bytes(b"counterfeit pinned source\n")
     monkeypatch.setattr(evaluator, "FIXTURE", tmp_path)
+    _force_historical_commit_absent(monkeypatch)
     with pytest.raises(evaluator.NonPythonFixtureError, match="source SHA-256 mismatch"):
         evaluator._archive_scanner(ROOT, evaluator.SCANNER_COMMIT, tmp_path / "out")
 

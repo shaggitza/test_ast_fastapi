@@ -4,18 +4,21 @@ This evaluation covers **six audited PRs** and **nine route atoms**: eight clien
 
 ## Reproduction
 
-Run from a checkout whose local Git object database contains the pinned trusted scanner revisions:
+The R8 replay writes a separate versioned artifact and keeps the existing
+`results/evaluation.json` historical output unchanged:
 
 ```sh
-uv run --frozen python benchmarks/real_world/evaluate_nonpython.py
-uv run --frozen python benchmarks/real_world/evaluate_nonpython.py \
-  --scanner-commit 1d9242d0d1d411b529c3227918aa2d05e98e8943 \
-  --write benchmarks/real_world/nonpython_v1/results/historical-pr310-1d9242d0.json
+uv run --frozen python benchmarks/real_world/evaluate_nonpython_r8.py \
+  --write benchmarks/real_world/nonpython_v1/results/evaluation-r8.json
 ```
 
-The default current result pins PR #310 at `84efc3d877c2d93a25bdd2c625120e6a6d918139`. The historical result pins the earlier scanner at `1d9242d0d1d411b529c3227918aa2d05e98e8943`; it is retained separately and does not substitute for the current evaluation. Both outputs record exact scanner module hashes, verified source/diff/audit/license hashes, raw observations, normalized method/path identities, query evidence, joins, and every audited atom independently.
-
-The harness verifies all fixture hashes before scanning. Vendored upstream Python files retain their original paths and hashes in `source_manifest.json`, but are stored as `.py.txt` data. The harness reads all upstream snapshots as strings. It executes only trusted internal scanner code archived from the exact pinned Git commit. It never imports or executes fetched source, invokes Docker, runs third-party subprocesses, or uses production canaries.
+The replay verifies every fixture hash, archives only the pinned trusted
+scanner closure, and treats upstream source snapshots as inert text. The R8
+artifact records source observations and audited callsites. Its historical
+atoms remain provisional and separate from canonical truth; bounded R8/R9
+approval does not establish full GH108 acceptance. This replay calls the
+client/deployment extractors directly; project-adapter dispatch remains
+unverified by this artifact.
 
 ## Evaluation behavior
 

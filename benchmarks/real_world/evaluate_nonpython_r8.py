@@ -780,9 +780,15 @@ def build_result(
                         else "no_exact_audited_callsite_observation",
                         "origin_attestation_missing": bool(callsite_matches)
                         and atom["surface_id"] not in scan_case["joined_surface_ids"],
-                        "origin_join_status": "joined"
-                        if atom["surface_id"] in scan_case["joined_surface_ids"]
-                        else "unjoined_origin_unattested",
+                        "origin_join_status": (
+                            "joined"
+                            if atom["surface_id"] in scan_case["joined_surface_ids"]
+                            else "unjoined_origin_unattested"
+                            if callsite_matches
+                            else "unresolved_audit_location"
+                            if not locations
+                            else "unobserved_by_scanner"
+                        ),
                     }
                 )
             atoms.append(row)
@@ -814,9 +820,7 @@ def build_result(
             "total_audited_nonpython_atom_count": atom_total,
         },
         "truth_status": spec["truth_status"],
-        "acceptance_claim": (
-            "bounded source evaluation; independent R7 review required before closure"
-        ),
+        "acceptance_claim": ("R8/R9 bounded approval complete; GH108 full acceptance remains open"),
         "interpretation": (
             "Six audited PRs contain eight client route atoms plus one conditional "
             "deployment atom. This records nine atoms independently of PR count; "
@@ -863,9 +867,10 @@ def build_result(
             {
                 "criterion": "no_cross_language_global_url_fanout",
                 "finding": (
-                    "project adapter dispatches by bounded client/deployment file categories"
+                    "UNVERIFIED: this bounded replay calls pinned extractors directly "
+                    "and does not exercise project-adapter dispatch"
                 ),
-                "source_refs": ["src/fastapi_endpoint_detector/analyzer/project_observations.py"],
+                "source_refs": [],
             },
             {
                 "criterion": "nine_audited_cases_separately_evaluated",
@@ -933,7 +938,7 @@ def run() -> int:
         result = build_result(args.fixture_dir, args.scanner_commit)
     except (NonPythonFixtureError, OSError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
-    output = args.write or args.fixture_dir / "results/evaluation.json"
+    output = args.write or args.fixture_dir / "results/evaluation-r8.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(

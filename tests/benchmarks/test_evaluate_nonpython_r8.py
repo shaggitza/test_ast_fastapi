@@ -94,7 +94,17 @@ def test_r8_emits_separate_atoms_and_never_guesses_dynamic_origin_or_prefix() ->
                 observation["origin"] is None
                 for observation in atom.get("raw_same_route_observations", [])
             )
-            assert atom["origin_join_status"] == "unjoined_origin_unattested"
+            observations = atom["audited_callsite_observations"]
+            if observations:
+                if atom["surface_id"] in case["explicit_established_surface_joins"]:
+                    assert atom["origin_attestation_missing"] is False
+                    assert atom["origin_join_status"] == "joined"
+                else:
+                    assert atom["origin_attestation_missing"] is True
+                    assert atom["origin_join_status"] == "unjoined_origin_unattested"
+            else:
+                assert atom["origin_attestation_missing"] is False
+                assert atom["origin_join_status"] == atom["audited_callsite_status"]
     khoj_atom = case_map["khoj-ai/khoj#1216"]["atoms"][0]
     assert khoj_atom["audited_callsite_locations"][0]["start_line"] == 960
     assert khoj_atom["audited_callsite_locations"][0]["end_line"] == 974
@@ -160,3 +170,17 @@ def test_r8_result_replay_is_byte_deterministic() -> None:
     second_bytes = (json.dumps(second, indent=2, sort_keys=True) + "\n").encode()
     assert first_bytes == second_bytes
     assert hashlib.sha256(first_bytes).hexdigest() == hashlib.sha256(second_bytes).hexdigest()
+
+
+def test_r8_limits_acceptance_to_direct_extractor_evidence() -> None:
+    result = evaluator.build_result(repo_root=ROOT)
+    assert result["acceptance_claim"] == (
+        "R8/R9 bounded approval complete; GH108 full acceptance remains open"
+    )
+    fanout = next(
+        item
+        for item in result["acceptance_criteria"]
+        if item["criterion"] == "no_cross_language_global_url_fanout"
+    )
+    assert fanout["finding"].startswith("UNVERIFIED:")
+    assert fanout["source_refs"] == []
