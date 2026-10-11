@@ -30,6 +30,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, Protocol
 
 from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
+    CONSUMER_PROFILE,
     CacheAdmissionError,
     LocalTypedCachePolicy,
     external_snapshots_unchanged,
@@ -891,6 +892,7 @@ class MypyAnalyzer:
 
         try:
             fscache: FileSystemCache
+            cold_fscache: FileSystemCache
             if self.no_site_packages and sys.platform != "win32":
                 # mypy 1.19.1 unconditionally adds /usr/local/lib/mypy to its
                 # typeshed search paths on POSIX. Hide that one ambient fallback
@@ -940,10 +942,12 @@ class MypyAnalyzer:
                             raise FileNotFoundError(path)
                         return super().hash_digest(path)
 
+                # Keep a separate empty cache for any full cold fallback.
+                cold_fscache = HermeticFileSystemCache()
                 fscache = HermeticFileSystemCache()
             else:
+                cold_fscache = FileSystemCache()
                 fscache = FileSystemCache()
-            cold_fscache = fscache
             if cache_plan is not None and external_source_bytes:
                 base_fscache = fscache
 
@@ -965,14 +969,52 @@ class MypyAnalyzer:
                         return base_fscache.listdir(path)
 
                 fscache = SnapshotFileSystemCache()
-            self._build_result = mypy_build(
-                sources=sources,
-                options=options,
-                fscache=fscache,
-                # mypy otherwise adds the process cwd even with no-site-packages.
-                alt_lib_path=str(self.module_root) if self.no_site_packages else None,
-            )
-            if cache_plan is not None:
+            original_options = Options()
+            original_options.ignore_missing_imports = True
+            if self.target_platform is not None:
+                original_options.platform = self.target_platform
+            original_options.no_site_packages = self.no_site_packages
+            if self.no_site_packages:
+                original_options.python_executable = None
+            original_options.follow_imports = self._effective_follow_imports()
+            original_options.mypy_path = [str(self.module_root)]
+            original_options.namespace_packages = True
+            original_options.explicit_package_bases = True
+            original_options.preserve_asts = True
+            original_options.incremental = False
+            original_options.check_untyped_defs = True
+            original_options.export_types = True
+
+            warm_fallback = False
+            try:
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=options,
+                    fscache=fscache,
+                    # mypy otherwise adds the process cwd even with no-site-packages.
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+            except Exception as warm_error:
+                # Deliberately catch Exception only: KeyboardInterrupt,
+                # SystemExit, and cancellation-like BaseException subclasses
+                # must propagate after the outer finally closes staged inputs.
+                if cache_plan is None:
+                    raise
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=original_options,
+                    fscache=cold_fscache,
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                warm_fallback = True
+                self.cache_admission_observation = {
+                    "scope": "local_synthetic_diagnostic_only",
+                    "consumer_profile": CONSUMER_PROFILE,
+                    "disposition": "cold_fallback",
+                    "reason": "warm_build_exception",
+                    "exception_type": type(warm_error).__name__,
+                }
+            if cache_plan is not None and not warm_fallback:
                 hit_modules = {
                     module
                     for module in cache_plan.admitted_modules
@@ -994,6 +1036,8 @@ class MypyAnalyzer:
                 )
                 external_sources_unchanged = external_snapshots_unchanged(external_source_bytes)
                 self.cache_admission_observation = {
+                    "scope": "local_synthetic_diagnostic_only",
+                    "consumer_profile": CONSUMER_PROFILE,
                     "cache_hit_modules": sorted(hit_modules),
                     "graph_source_hashes_match": graph_source_hashes_match,
                     "graph_source_hashes": {
@@ -1009,7 +1053,7 @@ class MypyAnalyzer:
                     "external_sources_unchanged": external_sources_unchanged,
                     "warm_rechecked_modules": sorted(self._build_result.manager.rechecked_modules),
                     "trust_id": cache_plan.trust_id,
-                    "manifest_sha256": cache_plan.attestation_sha256,
+                    "manifest_sha256": cache_plan.manifest_sha256,
                 }
                 proof_failed = (
                     not hit_modules
@@ -1021,21 +1065,6 @@ class MypyAnalyzer:
                 # The paired v2 identity/report/runtime protocol is not enabled
                 # in this tranche. Keep the successful read as a private
                 # diagnostic and expose only the legacy full-cold result.
-                original_options = Options()
-                original_options.ignore_missing_imports = True
-                if self.target_platform is not None:
-                    original_options.platform = self.target_platform
-                original_options.no_site_packages = self.no_site_packages
-                if self.no_site_packages:
-                    original_options.python_executable = None
-                original_options.follow_imports = self._effective_follow_imports()
-                original_options.mypy_path = [str(self.module_root)]
-                original_options.namespace_packages = True
-                original_options.explicit_package_bases = True
-                original_options.preserve_asts = True
-                original_options.incremental = False
-                original_options.check_untyped_defs = True
-                original_options.export_types = True
                 self._build_result = mypy_build(
                     sources=sources,
                     options=original_options,

@@ -1,9 +1,8 @@
-"""Narrow, local-trust admission for reusable Mypy dependency caches.
+"""Local synthetic diagnostic for Mypy dependency-cache loading.
 
-The store is deliberately a per-user local trust domain. Cache files are produced
-only by ``seed_local_typed_cache`` and are admitted only from a private directory
-owned by the current user. This is not an image attestation or a trust boundary
-against another process running as the same user.
+The caller-pinned manifest digest establishes local self-consistency only. This
+syntactic fixture filter is not a consumer-closure proof or admission authority.
+The analyzer always discards the warm result and returns a full cold build.
 """
 
 from __future__ import annotations
@@ -25,6 +24,7 @@ from typing import Any
 
 TRUST_ID = "source-committed-local-mypy-cache-v1"
 MANIFEST_SCHEMA = "fastapi-mypy-cache-v1"
+CONSUMER_PROFILE = "syntactic-event-registration-diagnostic-v1"
 MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_CACHE_FILES = 20_000
 MAX_CACHE_BYTES = 256 * 1024 * 1024
@@ -38,7 +38,7 @@ class CacheAdmissionError(ValueError):
 
 @dataclass(frozen=True)
 class LocalTypedCachePolicy:
-    """Explicit opt-in to the source-committed, owner-private cache store."""
+    """Diagnostic opt-in to an owner-private local cache store."""
 
     root: Path
     enabled: bool = True
@@ -60,14 +60,18 @@ class LocalTypedCachePolicy:
 
 @dataclass(frozen=True)
 class CacheRunPlan:
-    """Verified cache inputs staged below a private per-run directory."""
+    """Diagnostic cache inputs staged below a private per-run directory.
+
+    This plan proves only a local synthetic Mypy load observation. It is not
+    an admission authority or production trust token.
+    """
 
     run_root: Path
     cache_map: dict[str, tuple[str, str]]
     expected_graph: dict[str, str | None]
     expected_roots: frozenset[str]
     admitted_modules: frozenset[str]
-    attestation_sha256: str
+    manifest_sha256: str
     trust_id: str
     descriptors: tuple[int, ...] = ()
     artifact_hashes: dict[str, str] | None = None
@@ -244,12 +248,12 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
     mypy_version: str,
     source_texts: dict[str, str],
 ) -> tuple[CacheRunPlan, dict[str, bytes]]:
-    """Verify and stage the source-committed local cache for one build."""
+    """Check and stage local cache bytes for one discarded diagnostic build."""
     if not policy.enabled or policy.trust_id != TRUST_ID:
         raise CacheAdmissionError("cache policy is disabled or has an unknown trust ID")
     root = _private_root(policy.root, create=False)
-    manifest, attestation = _load_manifest(root)
-    if policy.expected_manifest_sha256 != attestation:
+    manifest, manifest_sha256 = _load_manifest(root)
+    if policy.expected_manifest_sha256 != manifest_sha256:
         raise CacheAdmissionError("local cache manifest differs from the configured digest pin")
     if manifest.get("trust_id") != TRUST_ID or manifest.get("mypy_version") != mypy_version:
         raise CacheAdmissionError("local cache producer or Mypy version does not match")
@@ -287,116 +291,136 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
     if graph_digest != manifest.get("module_graph_sha256"):
         raise CacheAdmissionError("local cache module graph digest is inconsistent")
 
-    run_root = Path(tempfile.mkdtemp(prefix="r11-run-", dir=root))
-    run_root.chmod(0o700)
-    input_root = run_root / "input"
-    output_root = run_root / "output"
-    input_root.mkdir(mode=0o700)
-    output_root.mkdir(mode=0o700)
-    cache_map: dict[str, tuple[str, str]] = {}
-    admitted_modules: set[str] = set()
-    artifact_hashes: dict[str, str] = {}
+    run_root: Path | None = None
     descriptors: list[int] = []
-    cache_total = 0
-    cache_count = 0
-    current_external_sources: dict[str, bytes] = {}
-    source_records = manifest.get("external_sources")
-    if not isinstance(source_records, dict):
-        raise CacheAdmissionError("local cache external source inventory is malformed")
-    for module, row in sorted(source_records.items()):
-        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
-            raise CacheAdmissionError("local cache external source entry is malformed")
-        path = Path(row["path"])
-        data = _read_external(path, MAX_SOURCE_FILE_BYTES)
-        if _digest(data) != row.get("sha256"):
-            raise CacheAdmissionError(f"external source changed for {module}")
-        current_external_sources[str(path.resolve())] = data
-    external_module_texts = {
-        module: next(
-            (
-                data.decode("utf-8")
-                for path, data in current_external_sources.items()
-                if Path(row["path"]).resolve() == Path(path)
-            ),
-            "",
-        )
-        for module, row in source_records.items()
-    }
-    if not _known_event_registration_consumers(source_texts, external_module_texts):
-        raise CacheAdmissionError(
-            "external cache consumer is outside the event-registration closure"
-        )
-    for item in artifacts:
-        if not isinstance(item, dict):
-            raise CacheAdmissionError("local cache artifact record is malformed")
-        module = item.get("module")
-        source_path = item.get("source_path")
-        meta_rel = item.get("meta")
-        data_rel = item.get("data")
-        if not all(isinstance(value, str) for value in (module, source_path, meta_rel, data_rel)):
-            raise CacheAdmissionError("local cache artifact identity is malformed")
-        assert isinstance(module, str)
-        assert isinstance(source_path, str)
-        assert isinstance(meta_rel, str)
-        assert isinstance(data_rel, str)
-        source_row = source_records.get(module)
-        if not isinstance(source_row, dict) or source_row.get("path") != source_path:
-            raise CacheAdmissionError("cache artifact path differs from its source record")
-        meta_bytes = _read_relative(root, meta_rel, MAX_CACHE_BYTES)
-        data_bytes = _read_relative(root, data_rel, MAX_CACHE_BYTES)
-        cache_count += 2
-        cache_total += len(meta_bytes) + len(data_bytes)
-        if cache_count > MAX_CACHE_FILES or cache_total > MAX_CACHE_BYTES:
-            raise CacheAdmissionError("local cache exceeds the member or byte budget")
-        if _digest(meta_bytes) != item.get("meta_sha256") or _digest(data_bytes) != item.get(
-            "data_sha256"
-        ):
-            raise CacheAdmissionError(f"local cache artifact changed for {module}")
-        if not hasattr(os, "memfd_create"):
-            raise CacheAdmissionError("sealed in-memory cache descriptors are unavailable")
-        meta_fd = os.memfd_create(f"mypy-{module}-meta", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
-        data_fd = os.memfd_create(f"mypy-{module}-data", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
-        descriptors.extend((meta_fd, data_fd))
-        for descriptor, contents in ((meta_fd, meta_bytes), (data_fd, data_bytes)):
-            with os.fdopen(os.dup(descriptor), "wb") as stream:
-                stream.write(contents)
-            fcntl.fcntl(
-                descriptor,
-                fcntl.F_ADD_SEALS,
-                fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL,
+    try:
+        run_root = Path(tempfile.mkdtemp(prefix="r13-run-", dir=root))
+        run_root.chmod(0o700)
+        input_root = run_root / "input"
+        output_root = run_root / "output"
+        input_root.mkdir(mode=0o700)
+        output_root.mkdir(mode=0o700)
+        cache_map: dict[str, tuple[str, str]] = {}
+        admitted_modules: set[str] = set()
+        artifact_hashes: dict[str, str] = {}
+        cache_total = 0
+        cache_count = 0
+        current_external_sources: dict[str, bytes] = {}
+        source_records = manifest.get("external_sources")
+        if not isinstance(source_records, dict):
+            raise CacheAdmissionError("local cache external source inventory is malformed")
+        for module, row in sorted(source_records.items()):
+            if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+                raise CacheAdmissionError("local cache external source entry is malformed")
+            path = Path(row["path"])
+            data = _read_external(path, MAX_SOURCE_FILE_BYTES)
+            if _digest(data) != row.get("sha256"):
+                raise CacheAdmissionError(f"external source changed for {module}")
+            current_external_sources[str(path.resolve())] = data
+        external_module_texts = {
+            module: next(
+                (
+                    data.decode("utf-8")
+                    for path, data in current_external_sources.items()
+                    if Path(row["path"]).resolve() == Path(path)
+                ),
+                "",
             )
-        meta_fd_path = f"/proc/self/fd/{meta_fd}"
-        data_fd_path = f"/proc/self/fd/{data_fd}"
-        artifact_hashes[meta_fd_path] = _digest(meta_bytes)
-        artifact_hashes[data_fd_path] = _digest(data_bytes)
-        source_path_norm = os.path.normpath(source_path)
-        cache_map[source_path_norm] = (meta_fd_path, data_fd_path)
-        admitted_modules.add(module)
-    expected_roots = frozenset(project_sources)
-    for module, root_path in project_sources.items():
-        key = os.path.normpath(root_path)
-        meta_path = output_root / f"{module.replace('.', '/')}.meta.json"
-        data_path = output_root / f"{module.replace('.', '/')}.data.json"
-        cache_map[key] = (str(meta_path), str(data_path))
-    (output_root / f"{sys.version_info.major}.{sys.version_info.minor}").mkdir(mode=0o700)
-    plan = CacheRunPlan(
-        run_root,
-        cache_map,
-        {str(key): value for key, value in graph.items()},
-        expected_roots,
-        frozenset(admitted_modules),
-        attestation,
-        TRUST_ID,
-        tuple(descriptors),
-        artifact_hashes,
-    )
-    return plan, current_external_sources
+            for module, row in source_records.items()
+        }
+        if not _known_event_registration_consumers(source_texts, external_module_texts):
+            raise CacheAdmissionError(
+                "external cache consumer is outside the event-registration closure"
+            )
+        for item in artifacts:
+            if not isinstance(item, dict):
+                raise CacheAdmissionError("local cache artifact record is malformed")
+            module = item.get("module")
+            source_path = item.get("source_path")
+            meta_rel = item.get("meta")
+            data_rel = item.get("data")
+            if not all(
+                isinstance(value, str) for value in (module, source_path, meta_rel, data_rel)
+            ):
+                raise CacheAdmissionError("local cache artifact identity is malformed")
+            assert isinstance(module, str)
+            assert isinstance(source_path, str)
+            assert isinstance(meta_rel, str)
+            assert isinstance(data_rel, str)
+            source_row = source_records.get(module)
+            if not isinstance(source_row, dict) or source_row.get("path") != source_path:
+                raise CacheAdmissionError("cache artifact path differs from its source record")
+            meta_bytes = _read_relative(root, meta_rel, MAX_CACHE_BYTES)
+            data_bytes = _read_relative(root, data_rel, MAX_CACHE_BYTES)
+            cache_count += 2
+            cache_total += len(meta_bytes) + len(data_bytes)
+            if cache_count > MAX_CACHE_FILES or cache_total > MAX_CACHE_BYTES:
+                raise CacheAdmissionError("local cache exceeds the member or byte budget")
+            if _digest(meta_bytes) != item.get("meta_sha256") or _digest(data_bytes) != item.get(
+                "data_sha256"
+            ):
+                raise CacheAdmissionError(f"local cache artifact changed for {module}")
+            if not hasattr(os, "memfd_create"):
+                raise CacheAdmissionError("sealed in-memory cache descriptors are unavailable")
+            meta_fd = os.memfd_create(f"mypy-{module}-meta", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+            data_fd = os.memfd_create(f"mypy-{module}-data", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+            descriptors.extend((meta_fd, data_fd))
+            for descriptor, contents in ((meta_fd, meta_bytes), (data_fd, data_bytes)):
+                with os.fdopen(os.dup(descriptor), "wb") as stream:
+                    stream.write(contents)
+                fcntl.fcntl(
+                    descriptor,
+                    fcntl.F_ADD_SEALS,
+                    fcntl.F_SEAL_WRITE
+                    | fcntl.F_SEAL_GROW
+                    | fcntl.F_SEAL_SHRINK
+                    | fcntl.F_SEAL_SEAL,
+                )
+            meta_fd_path = f"/proc/self/fd/{meta_fd}"
+            data_fd_path = f"/proc/self/fd/{data_fd}"
+            artifact_hashes[meta_fd_path] = _digest(meta_bytes)
+            artifact_hashes[data_fd_path] = _digest(data_bytes)
+            source_path_norm = os.path.normpath(source_path)
+            cache_map[source_path_norm] = (meta_fd_path, data_fd_path)
+            admitted_modules.add(module)
+        expected_roots = frozenset(project_sources)
+        for module, root_path in project_sources.items():
+            key = os.path.normpath(root_path)
+            meta_path = output_root / f"{module.replace('.', '/')}.meta.json"
+            data_path = output_root / f"{module.replace('.', '/')}.data.json"
+            cache_map[key] = (str(meta_path), str(data_path))
+        (output_root / f"{sys.version_info.major}.{sys.version_info.minor}").mkdir(mode=0o700)
+        plan = CacheRunPlan(
+            run_root,
+            cache_map,
+            {str(key): value for key, value in graph.items()},
+            expected_roots,
+            frozenset(admitted_modules),
+            manifest_sha256,
+            TRUST_ID,
+            tuple(descriptors),
+            artifact_hashes,
+        )
+        return plan, current_external_sources
+
+    except BaseException:
+        # Cancellation and process-control exceptions still release resources.
+        for descriptor in descriptors:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if run_root is not None:
+            shutil.rmtree(run_root, ignore_errors=True)
+        raise
 
 
 def _known_event_registration_consumers(  # noqa: PLR0911, PLR0912
     source_texts: dict[str, str], external_sources: dict[str, str]
 ) -> bool:
-    """Accept only direct imported callbacks used by top-level event registrations."""
+    """Filter a syntactic diagnostic fixture shape; never authorize cache results.
+
+    The analyzer always discards the warm result. This scanner does not prove
+    FastAPI identity or the complete typed-node consumer closure.
+    """
     if not external_sources:
         return False
     cached_modules = set(external_sources)
@@ -547,7 +571,7 @@ def write_seed_manifest(
     cache_rows: list[dict[str, str]],
     external_sources: dict[str, dict[str, str]],
 ) -> str:
-    """Seal a cold producer's cache output under the private local trust policy."""
+    """Write a self-consistent manifest for a private local diagnostic cache."""
     root = _private_root(policy.root, create=True)
     actual_options = _options_record(options)
     semantic = {

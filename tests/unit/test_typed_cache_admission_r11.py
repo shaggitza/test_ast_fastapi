@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import mypy.build as mypy_build_module
 import pytest
 from mypy.build import build, get_cache_names
 from mypy.modulefinder import BuildSource
 from mypy.options import Options
 
+import fastapi_endpoint_detector.analyzer.typed_cache_admission as cache_admission_module
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
 from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
@@ -35,9 +37,22 @@ def _options(module_root: Path, cache_dir: Path) -> Options:
     return options
 
 
-@pytest.mark.parametrize("case", ["hit", "unknown", "tamper", "source_tamper", "disabled"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "hit",
+        "unknown",
+        "tamper",
+        "source_tamper",
+        "disabled",
+        "warm_failure",
+        "warm_cancel",
+        "cold_failure",
+        "staging_failure",
+    ],
+)
 def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # noqa: PLR0915
-    tmp_path: Path, case: str
+    tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     main = tmp_path / "main.py"
     helper = tmp_path / "helper.py"
@@ -112,12 +127,59 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
     elif case == "source_tamper":
         helper.write_bytes(helper_bytes + b"# changed after admission seed\n")
 
+    initial_fd_count = len(list(Path("/proc/self/fd").iterdir()))
+    initial_run_dirs = set(store.glob("r13-run-*"))
+    if case in {"warm_failure", "warm_cancel", "cold_failure"}:
+        original_build = mypy_build_module.build
+        calls = 0
+        incremental_values: list[bool] = []
+
+        def failing_build(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            build_options = kwargs.get("options")
+            if isinstance(build_options, Options):
+                incremental_values.append(build_options.incremental)
+            if case == "warm_failure" and calls == 1:
+                raise RuntimeError("injected warm build failure")
+            if case == "warm_cancel" and calls == 1:
+                raise KeyboardInterrupt("injected warm cancellation")
+            if case == "cold_failure" and calls == 2:
+                raise RuntimeError("injected cold fallback failure")
+            return original_build(*args, **kwargs)
+
+        monkeypatch.setattr(mypy_build_module, "build", failing_build)
+    elif case == "staging_failure":
+        original_fcntl = cache_admission_module.fcntl.fcntl
+
+        def fail_seal(descriptor: int, command: int, *args: object) -> int:
+            if command == cache_admission_module.fcntl.F_ADD_SEALS:
+                raise OSError("injected mid-staging seal failure")
+            return original_fcntl(descriptor, command, *args)
+
+        monkeypatch.setattr(cache_admission_module.fcntl, "fcntl", fail_seal)
+
     analyzer = MypyAnalyzer(
         main,
         module_root=tmp_path,
         source_inventory=inventory,
         typed_cache_policy=(LocalTypedCachePolicy.disabled() if case == "disabled" else policy),
     )
+    if case == "cold_failure":
+        with pytest.raises(RuntimeError, match="injected cold fallback failure"):
+            analyzer._ensure_mypy_built()
+        assert calls == 2
+        assert set(store.glob("r13-run-*")) == initial_run_dirs
+        assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
+        return
+    if case == "warm_cancel":
+        with pytest.raises(KeyboardInterrupt, match="injected warm cancellation"):
+            analyzer._ensure_mypy_built()
+        assert calls == 1
+        assert set(store.glob("r13-run-*")) == initial_run_dirs
+        assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
+        return
+
     analyzer._ensure_mypy_built()
     observation = analyzer.cache_admission_observation
     if case == "disabled":
@@ -126,6 +188,21 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
         analyzer.release_typed_snapshot()
         return
     assert observation is not None
+    if case == "warm_failure":
+        assert observation["disposition"] == "cold_fallback", observation
+        assert observation["reason"] == "warm_build_exception", observation
+        assert "helper" in analyzer._build_result.manager.rechecked_modules
+        assert calls == 2
+        assert incremental_values == [True, False]
+        assert set(store.glob("r13-run-*")) == initial_run_dirs
+        analyzer.release_typed_snapshot()
+        return
+    if case == "staging_failure":
+        assert observation.get("disposition") == "cold_fallback", observation
+        assert set(store.glob("r13-run-*")) == initial_run_dirs
+        assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
+        analyzer.release_typed_snapshot()
+        return
     if case in {"unknown", "tamper", "source_tamper"}:
         assert observation.get("disposition") == "cold_fallback", observation
         assert "helper" in analyzer._build_result.manager.rechecked_modules
