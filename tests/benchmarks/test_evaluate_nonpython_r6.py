@@ -150,10 +150,27 @@ def test_r6_emits_separate_atoms_and_never_guesses_dynamic_origin_or_prefix() ->
     assert result["verified_source_file_count"] == 25
     assert result["verified_diff_count"] == 6
     assert len(result["verified_licenses"]) == 6
-    assert len(result["acceptance_criteria"]) == 7
+    assert len(result["acceptance_criteria"]) == 8
+    criteria = {row["criterion"]: row for row in result["acceptance_criteria"]}
+    assert "docker_env_subprocess_contracts" not in criteria
+    assert "Docker and environment" in criteria["docker_environment_observations"]["finding"]
+    for criterion in ("subprocess_observations", "no_cross_language_global_url_fanout"):
+        assert criteria[criterion]["finding"].startswith("UNVERIFIED:")
+        assert criteria[criterion]["source_refs"] == []
+    assert (
+        "historical stdio.client audit citations" in criteria["subprocess_observations"]["finding"]
+    )
+    assert "project-adapter dispatch" in criteria["no_cross_language_global_url_fanout"]["finding"]
+    assert (
+        "fastapi_endpoint_detector.analyzer.project_observations"
+        not in (result["scanner"]["executed_sources"])
+    )
     assert result["public_integration"]["status"] == "present in this base"
 
     case_map = {case["case_id"]: case for case in result["cases"]}
+    langflow = case_map["langflow-ai/langflow#13992"]
+    assert langflow["raw_subprocess_observations"] == []
+    assert langflow["atoms"][0]["observation_refs"]["subprocess"] == []
     for case in case_map.values():
         assert case["explicit_established_surface_joins"] == []
         for observation in case["raw_client_observations"]:

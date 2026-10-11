@@ -778,20 +778,29 @@ def build_result(
                 "source_refs": ["src/fastapi_endpoint_detector/analyzer/client_observations.py"],
             },
             {
-                "criterion": "docker_env_subprocess_contracts",
+                "criterion": "docker_environment_observations",
                 "finding": (
-                    "Docker, env and subprocess observations are source-only and certainty-labelled"
+                    "Docker and environment observations are source-only and certainty-labelled"
                 ),
                 "source_refs": [
                     "src/fastapi_endpoint_detector/analyzer/deployment_observations.py"
                 ],
             },
             {
+                "criterion": "subprocess_observations",
+                "finding": (
+                    "UNVERIFIED: no raw subprocess observations or scanner references are present; "
+                    "historical stdio.client audit citations are not scanner observations"
+                ),
+                "source_refs": [],
+            },
+            {
                 "criterion": "no_cross_language_global_url_fanout",
                 "finding": (
-                    "project adapter dispatches by bounded client/deployment file categories"
+                    "UNVERIFIED: this bounded replay calls pinned extractors directly "
+                    "and does not exercise project-adapter dispatch"
                 ),
-                "source_refs": ["src/fastapi_endpoint_detector/analyzer/project_observations.py"],
+                "source_refs": [],
             },
             {
                 "criterion": "nine_audited_cases_separately_evaluated",
