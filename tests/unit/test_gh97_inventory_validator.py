@@ -228,6 +228,46 @@ class InventoryValidatorTests(unittest.TestCase):
             VALIDATOR.validate_rows([value], {forged_digest: forged_bytes}, mapping=None)
         )
 
+    def test_unsupported_outcome_requires_unsupported_cli_projection(self) -> None:
+        for status in ("not_run", "unavailable"):
+            forged = row(
+                outcome="unsupported",
+                reason="other_frozen_reason",
+                cli_observation={
+                    "status": status,
+                    "invocation_id": None,
+                    "output_sha256": None,
+                    "row_key": None,
+                },
+            )
+            errors = VALIDATOR.validate_rows([forged])
+            self.assertTrue(
+                any(
+                    "unsupported outcome requires unsupported CLI status" in error
+                    for error in errors
+                ),
+                status,
+            )
+        for outcome, status in (("not_run", "not_run"), ("unavailable", "unavailable")):
+            legitimate = row(
+                outcome=outcome,
+                applicability={"distribution": None, "version": None},
+                preset={
+                    "id": None,
+                    "version": None,
+                    "revision": None,
+                    "config_sha256": None,
+                    "contract_id": None,
+                },
+                cli_observation={
+                    "status": status,
+                    "invocation_id": None,
+                    "output_sha256": None,
+                    "row_key": None,
+                },
+            )
+            self.assertEqual(VALIDATOR.validate_rows([legitimate]), [])
+
     def test_rejects_reversed_span_and_overshoot(self) -> None:
         reversed_errors = VALIDATOR.validate_rows([row(start_byte=4, end_byte=1)])
         overshoot_errors = VALIDATOR.validate_rows([row(end_byte=9)])

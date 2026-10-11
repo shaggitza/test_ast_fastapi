@@ -117,6 +117,8 @@ def _validate_row_states(  # noqa: PLR0912 -- explicit closed outcome/status tab
     outcome = row.get("outcome")
     cli = cast("dict[str, Any]", row.get("cli_observation", {}))
     status = cli.get("status")
+    if outcome == "unsupported" and status != "unsupported":
+        errors.append(f"{where}: unsupported outcome requires unsupported CLI status")
     invocation, output_hash, row_key = (
         cli.get("invocation_id"),
         cli.get("output_sha256"),
