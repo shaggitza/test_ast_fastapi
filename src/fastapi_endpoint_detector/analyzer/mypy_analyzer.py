@@ -5239,6 +5239,7 @@ class MypyAnalyzer:
             ReturnStmt,
             SetComprehension,
             SetExpr,
+            StarExpr,
             TryStmt,
             TupleExpr,
             UnaryExpr,
@@ -6128,7 +6129,23 @@ class MypyAnalyzer:
                 string_environment.pop(name, None)
                 partial_environment.pop(name, None)
 
-        def walk_node(n: Any) -> None:
+        def clear_alias_target(target: Any) -> None:
+            """Invalidate bounded local aliases overwritten by a binding target."""
+            if isinstance(target, (TupleExpr, ListExpr)):
+                for item in target.items:
+                    clear_alias_target(item)
+            elif isinstance(target, StarExpr):
+                clear_alias_target(target.expr)
+            elif isinstance(target, NameExpr):
+                name = target.name
+                flow_environment.pop(name, None)
+                string_environment.pop(name, None)
+                deferred_environment.pop(name, None)
+                callable_environment.pop(name, None)
+                partial_environment.pop(name, None)
+                lambda_environment.pop(name, None)
+
+        def walk_node(n: Any) -> bool | None:
             """Recursively walk a mypy AST node with a bounded local environment."""
             nonlocal \
                 callable_environment, \
@@ -6138,7 +6155,7 @@ class MypyAnalyzer:
                 lambda_environment, \
                 string_environment
             if n is None:
-                return
+                return None
             # Preserve callable state immediately before operations that can
             # raise. A linear snapshot after every simple assignment would
             # invent handler states for assignments that cannot themselves
@@ -6256,7 +6273,8 @@ class MypyAnalyzer:
 
             elif isinstance(n, Block):
                 for stmt in n.body:
-                    walk_node(stmt)
+                    if walk_node(stmt) is False:
+                        return False
                     if (
                         isinstance(stmt, AssignmentStmt)
                         and isinstance(stmt.rvalue, NameExpr)
@@ -6264,11 +6282,12 @@ class MypyAnalyzer:
                             id(stmt.rvalue) in loads for loads in try_definite_unbound_name_load_ids
                         )
                     ):
-                        break
+                        return False
                     # Statements following an unconditional terminal cannot
                     # contribute executable references in this block.
                     if isinstance(stmt, (ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt)):
-                        break
+                        return False
+                return True
 
             elif isinstance(n, ExpressionStmt):
                 walk_node(n.expr)
@@ -6541,11 +6560,13 @@ class MypyAnalyzer:
                         string_environment.clear()
                         deferred_environment.clear()
                         callable_environment.clear()
+                        partial_environment.clear()
                         lambda_environment.clear()
                     walk_node(lv)
 
             elif isinstance(n, ReturnStmt):
                 walk_node(n.expr)
+                return False
 
             elif isinstance(n, IfStmt):
                 base_environment = dict(flow_environment)
@@ -6562,6 +6583,7 @@ class MypyAnalyzer:
                 ] = []
                 branch_partials: list[dict[str, _PartialCallable]] = []
                 branch_lambdas: list[dict[str, Any]] = []
+                branch_completions: list[bool] = []
                 selected: int | None = None
                 unknown_before_selection = False
                 for expr, body in zip(n.expr, n.body, strict=True):
@@ -6595,7 +6617,7 @@ class MypyAnalyzer:
                     if branch_possible:
                         possible_execution_depth[0] += 1
                     try:
-                        walk_node(body)
+                        branch_completes = walk_node(body) is not False
                     finally:
                         if branch_possible:
                             possible_execution_depth[0] -= 1
@@ -6605,6 +6627,7 @@ class MypyAnalyzer:
                     branch_callables.append(dict(callable_environment))
                     branch_partials.append(dict(partial_environment))
                     branch_lambdas.append(dict(lambda_environment))
+                    branch_completions.append(branch_completes)
                     if literal is True:
                         selected = len(branch_environments) - 1
                     else:
@@ -6619,7 +6642,7 @@ class MypyAnalyzer:
                     if unknown_before_selection:
                         possible_execution_depth[0] += 1
                     try:
-                        walk_node(n.else_body)
+                        branch_completes = walk_node(n.else_body) is not False
                     finally:
                         if unknown_before_selection:
                             possible_execution_depth[0] -= 1
@@ -6629,6 +6652,7 @@ class MypyAnalyzer:
                     branch_callables.append(dict(callable_environment))
                     branch_partials.append(dict(partial_environment))
                     branch_lambdas.append(dict(lambda_environment))
+                    branch_completions.append(branch_completes)
                 elif not n.else_body and selected is None:
                     branch_environments.append(base_environment)
                     branch_strings.append(base_strings)
@@ -6636,65 +6660,66 @@ class MypyAnalyzer:
                     branch_callables.append(base_callables)
                     branch_partials.append(base_partials)
                     branch_lambdas.append(base_lambdas)
-                if selected is not None and not unknown_before_selection:
-                    flow_environment = branch_environments[selected]
-                    string_environment = branch_strings[selected]
-                    deferred_environment = branch_deferred[selected]
-                    callable_environment = branch_callables[selected]
-                    partial_environment = branch_partials[selected]
-                    lambda_environment = branch_lambdas[selected]
-                else:
-                    flow_environment = self._join_finite_environments(branch_environments)
-                    common_string_names = (
-                        set.intersection(*(set(branch) for branch in branch_strings))
-                        if branch_strings
-                        else set()
+                    branch_completions.append(True)
+                possible_paths = (
+                    [selected]
+                    if selected is not None and not unknown_before_selection
+                    else list(range(len(branch_completions)))
+                )
+                continuing_paths = [index for index in possible_paths if branch_completions[index]]
+                branch_environments = [branch_environments[index] for index in continuing_paths]
+                branch_strings = [branch_strings[index] for index in continuing_paths]
+                branch_deferred = [branch_deferred[index] for index in continuing_paths]
+                branch_callables = [branch_callables[index] for index in continuing_paths]
+                branch_partials = [branch_partials[index] for index in continuing_paths]
+                branch_lambdas = [branch_lambdas[index] for index in continuing_paths]
+                flow_environment = self._join_finite_environments(branch_environments)
+                common_string_names = (
+                    set.intersection(*(set(branch) for branch in branch_strings))
+                    if branch_strings
+                    else set()
+                )
+                string_environment = {
+                    name: branch_strings[0][name]
+                    for name in common_string_names
+                    if all(branch_strings[0][name] == branch[name] for branch in branch_strings[1:])
+                }
+                common_deferred = (
+                    set.intersection(*(set(branch) for branch in branch_deferred))
+                    if branch_deferred
+                    else set()
+                )
+                deferred_environment = {
+                    name: branch_deferred[0][name]
+                    for name in common_deferred
+                    if all(
+                        branch[name] == branch_deferred[0][name] for branch in branch_deferred[1:]
                     )
-                    string_environment = {
-                        name: branch_strings[0][name]
-                        for name in common_string_names
-                        if all(
-                            branch_strings[0][name] == branch[name] for branch in branch_strings[1:]
-                        )
-                    }
-                    if branch_deferred:
-                        common_deferred = set.intersection(
-                            *(set(branch) for branch in branch_deferred)
-                        )
-                        deferred_environment = {
-                            name: branch_deferred[0][name]
-                            for name in common_deferred
-                            if all(
-                                branch[name] == branch_deferred[0][name]
-                                for branch in branch_deferred[1:]
-                            )
-                        }
-                    callable_environment = self._join_callable_environments(branch_callables)
-                    common_partials = (
-                        set.intersection(*(set(branch) for branch in branch_partials))
-                        if branch_partials
-                        else set()
+                }
+                callable_environment = self._join_callable_environments(branch_callables)
+                common_partials = (
+                    set.intersection(*(set(branch) for branch in branch_partials))
+                    if branch_partials
+                    else set()
+                )
+                partial_environment = {
+                    name: branch_partials[0][name]
+                    for name in common_partials
+                    if all(
+                        branch[name] == branch_partials[0][name] for branch in branch_partials[1:]
                     )
-                    partial_environment = {
-                        name: branch_partials[0][name]
-                        for name in common_partials
-                        if all(
-                            branch[name] == branch_partials[0][name]
-                            for branch in branch_partials[1:]
-                        )
-                    }
-                    common_lambdas = (
-                        set.intersection(*(set(branch) for branch in branch_lambdas))
-                        if branch_lambdas
-                        else set()
-                    )
-                    lambda_environment = {
-                        name: branch_lambdas[0][name]
-                        for name in common_lambdas
-                        if all(
-                            branch[name] is branch_lambdas[0][name] for branch in branch_lambdas[1:]
-                        )
-                    }
+                }
+                common_lambdas = (
+                    set.intersection(*(set(branch) for branch in branch_lambdas))
+                    if branch_lambdas
+                    else set()
+                )
+                lambda_environment = {
+                    name: branch_lambdas[0][name]
+                    for name in common_lambdas
+                    if all(branch[name] is branch_lambdas[0][name] for branch in branch_lambdas[1:])
+                }
+                return bool(continuing_paths)
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
@@ -6702,7 +6727,7 @@ class MypyAnalyzer:
                     # The loop body is unreachable; only its else suite executes.
                     if n.else_body is not None:
                         walk_node(n.else_body)
-                    return
+                    return None
                 mandatory_single_pass = (
                     self._literal_boolean(n.expr) is True
                     and bool(n.body.body)
@@ -6767,6 +6792,7 @@ class MypyAnalyzer:
                     require_async=bool(n.is_async),
                 )
                 walk_node(n.expr)
+                clear_alias_target(n.index)
                 before_callables = dict(callable_environment)
                 before_partials = dict(partial_environment)
                 before_lambdas = dict(lambda_environment)
@@ -6805,6 +6831,9 @@ class MypyAnalyzer:
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
+                callable_environment.clear()
+                partial_environment.clear()
+                lambda_environment.clear()
 
             elif isinstance(n, TryStmt):
                 # An exception may be raised before or after any assignment in the
@@ -6961,7 +6990,7 @@ class MypyAnalyzer:
                 try_unbound_name_load_ids.append(unbound_name_load_ids)
                 try_definite_unbound_name_load_ids.append(definite_unbound_name_load_ids)
                 try:
-                    walk_node(n.body)
+                    body_can_continue = walk_node(n.body) is not False
                 finally:
                     try_assignment_target_ids.pop()
                     try_unbound_name_load_ids.pop()
@@ -6973,12 +7002,15 @@ class MypyAnalyzer:
                 normal_callables = dict(body_callables)
                 normal_partials = dict(body_partials)
                 normal_lambdas = dict(body_lambdas)
+                normal_can_continue = body_can_continue
+                handler_completions: list[bool] = []
                 handler_callables: list[
                     dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
                 ] = []
                 handler_partials: list[dict[str, _PartialCallable]] = []
                 handler_lambdas: list[dict[str, Any]] = []
-                for handler in n.handlers:
+                for handler_index, handler in enumerate(n.handlers):
+                    handler_var = n.vars[handler_index] if handler_index < len(n.vars) else None
                     flow_environment.clear()
                     string_environment.clear()
                     deferred_environment.clear()
@@ -6995,19 +7027,23 @@ class MypyAnalyzer:
                         for key, value in before_lambdas.items()
                         if key not in try_assigned_names and body_lambdas.get(key) is value
                     }
+                    clear_alias_target(handler_var)
                     possible_execution_depth[0] += 1
                     try:
-                        walk_node(handler)
+                        handler_can_continue = walk_node(handler) is not False
                     finally:
                         possible_execution_depth[0] -= 1
+                    # Python deletes an exception-bound name when leaving its handler.
+                    clear_alias_target(handler_var)
                     handler_callables.append(dict(callable_environment))
                     handler_partials.append(dict(partial_environment))
                     handler_lambdas.append(dict(lambda_environment))
+                    handler_completions.append(handler_can_continue)
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
                             walk_node(exc_type)
-                if n.else_body:
+                if n.else_body and body_can_continue:
                     flow_environment.clear()
                     string_environment.clear()
                     deferred_environment.clear()
@@ -7016,7 +7052,7 @@ class MypyAnalyzer:
                     lambda_environment = dict(body_lambdas)
                     possible_execution_depth[0] += 1
                     try:
-                        walk_node(n.else_body)
+                        normal_can_continue = walk_node(n.else_body) is not False
                     finally:
                         possible_execution_depth[0] -= 1
                     normal_callables = dict(callable_environment)
@@ -7025,8 +7061,28 @@ class MypyAnalyzer:
                 callable_paths = [normal_callables, *handler_callables]
                 partial_paths = [normal_partials, *handler_partials]
                 lambda_paths = [normal_lambdas, *handler_lambdas]
+                completion_paths = [normal_can_continue, *handler_completions]
+                can_continue = any(completion_paths)
+                if not n.finally_body:
+                    callable_paths = [
+                        path
+                        for path, complete in zip(callable_paths, completion_paths, strict=True)
+                        if complete
+                    ]
+                    partial_paths = [
+                        path
+                        for path, complete in zip(partial_paths, completion_paths, strict=True)
+                        if complete
+                    ]
+                    lambda_paths = [
+                        path
+                        for path, complete in zip(lambda_paths, completion_paths, strict=True)
+                        if complete
+                    ]
                 if callable_paths:
                     callable_environment = self._join_callable_environments(callable_paths)
+                else:
+                    callable_environment.clear()
                 if partial_paths:
                     common_partial = set.intersection(*(set(path) for path in partial_paths))
                     partial_environment = {
@@ -7034,6 +7090,8 @@ class MypyAnalyzer:
                         for key in common_partial
                         if all(path[key] == partial_paths[0][key] for path in partial_paths[1:])
                     }
+                else:
+                    partial_environment.clear()
                 if lambda_paths:
                     common_lambda = set.intersection(*(set(path) for path in lambda_paths))
                     lambda_environment = {
@@ -7041,14 +7099,23 @@ class MypyAnalyzer:
                         for key in common_lambda
                         if all(path[key] is lambda_paths[0][key] for path in lambda_paths[1:])
                     }
+                else:
+                    lambda_environment.clear()
                 if n.finally_body:
                     # Finally runs on every exit from an entered try. Retain
                     # enclosing uncertainty, without adding uncertainty just
                     # because control exits normally, raises, or returns.
-                    walk_node(n.finally_body)
+                    finally_can_continue = walk_node(n.finally_body) is not False
+                    can_continue = can_continue and finally_can_continue
+                    # Finally is traced for terminal and continuing exits. Its
+                    # merged alias state cannot establish a post-try binding.
+                    callable_environment.clear()
+                    partial_environment.clear()
+                    lambda_environment.clear()
                 flow_environment.clear()
                 string_environment.clear()
                 deferred_environment.clear()
+                return can_continue
 
             elif isinstance(n, AwaitExpr):
                 if isinstance(n.expr, CallExpr):
@@ -7057,6 +7124,8 @@ class MypyAnalyzer:
 
             elif isinstance(n, (RaiseStmt, AssertStmt)):
                 walk_node(n.expr)
+                if isinstance(n, RaiseStmt):
+                    return False
 
             elif isinstance(n, IndexExpr):
                 walk_node(n.base)
@@ -7069,7 +7138,7 @@ class MypyAnalyzer:
                     if (n.op == "and" and left_truth is False) or (
                         n.op == "or" and left_truth is True
                     ):
-                        return
+                        return None
                     if left_truth is None:
                         possible_execution_depth[0] += 1
                         try:
@@ -7212,6 +7281,8 @@ class MypyAnalyzer:
                 # Walk the decorated function
                 if hasattr(n, "func"):
                     walk_node(n.func)
+
+            return None
 
         # Start walking from the function
         # Walk decorators first

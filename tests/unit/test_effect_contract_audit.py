@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -306,7 +307,7 @@ def test_python_only_source_pins_are_enforced_without_distribution_version(
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     loaded = load_effect_contracts(path)
 
-    def audit(python_version: str) -> EffectContractAudit:
+    def audit(python_version: str | None) -> EffectContractAudit:
         return audit_effect_contracts(
             loaded,
             source_root=tmp_path,
@@ -324,6 +325,23 @@ def test_python_only_source_pins_are_enforced_without_distribution_version(
     occurrence = audit(rejected).occurrences[0]
     assert occurrence.audit_status == AuditCallStatus.UNMATCHED
     assert occurrence.reason_code == "package_applicability_unverified"
+
+    unknown_audit = audit(None)
+    unknown = unknown_audit.occurrences[0]
+    assert unknown.audit_status == AuditCallStatus.UNMATCHED
+    assert unknown.reason_code == "package_applicability_unverified"
+    expected_payload = {
+        "source_hashes": {"client.py": source_digest},
+        "versions": {},
+        "python_version": None,
+    }
+    expected_hash = (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(expected_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    assert unknown_audit.provenance.package_evidence_hash == expected_hash
 
 
 @pytest.mark.parametrize("distribution", ["zope-interface", "ZoPe.Interface", "zope__..interface"])

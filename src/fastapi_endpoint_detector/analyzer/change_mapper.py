@@ -14,7 +14,6 @@ import heapq
 import itertools
 import json
 import os
-import platform
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -2132,6 +2131,13 @@ class ChangeMapper:
                 raise ChangeMapperError(
                     "effect contract audit requires complete typed endpoint analysis"
                 )
+            if (
+                dependencies.analysis_incomplete
+                or dependencies.analysis_limitations
+                or dependencies.build_failed
+            ):
+                # A truncated call corpus cannot establish complete contract coverage.
+                return None
             rows.append((endpoint, dependencies.get_resolved_call_sites()))
         effective_depth = (
             self.config.parser.max_depth if self.config.analysis.track_transitive else 1
@@ -2149,7 +2155,6 @@ class ChangeMapper:
             verified_mypy_source_hashes=self.mypy_analyzer.verified_mypy_source_hashes,
             verified_package_source_hashes=self.mypy_analyzer.verified_package_source_hashes,
             verified_package_versions=self.mypy_analyzer.verified_package_versions,
-            target_python_version=platform.python_version(),
         )
 
     def _attach_contract_evidence(

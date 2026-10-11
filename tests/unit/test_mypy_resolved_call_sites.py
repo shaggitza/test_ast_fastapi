@@ -1301,3 +1301,284 @@ def test_try_join_does_not_promote_one_path_callable_assignment(tmp_path: Path) 
         site.canonical_symbol and site.canonical_symbol.endswith(".second_effect")
         for site in callback_sites
     )
+
+
+def test_terminal_branches_retain_only_continuing_aliases(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "def survivor() -> None: pass\n"
+        "def poison() -> None: pass\n"
+        "def returned() -> int: return 1\n"
+        "def raised() -> Exception: return Exception()\n",
+        encoding="utf-8",
+    )
+    source = (
+        "from effects import survivor, poison, returned, raised\n\n"
+        "def returning(flag: bool) -> None:\n"
+        "    callback = survivor\n"
+        "    if flag:\n"
+        "        callback = poison\n"
+        "        return returned()\n"
+        "    callback()\n\n"
+        "def raising(flag: bool) -> None:\n"
+        "    callback = survivor\n"
+        "    if flag:\n"
+        "        callback = poison\n"
+        "        raise raised()\n"
+        "    callback()\n\n"
+        "def nested(outer: bool, inner: bool) -> None:\n"
+        "    callback = survivor\n"
+        "    if outer:\n"
+        "        callback = poison\n"
+        "        if inner:\n"
+        "            return returned()\n"
+        "        else:\n"
+        "            raise raised()\n"
+        "    callback()\n\n"
+        "def protected(flag: bool) -> None:\n"
+        "    callback = survivor\n"
+        "    if flag:\n"
+        "        try:\n"
+        "            callback = poison\n"
+        "            return returned()\n"
+        "        except Exception:\n"
+        "            raise raised()\n"
+        "    callback()\n\n"
+        "def finalized(flag: bool) -> None:\n"
+        "    callback = survivor\n"
+        "    if flag:\n"
+        "        try:\n"
+        "            callback = poison\n"
+        "            return returned()\n"
+        "        finally:\n"
+        "            callback()\n"
+        "    callback()\n\n"
+        "def all_terminal(flag: bool) -> None:\n"
+        "    callback = poison\n"
+        "    if flag:\n"
+        "        return returned()\n"
+        "    else:\n"
+        "        raise raised()\n"
+        "    callback()\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(source, encoding="utf-8")
+    analyzer = MypyAnalyzer(tmp_path)
+    tree = ast.parse(source)
+    for declaration in tree.body:
+        if not isinstance(declaration, ast.FunctionDef):
+            continue
+        deps = analyzer.analyze_endpoint(
+            _endpoint(main, line=declaration.lineno, name=declaration.name)
+        )
+        sites = deps.get_resolved_call_sites(str(main))
+        final_call = declaration.body[-1]
+        assert isinstance(final_call, ast.Expr)
+        calls = [
+            site for site in _site_by_spelling(sites, "callback") if site.line == final_call.lineno
+        ]
+        if declaration.name == "all_terminal":
+            assert calls == []
+            continue
+        assert len(calls) == 1
+        assert calls[0].status == CallResolutionStatus.EXACT
+        assert calls[0].canonical_symbol and calls[0].canonical_symbol.endswith(".survivor")
+        terminal_calls = [site for site in sites if site.source_spelling in {"returned", "raised"}]
+        assert terminal_calls
+        assert all(site.status == CallResolutionStatus.EXACT for site in terminal_calls)
+        if declaration.name == "finalized":
+            protected = declaration.body[1].body[0]
+            assert isinstance(protected, ast.Try)
+            finally_line = protected.finalbody[0].lineno
+            finally_calls = [
+                site for site in _site_by_spelling(sites, "callback") if site.line == finally_line
+            ]
+            assert len(finally_calls) == 1
+            assert finally_calls[0].canonical_symbol
+            assert finally_calls[0].canonical_symbol.endswith(".poison")
+
+
+def test_loop_binders_clear_callable_partial_and_lambda_aliases(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text("def emit() -> None: pass\n", encoding="utf-8")
+    source = (
+        "from collections.abc import Callable\n"
+        "from functools import partial\n"
+        "from effects import emit\n\n"
+        "def callable_tuple(items: list[tuple[Callable[[], None], object]]) -> None:\n"
+        "    callback = emit\n"
+        "    for callback, other in items:\n"
+        "        callback()\n\n"
+        "def partial_list(items: list[tuple[Callable[[], None], object]]) -> None:\n"
+        "    callback = partial(emit)\n"
+        "    for [callback, other] in items:\n"
+        "        callback()\n\n"
+        "def lambda_star(items: list[tuple[Callable[[], None], int, int]]) -> None:\n"
+        "    callback = lambda: emit()\n"
+        "    for callback, *rest in items:\n"
+        "        callback()\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(source, encoding="utf-8")
+    analyzer = MypyAnalyzer(tmp_path)
+    for declaration in ast.parse(source).body:
+        if not isinstance(declaration, ast.FunctionDef):
+            continue
+        deps = analyzer.analyze_endpoint(
+            _endpoint(main, line=declaration.lineno, name=declaration.name)
+        )
+        loop = declaration.body[-1]
+        assert isinstance(loop, ast.For)
+        calls = [
+            site
+            for site in _site_by_spelling(deps.resolved_call_sites, "callback")
+            if site.line == loop.body[0].lineno
+        ]
+        assert len(calls) == 1
+        assert not (
+            calls[0].status == CallResolutionStatus.EXACT
+            and calls[0].canonical_symbol
+            and calls[0].canonical_symbol.endswith(".emit")
+        )
+        if declaration.name == "lambda_star":
+            lambda_line = declaration.body[0].lineno
+            spans = [
+                span
+                for span in deps.get_source_evidence_spans(str(main))
+                if span.start_line == lambda_line
+            ]
+            assert all(
+                span.execution_state not in {"possible_execution", "established_execution"}
+                for span in spans
+            )
+
+
+def test_except_binders_shadow_and_delete_all_callable_alias_forms(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "def emit() -> None: pass\ndef keep() -> None: pass\n", encoding="utf-8"
+    )
+    source = "from functools import partial\nfrom effects import emit, keep\n\n"
+    for name, binding in (
+        ("direct", "emit"),
+        ("partial_alias", "partial(emit)"),
+        ("lambda_alias", "lambda: emit()"),
+    ):
+        source += (
+            f"def {name}() -> None:\n"
+            f"    callback = {binding}\n"
+            "    safe = keep\n"
+            "    try:\n"
+            "        raise RuntimeError()\n"
+            "    except RuntimeError as callback:\n"
+            "        callback()\n"
+            "        safe()\n"
+            "    callback()\n\n"
+        )
+    main = tmp_path / "main.py"
+    main.write_text(source, encoding="utf-8")
+    analyzer = MypyAnalyzer(tmp_path)
+    for declaration in ast.parse(source).body:
+        if not isinstance(declaration, ast.FunctionDef):
+            continue
+        deps = analyzer.analyze_endpoint(
+            _endpoint(main, line=declaration.lineno, name=declaration.name)
+        )
+        protected = declaration.body[2]
+        assert isinstance(protected, ast.Try)
+        handler_calls = protected.handlers[0].body
+        call_lines = {handler_calls[0].lineno, declaration.body[-1].lineno}
+        callback_calls = [
+            site
+            for site in _site_by_spelling(deps.resolved_call_sites, "callback")
+            if site.line in call_lines
+        ]
+        assert {site.line for site in callback_calls} == call_lines
+        assert all(
+            not (
+                site.status == CallResolutionStatus.EXACT
+                and site.canonical_symbol
+                and site.canonical_symbol.endswith(".emit")
+            )
+            for site in callback_calls
+        )
+        safe_calls = [
+            site
+            for site in _site_by_spelling(deps.resolved_call_sites, "safe")
+            if site.line == handler_calls[1].lineno
+        ]
+        assert len(safe_calls) == 1
+        assert safe_calls[0].status == CallResolutionStatus.EXACT
+        assert safe_calls[0].canonical_symbol and safe_calls[0].canonical_symbol.endswith(".keep")
+        if declaration.name == "lambda_alias":
+            spans = [
+                span
+                for span in deps.get_source_evidence_spans(str(main))
+                if span.start_line == declaration.body[0].lineno
+            ]
+            assert all(
+                span.execution_state not in {"possible_execution", "established_execution"}
+                for span in spans
+            )
+
+
+def test_destructuring_assignment_clears_partial_aliases(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "def emit() -> None: pass\n"
+        "def pair() -> tuple[object, object]: return object(), object()\n",
+        encoding="utf-8",
+    )
+    source = "from functools import partial\nfrom effects import emit, pair\n\n"
+    for name, target in (
+        ("tuple_binding", "other, callback"),
+        ("list_binding", "[other, callback]"),
+    ):
+        source += (
+            f"def {name}() -> None:\n"
+            "    callback = partial(emit)\n"
+            f"    {target} = pair()\n"
+            "    callback()\n\n"
+        )
+    main = tmp_path / "main.py"
+    main.write_text(source, encoding="utf-8")
+    analyzer = MypyAnalyzer(tmp_path)
+    for declaration in ast.parse(source).body:
+        if not isinstance(declaration, ast.FunctionDef):
+            continue
+        deps = analyzer.analyze_endpoint(
+            _endpoint(main, line=declaration.lineno, name=declaration.name)
+        )
+        calls = [
+            site
+            for site in _site_by_spelling(deps.resolved_call_sites, "callback")
+            if site.line == declaration.body[-1].lineno
+        ]
+        assert len(calls) == 1
+        assert not (
+            calls[0].status == CallResolutionStatus.EXACT
+            and calls[0].canonical_symbol
+            and calls[0].canonical_symbol.endswith(".emit")
+        )
+
+
+def test_unknown_context_exit_does_not_export_exact_local_alias(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text("def emit() -> None: pass\n", encoding="utf-8")
+    source = (
+        "from typing import Any\n"
+        "from effects import emit\n\n"
+        "def handler(manager: Any) -> None:\n"
+        "    callback = emit\n"
+        "    with manager:\n"
+        "        callback()\n"
+        "    callback()\n"
+    )
+    main = tmp_path / "main.py"
+    main.write_text(source, encoding="utf-8")
+    deps = MypyAnalyzer(tmp_path).analyze_endpoint(_endpoint(main, line=4))
+    calls = _site_by_spelling(deps.get_resolved_call_sites(str(main)), "callback")
+    inside = [site for site in calls if site.line == 7]
+    after = [site for site in calls if site.line == 8]
+    assert len(inside) == len(after) == 1
+    assert inside[0].canonical_symbol and inside[0].canonical_symbol.endswith(".emit")
+    assert not (
+        after[0].status == CallResolutionStatus.EXACT
+        and after[0].canonical_symbol
+        and after[0].canonical_symbol.endswith(".emit")
+    )
