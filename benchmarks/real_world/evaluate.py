@@ -1084,6 +1084,22 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
     normalized_stage_prs: dict[tuple[str, int], dict[str, int]] = {}
     per_pr_evidence: dict[tuple[str, int], dict[str, Any]] = {}
 
+    def record_timing_samples(predicted_record: dict[str, Any]) -> None:
+        """Retain operational timing, including incomplete predictions."""
+        for name, value in predicted_record.get("timing_seconds", {}).items():
+            protocol = (
+                name if predicted_record.get("schema_version") == 3 else f"legacy_unattested_{name}"
+            )
+            timing_samples[protocol].append(float(value))
+        if "analyzer_seconds" in predicted_record:
+            timing_samples["legacy_analyzer_wall"].append(
+                float(predicted_record["analyzer_seconds"])
+            )
+        if "incremental_seconds" in predicted_record:
+            timing_samples["legacy_reported_incremental_unattested"].append(
+                float(predicted_record["incremental_seconds"])
+            )
+
     for record_key, expected_record in truth.items():
         if expected_record.get("status", "adjudicated") != "adjudicated":
             continue
@@ -1109,14 +1125,35 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
                 "normalized": None,
             }
             continue
+        predicted_record = predictions[record_key]
+        unresolved = predicted_record.get("unresolved", [])
+        if not prediction_is_completed(predicted_record):
+            # Coverage and operational failures remain visible; incomplete
+            # proposals cannot enter any primary or diagnostic quality score.
+            totals["unresolved"] += len(unresolved)
+            per_pr_evidence[record_key] = {
+                "repository": record_key[0],
+                "pr": record_key[1],
+                "truth_status": expected_record.get("status", "adjudicated"),
+                "truth_positive": bool(expected),
+                "terminal_status": "evaluable",
+                "truth_sha256": hashlib.sha256(
+                    json.dumps(
+                        truth_source_by_key[record_key], sort_keys=True, separators=(",", ":")
+                    ).encode()
+                ).hexdigest(),
+                "prediction_status": prediction_status(predicted_record),
+                "unresolved_count": len(unresolved),
+                "raw": None,
+                "normalized": None,
+            }
+            record_timing_samples(predicted_record)
+            continue
+        completed_prediction_records += 1
         reachability_only = {
             item["id"] for item in expected_record.get("reachability_only_entrypoints", [])
         }
-        predicted_record = predictions[record_key]
         predicted, low_predicted = ranked_entrypoints(predicted_record)
-        unresolved = predicted_record.get("unresolved", [])
-        if prediction_is_completed(predicted_record):
-            completed_prediction_records += 1
         tp = len(expected & predicted)
         fp = len(predicted - expected)
         fn = len(expected - predicted)
@@ -1303,19 +1340,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             macro_sums["f1"] += f1
             for metric in ("precision", "recall", "f1"):
                 macro_samples[metric] += 1
-        for name, value in predicted_record.get("timing_seconds", {}).items():
-            protocol = (
-                name if predicted_record.get("schema_version") == 3 else f"legacy_unattested_{name}"
-            )
-            timing_samples[protocol].append(float(value))
-        if "analyzer_seconds" in predicted_record:
-            timing_samples["legacy_analyzer_wall"].append(
-                float(predicted_record["analyzer_seconds"])
-            )
-        if "incremental_seconds" in predicted_record:
-            timing_samples["legacy_reported_incremental_unattested"].append(
-                float(predicted_record["incremental_seconds"])
-            )
+        record_timing_samples(predicted_record)
 
     tp, fp, fn = totals["tp"], totals["fp"], totals["fn"]
     precision = ratio(tp, tp + fp)

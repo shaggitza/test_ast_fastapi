@@ -144,7 +144,11 @@ def _sha256(value: object) -> bool:
 def _pr_rates(row: dict[str, Any], metric: str) -> dict[str, float | None]:
     counts = row[metric]
     tp, fp, fn = counts["tp"], counts["fp"], counts["fn"]
-    precision = tp / (tp + fp) if tp + fp else None
+    precision = (
+        tp / (tp + fp)
+        if tp + fp
+        else (0.0 if row.get("truth_positive") is True and fn > 0 else None)
+    )
     recall = tp / (tp + fn) if tp + fn else None
     f1 = (
         2 * precision * recall / (precision + recall)

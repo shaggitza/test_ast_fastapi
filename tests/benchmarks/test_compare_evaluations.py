@@ -708,3 +708,42 @@ def test_single_denominator_cluster_is_explicitly_degenerate(monkeypatch):
             assert measure["undefined_samples"] == 0
             assert measure["interval"] is not None
             assert measure["degenerate_single_cluster"] is True
+
+
+@pytest.mark.parametrize("metric", ["raw", "normalized"])
+def test_macro_precision_counts_fully_missed_positive_pr(metric: str) -> None:
+    perfect = {
+        "repository": "owner/repo",
+        "truth_positive": True,
+        metric: {"tp": 1, "fp": 0, "fn": 0},
+    }
+    missed = {
+        "repository": "owner/repo",
+        "truth_positive": True,
+        metric: {"tp": 0, "fp": 0, "fn": 1},
+    }
+    negative = {
+        "repository": "owner/repo",
+        "truth_positive": False,
+        metric: {"tp": 0, "fp": 0, "fn": 0},
+    }
+    assert comparison._pr_rates(missed, metric)["precision"] == 0.0
+    assert comparison._pr_rates(negative, metric)["precision"] is None
+    values = comparison._macro_values([perfect, missed], metric)
+    assert values["pr_macro"]["precision"] == 0.5
+    assert values["repository_macro"]["precision"] == 0.5
+
+
+def test_paired_macro_retains_fully_missed_positive_pr(monkeypatch) -> None:
+    monkeypatch.setattr(comparison, "SAMPLES", 12)
+    baseline, candidate = reports(n=2)
+    for report in (baseline, candidate):
+        rows = report["comparison_evidence"]["per_pr"]
+        rows[0]["raw"] = rows[0]["normalized"] = {"tp": 1, "fp": 0, "fn": 0}
+        rows[1]["raw"] = rows[1]["normalized"] = {"tp": 0, "fp": 0, "fn": 1}
+    result = compare(baseline, candidate, seed=19)
+    assert result["diagnostics"]["macro_subset_count"] == 2
+    for metric in ("raw", "normalized"):
+        for aggregation in ("pr_macro", "repository_macro"):
+            precision = result["macro_metrics"][metric][aggregation]["precision"]
+            assert precision["baseline"] == precision["candidate"] == 0.5
