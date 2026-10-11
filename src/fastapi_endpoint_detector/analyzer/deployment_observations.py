@@ -142,7 +142,7 @@ def _unsupported_docker_escape(source: str, path: Path) -> DeploymentObservation
     return None
 
 
-def extract_dockerfile_observations(  # noqa: PLR0912
+def extract_dockerfile_observations(  # noqa: PLR0912, PLR0915
     source: str, source_path: Path | str = "Dockerfile"
 ) -> tuple[DeploymentObservation, ...]:
     """Observe route-relevant ENV, exposed ports, and exec-form startup argv."""
@@ -155,7 +155,10 @@ def extract_dockerfile_observations(  # noqa: PLR0912
         text = raw.strip()
         if not text or text.startswith("#"):
             continue
-        instruction, _, argument = text.partition(" ")
+        match = re.match(r"(\S+)\s+(.*)", text)
+        if match is None:
+            continue
+        instruction, argument = match.groups()
         instruction = instruction.upper()
         if instruction not in _INSTRUCTIONS:
             continue

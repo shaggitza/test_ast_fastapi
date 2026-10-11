@@ -1165,3 +1165,63 @@ def test_span_cache_invalidation_detects_same_size_same_mtime_edit(tmp_path: Pat
     )
     assert len(after) == 1
     assert old_callee_id not in analyzer._python_verified_call_spans[str(main.resolve())]
+
+
+def test_partial_preserves_bound_callback_position_before_later_arguments(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "def first_effect() -> None: pass\n"
+        "def second_effect() -> None: pass\n\n"
+        "def run(first, second) -> None:\n"
+        "    first()\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from functools import partial\n"
+        "from effects import first_effect, second_effect, run\n\n"
+        "def handler() -> None:\n"
+        "    bound = partial(run, first_effect)\n"
+        "    bound(second_effect)\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=5))
+    reached = {reference.symbol_name for reference in deps.referenced_symbols}
+
+    assert any(name.endswith(".first_effect") for name in reached)
+    assert not any(name.endswith(".second_effect") for name in reached)
+
+
+def test_try_join_does_not_promote_one_path_callable_assignment(tmp_path: Path) -> None:
+    (tmp_path / "effects.py").write_text(
+        "def first_effect() -> None: pass\n"
+        "def second_effect() -> None: pass\n"
+        "def risky() -> None: pass\n",
+        encoding="utf-8",
+    )
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from effects import first_effect, second_effect, risky\n\n"
+        "def handler() -> None:\n"
+        "    callback = first_effect\n"
+        "    try:\n"
+        "        risky()\n"
+        "        callback = second_effect\n"
+        "    except Exception:\n"
+        "        pass\n"
+        "    callback()\n",
+        encoding="utf-8",
+    )
+
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=4))
+    callback_sites = [
+        site
+        for site in deps.get_resolved_call_sites(str(main))
+        if site.source_spelling == "callback"
+    ]
+
+    assert callback_sites
+    assert not any(
+        site.canonical_symbol and site.canonical_symbol.endswith(".second_effect")
+        for site in callback_sites
+    )

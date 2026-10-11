@@ -316,18 +316,22 @@ class OutputConfig(BaseModel):
 
     show_confidence: bool = Field(
         default=True,
+        strict=True,
         description="Show confidence scores in output.",
     )
     show_dependency_chain: bool = Field(
         default=False,
+        strict=True,
         description="Show full dependency chain for each affected endpoint.",
     )
     colorize: bool = Field(
         default=True,
+        strict=True,
         description="Use colors in terminal output.",
     )
     verbose: bool = Field(
         default=False,
+        strict=True,
         description="Enable verbose output.",
     )
 
