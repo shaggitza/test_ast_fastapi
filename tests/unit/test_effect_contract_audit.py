@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import hashlib
+from pathlib import Path
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
@@ -15,9 +17,11 @@ from fastapi_endpoint_detector.models.effect_contract import (
     ResolvedCallSite,
     ResourceIdentityEvidence,
     load_effect_contracts,
+    load_effect_preset,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
+    EffectContractAudit,
     EffectContractAuditError,
 )
 from fastapi_endpoint_detector.models.endpoint import (
@@ -29,9 +33,6 @@ from fastapi_endpoint_detector.models.endpoint import (
     HandlerInfo,
     InventoryStatus,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _loaded(path: Path):
@@ -130,6 +131,252 @@ def _audit(
         cache_enabled=cache_enabled,
         resolver_versions=("mypy@1.19.1",),
     )
+
+
+def test_motor_contract_requires_exact_pinned_typed_sources(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    site = _site(
+        tmp_path,
+        column=2,
+        symbol="motor.core.AgnosticCollection.insert_one",
+        invocation=InvocationKind.INSTANCE_METHOD,
+        spelling="collection.insert_one",
+    )
+    loaded = load_effect_preset("mongodb-v1")
+    valid_hashes = {
+        "motor/core.pyi": "sha256:648fa05c34b81d6510b0cc672ac041e9ebfbb88c7ffbb5573e6d40c8571dcde0",
+        "motor/motor_asyncio.pyi": (
+            "sha256:6103c4af1c7c81ba3f7bccbfb478f897982eb0e38fef6592a111a22e41eee736"
+        ),
+    }
+    metadata_hashes = {
+        "motor-3.6.0.dist-info/METADATA": (
+            "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+        )
+    }
+
+    def audit(
+        source_hashes: dict[str, str],
+        versions: dict[str, str],
+        metadata_hashes: dict[str, str] | None = None,
+    ) -> EffectContractAudit:
+        return audit_effect_contracts(
+            loaded,
+            source_root=tmp_path,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, [site])],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=False,
+            resolver_versions=("mypy@1.19.1",),
+            verified_mypy_source_hashes=source_hashes,
+            verified_package_source_hashes=metadata_hashes or {},
+            verified_package_versions=versions,
+        )
+
+    matched = audit(valid_hashes, {"motor": "3.6.0"}, metadata_hashes)
+    occurrence = matched.occurrences[0]
+    assert occurrence.audit_status == AuditCallStatus.MATCHED
+    assert matched.scope.package_applicability == "source_pins_evaluated"
+
+    for changed in (
+        {},
+        {**valid_hashes, "motor/core.pyi": "sha256:" + "0" * 64},
+        {
+            **valid_hashes,
+            "motor/motor_asyncio.pyi": "sha256:" + "0" * 64,
+        },
+    ):
+        rejected = audit(changed, {"motor": "3.6.0"}, metadata_hashes).occurrences[0]
+        assert rejected.resolver_status == CallResolutionStatus.EXACT
+        assert rejected.audit_status == AuditCallStatus.UNMATCHED
+        assert rejected.reason_code == "package_applicability_unverified"
+    for versions in ({}, {"motor": "3.6.1"}, {"motor": "3.6.0rc1"}):
+        rejected = audit(valid_hashes, versions, metadata_hashes).occurrences[0]
+        assert rejected.audit_status == AuditCallStatus.UNMATCHED
+        assert rejected.reason_code == "package_applicability_unverified"
+    rejected_metadata = audit(
+        valid_hashes,
+        {"motor": "3.6.0"},
+        {"motor-3.6.0.dist-info/METADATA": "sha256:" + "0" * 64},
+    ).occurrences[0]
+    assert rejected_metadata.audit_status == AuditCallStatus.UNMATCHED
+    assert rejected_metadata.reason_code == "package_applicability_unverified"
+
+
+def test_denied_motor_metadata_read_is_audited_as_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    package = tmp_path / "motor"
+    package.mkdir()
+    core = package / "core.pyi"
+    core.write_text(
+        "class AgnosticCollection:\n    def insert_one(self, doc: object) -> None: ...\n",
+        encoding="utf-8",
+    )
+    asyncio_stub = package / "motor_asyncio.pyi"
+    asyncio_stub.write_text("from .core import AgnosticCollection\n", encoding="utf-8")
+    dist = tmp_path / "motor-3.6.0.dist-info"
+    dist.mkdir()
+    metadata = dist / "METADATA"
+    metadata.write_text("Name: motor\nVersion: 3.6.0\n", encoding="utf-8")
+    app_path = tmp_path / "app.py"
+    app_path.write_text(
+        "from motor.core import AgnosticCollection\n"
+        "def handler(c: AgnosticCollection) -> None:\n"
+        "    c.insert_one({})\n",
+        encoding="utf-8",
+    )
+    endpoint = Endpoint(
+        path="/metadata-denied",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+    )
+    original_read_bytes = Path.read_bytes
+
+    def deny_metadata(path: Path) -> bytes:
+        if path == metadata:
+            raise PermissionError("synthetic metadata denial")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", deny_metadata)
+    analyzer = MypyAnalyzer(tmp_path)
+    analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+    site = _site(
+        tmp_path,
+        column=5,
+        symbol="motor.core.AgnosticCollection.insert_one",
+        invocation=InvocationKind.INSTANCE_METHOD,
+        spelling="c.insert_one",
+    )
+    audit = audit_effect_contracts(
+        load_effect_preset("mongodb-v1"),
+        source_root=tmp_path,
+        inventory=EndpointInventory(endpoints=[endpoint]),
+        endpoint_call_sites=[(endpoint, [site])],
+        track_transitive=False,
+        max_depth=1,
+        cache_enabled=False,
+        resolver_versions=("mypy@1.19.1",),
+        verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
+        verified_package_source_hashes=analyzer.verified_package_source_hashes,
+        verified_package_versions=analyzer.verified_package_versions,
+    )
+    occurrence = audit.occurrences[0]
+    assert occurrence.audit_status == AuditCallStatus.UNMATCHED
+    assert occurrence.reason_code == "package_applicability_unverified"
+
+
+@pytest.mark.parametrize(
+    "constraint, accepted, rejected",
+    [(">=3.10,<4", "3.11.16", "2.7.18"), ("==3.14.0rc1", "3.14.0rc1", "3.14.0rc2")],
+)
+def test_python_only_source_pins_are_enforced_without_distribution_version(
+    tmp_path: Path, constraint: str, accepted: str, rejected: str
+) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    site = _site(tmp_path, column=2)
+    client_source = tmp_path / "client.py"
+    client_source.write_text("def emit(value): ...\n", encoding="utf-8")
+    source_digest = "sha256:" + hashlib.sha256(client_source.read_bytes()).hexdigest()
+    path = tmp_path / "python-only.yaml"
+    document = {
+        "schema_version": 1,
+        "preset": {
+            "id": "python-only",
+            "version": "1.0.0",
+            "provenance": {"kind": "user", "source": "python-only.yaml"},
+        },
+        "contracts": [
+            {
+                "id": "emit",
+                "symbol": "company.events.emit",
+                "invocation": "function",
+                "operation": "publish",
+                "channel": "message_bus",
+                "package": {
+                    "python": constraint,
+                    "source_hashes": {"client.py": source_digest},
+                },
+            }
+        ],
+    }
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    loaded = load_effect_contracts(path)
+
+    def audit(python_version: str) -> EffectContractAudit:
+        return audit_effect_contracts(
+            loaded,
+            source_root=tmp_path,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, [site])],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=False,
+            resolver_versions=("mypy@1.19.1",),
+            verified_mypy_source_hashes={"client.py": source_digest},
+            target_python_version=python_version,
+        )
+
+    assert audit(accepted).occurrences[0].audit_status == AuditCallStatus.MATCHED
+    occurrence = audit(rejected).occurrences[0]
+    assert occurrence.audit_status == AuditCallStatus.UNMATCHED
+    assert occurrence.reason_code == "package_applicability_unverified"
+
+
+@pytest.mark.parametrize("distribution", ["zope-interface", "ZoPe.Interface", "zope__..interface"])
+def test_source_pinned_distribution_separator_and_prerelease_applicability(
+    tmp_path: Path, distribution: str
+) -> None:
+    digest = "sha256:" + "a" * 64
+    path = tmp_path / "effects.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "distribution",
+                    "version": "1",
+                    "provenance": {"kind": "user", "source": "effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "emit",
+                        "symbol": "company.events.emit",
+                        "invocation": "function",
+                        "operation": "publish",
+                        "channel": "message_bus",
+                        "package": {
+                            "distribution": distribution,
+                            "version": "==2.0rc1",
+                            "source_hashes": {"client.py": digest},
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    endpoint = _endpoint(tmp_path, "handler")
+    loaded = load_effect_contracts(path)
+    for observed_version, expected_status in [
+        ("2.0rc1", AuditCallStatus.MATCHED),
+        ("2.0rc2", AuditCallStatus.UNMATCHED),
+    ]:
+        audit = audit_effect_contracts(
+            loaded,
+            source_root=tmp_path,
+            inventory=EndpointInventory(endpoints=[endpoint]),
+            endpoint_call_sites=[(endpoint, [_site(tmp_path, column=2)])],
+            track_transitive=False,
+            max_depth=1,
+            cache_enabled=False,
+            resolver_versions=("mypy@1.19.1",),
+            verified_mypy_source_hashes={"client.py": digest},
+            verified_package_versions={"zope-interface": observed_version},
+        )
+        assert audit.occurrences[0].audit_status == expected_status
 
 
 def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) -> None:
@@ -556,3 +803,158 @@ def test_package_applicability_is_reported_but_not_used_for_matching(tmp_path: P
 
     assert audit.occurrences[0].audit_status == AuditCallStatus.MATCHED
     assert audit.scope.package_applicability == "not_evaluated"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "stable",
+        "changed",
+        "removed",
+        "unreadable",
+        "added",
+        "source_changed",
+        "source_removed",
+        "source_unreadable",
+    ],
+)
+def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold evidence fixture
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    package = tmp_path / "race_pkg"
+    package.mkdir()
+    stub = package / "__init__.pyi"
+    stub.write_text("def emit(value: str) -> None: ...\n", encoding="utf-8")
+    dist = tmp_path / "race-pkg-1.0.dist-info"
+    dist.mkdir()
+    metadata = dist / "METADATA"
+    metadata.write_text("Name: race-pkg\nVersion: 1.0\n", encoding="utf-8")
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from race_pkg import emit\ndef handler() -> None:\n    emit('value')\n",
+        encoding="utf-8",
+    )
+    endpoint = Endpoint(
+        path="/metadata-snapshot",
+        methods=[EndpointMethod.POST],
+        handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+    )
+    pins = {
+        path.relative_to(tmp_path).as_posix(): "sha256:"
+        + hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (stub, metadata)
+    }
+    contracts = tmp_path / "metadata-effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "metadata-snapshot",
+                    "version": "1",
+                    "provenance": {"kind": "user", "source": contracts.name},
+                },
+                "contracts": [
+                    {
+                        "id": "put",
+                        "symbol": "race_pkg.emit",
+                        "invocation": "function",
+                        "operation": "write",
+                        "channel": "filesystem",
+                        "package": {
+                            "distribution": "race-pkg",
+                            "version": "==1.0",
+                            "source_hashes": pins,
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_read = Path.read_bytes
+    reads = 0
+
+    def raced_read(path: Path) -> bytes:
+        nonlocal reads
+        if path != metadata:
+            return original_read(path)
+        reads += 1
+        if mutation == "unreadable" and reads > 1:
+            raise PermissionError("synthetic final metadata read denial")
+        raw = original_read(path)
+        if reads == 1:
+            if mutation == "changed":
+                path.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
+            elif mutation == "removed":
+                path.unlink()
+        return raw
+
+    monkeypatch.setattr(Path, "read_bytes", raced_read)
+    if mutation == "added" or mutation.startswith("source_"):
+        original_fingerprint = MypyAnalyzer._fingerprint_typed_environment
+
+        def add_before_final_snapshot(
+            self: MypyAnalyzer,
+            *,
+            authenticated_metadata_hashes: dict[str, str] | None = None,
+            authenticated_metadata_roots: set[Path] | None = None,
+        ) -> str:
+            if authenticated_metadata_hashes is not None and mutation.startswith("source_"):
+                assert self.verified_mypy_source_hashes
+                if mutation == "source_changed":
+                    stub.write_text("def emit(value: int) -> None: ...\n", encoding="utf-8")
+                elif mutation == "source_removed":
+                    stub.unlink()
+                else:
+
+                    def deny_source_read(path: Path) -> bytes:
+                        if path == stub:
+                            raise PermissionError("synthetic final source read denial")
+                        return raced_read(path)
+
+                    monkeypatch.setattr(Path, "read_bytes", deny_source_read)
+            if authenticated_metadata_hashes is not None and mutation == "added":
+                assert str(metadata.resolve()) in authenticated_metadata_hashes
+                added = dist.parent / "race-pkg-2.0.dist-info"
+                added.mkdir()
+                added_metadata = added / "METADATA"
+                assert str(added_metadata.resolve()) not in authenticated_metadata_hashes
+                added_metadata.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
+            return original_fingerprint(
+                self,
+                authenticated_metadata_hashes=authenticated_metadata_hashes,
+                authenticated_metadata_roots=authenticated_metadata_roots,
+            )
+
+        monkeypatch.setattr(
+            MypyAnalyzer, "_fingerprint_typed_environment", add_before_final_snapshot
+        )
+    analyzer = MypyAnalyzer(tmp_path)
+    dependencies = analyzer.analyze_endpoint(endpoint)
+    sites = [site for site in dependencies.resolved_call_sites if site.line == 3]
+    assert len(sites) == 1
+    assert sites[0].canonical_symbol == "race_pkg.emit"
+    audit = audit_effect_contracts(
+        load_effect_contracts(contracts),
+        source_root=tmp_path,
+        inventory=EndpointInventory(endpoints=[endpoint]),
+        endpoint_call_sites=[(endpoint, sites)],
+        track_transitive=False,
+        max_depth=1,
+        cache_enabled=False,
+        resolver_versions=("mypy@1.19.1",),
+        verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
+        verified_package_source_hashes=analyzer.verified_package_source_hashes,
+        verified_package_versions=analyzer.verified_package_versions,
+    )
+    occurrence = audit.occurrences[0]
+    if mutation == "stable":
+        assert reads == 2
+        assert occurrence.audit_status == AuditCallStatus.MATCHED
+        assert analyzer.verified_package_versions["race-pkg"] == "1.0"
+    else:
+        assert occurrence.audit_status == AuditCallStatus.UNMATCHED
+        assert occurrence.reason_code == "package_applicability_unverified"
+        assert analyzer.verified_package_versions == {}
+        assert analyzer.verified_package_source_hashes == {}
