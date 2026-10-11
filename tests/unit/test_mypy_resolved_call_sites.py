@@ -302,9 +302,9 @@ def test_bounded_callable_returns_parameters_and_partials_are_traced(tmp_path: P
     reached_symbols = {reference.symbol_name for reference in deps.referenced_symbols}
     assert any(symbol.endswith(".returned_effect") for symbol in reached_symbols)
     assert any(symbol.endswith(".parameter_effect") for symbol in reached_symbols)
-    # A partial with bound arguments is deliberately not forwarded as an alias:
-    # the finite callable state does not preserve those arguments.
-    assert not any(symbol.endswith(".partial_effect") for symbol in reached_symbols)
+    # The exact bound partial target is traced; unrelated handlers and the
+    # later callback argument remain isolated below and in the focused control.
+    assert any(symbol.endswith(".partial_effect") for symbol in reached_symbols)
     contextual_callback_sites = [
         site
         for site in deps.get_resolved_call_sites(effects_path)
