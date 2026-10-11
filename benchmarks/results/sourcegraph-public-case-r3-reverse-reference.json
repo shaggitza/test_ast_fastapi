@@ -1,0 +1,28 @@
+{
+  "protocol_version": 1,
+  "case": {
+    "profile": "gh20-sourcegraph-public-case-r3-v1",
+    "source_lock": "benchmarks/real_world/corpus.json",
+    "source_lock_git_blob": "c34f08548ab7e70c805dac5e3373c16a427ad32b",
+    "source_lock_sha256": "7c4ecfd562d2e01079a955e8214afd4e9e1a408f73ed392d4606eecbc649f062",
+    "source_record": "open-webui/open-webui#26924",
+    "repository": "open-webui/open-webui",
+    "revision": "0f8846b7fc8c210945366defbd1ed941b039a691",
+    "path": "backend/open_webui/utils/security_headers.py",
+    "symbol": "SecurityHeadersMiddleware"
+  },
+  "operation": "reverse_reference",
+  "status": "unavailable",
+  "transport": {
+    "http_status": 200,
+    "elapsed_seconds": 0.456628,
+    "response_bytes": 48,
+    "truncated": false,
+    "redirects": 0
+  },
+  "endpoint": "https://sourcegraph.com/.api/graphql",
+  "request": "{\"query\":\"query($query: String!) { search(query: $query) { results { matchCount } } }\",\"variables\":{\"query\":\"repo:^github.com/open-webui/open-webui$ rev:0f8846b7fc8c210945366defbd1ed941b039a691 file:^backend/open_webui/utils/security_headers.py$ type:refs SecurityHeadersMiddleware\"}}",
+  "response_raw": "{\"data\":{\"search\":{\"results\":{\"matchCount\":0}}}}",
+  "error": "index_unverified_text_search_not_precise_reference",
+  "provider_evidence": null
+}
