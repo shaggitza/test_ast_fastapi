@@ -633,6 +633,11 @@ def _contract_document_payload(contract: EffectContract) -> dict[str, Any]:
     """Serialize a document contract without adding default-false hash fields."""
     payload = contract.model_dump(mode="json", exclude_none=True)
     behavior = payload.get("behavior")
-    if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
-        behavior.pop("stage_receiver_from_yield")
+    if isinstance(behavior, dict):
+        for field in (
+            "stage_receiver_from_yield",
+            "transaction_target_from_receiver",
+        ):
+            if behavior.get(field) is False:
+                behavior.pop(field)
     return payload
