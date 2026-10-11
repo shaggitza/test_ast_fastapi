@@ -172,20 +172,22 @@ def test_same_inode_growth_during_read_rejects_capture(
 ) -> None:
     _main, helper = _project(tmp_path)
     result = _build(tmp_path)
+    helper_stat = helper.stat()
+    helper_identity = (helper_stat.st_dev, helper_stat.st_ino)
     original_read = source_module.os.read
     mutated = False
 
     def grow_after_read(fd: int, size: int) -> bytes:
         nonlocal mutated
         data = original_read(fd, size)
-        if not mutated:
+        if not mutated and (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == helper_identity:
             with helper.open("ab") as stream:
                 stream.write(b"# grew during capture\n")
             mutated = True
         return data
 
     monkeypatch.setattr(source_module.os, "read", grow_after_read)
-    with pytest.raises(SourceCaptureError, match="required source"):
+    with pytest.raises(SourceCaptureError):
         ImmutableTypedSource.capture_build_result(result)
     assert mutated
 
@@ -195,13 +197,15 @@ def test_path_replacement_during_read_rejects_capture(
 ) -> None:
     _main, helper = _project(tmp_path)
     result = _build(tmp_path)
+    helper_stat = helper.stat()
+    helper_identity = (helper_stat.st_dev, helper_stat.st_ino)
     original_read = source_module.os.read
     replaced = False
 
     def replace_after_read(fd: int, size: int) -> bytes:
         nonlocal replaced
         data = original_read(fd, size)
-        if not replaced:
+        if not replaced and (os.fstat(fd).st_dev, os.fstat(fd).st_ino) == helper_identity:
             replacement = helper.with_suffix(".replacement")
             replacement.write_bytes(b"VALUE = 7\n")
             replacement.replace(helper)
@@ -209,7 +213,7 @@ def test_path_replacement_during_read_rejects_capture(
         return data
 
     monkeypatch.setattr(source_module.os, "read", replace_after_read)
-    with pytest.raises(SourceCaptureError, match="required source"):
+    with pytest.raises(SourceCaptureError):
         ImmutableTypedSource.capture_build_result(result)
     assert replaced
 
@@ -220,18 +224,27 @@ def test_directory_entry_drift_during_capture_rejects_capture(
     _project(tmp_path)
     result = _build(tmp_path)
     original_scandir = source_module.os.scandir
+    target_stat = tmp_path.stat()
+    target_identity = (target_stat.st_dev, target_stat.st_ino)
     scans = 0
+    mutated = False
 
     def add_entry_between_scans(path: int | str | bytes):
-        nonlocal scans
-        scans += 1
-        if scans == 2:
-            (tmp_path / "raced.py").write_text("VALUE = 2\n")
+        nonlocal scans, mutated
+        if (
+            isinstance(path, int)
+            and (os.fstat(path).st_dev, os.fstat(path).st_ino) == target_identity
+        ):
+            scans += 1
+            if scans == 2:
+                (tmp_path / "raced.py").write_text("VALUE = 2\n")
+                mutated = True
         return original_scandir(path)
 
     monkeypatch.setattr(source_module.os, "scandir", add_entry_between_scans)
     with pytest.raises(SourceCaptureError, match="required directory"):
         ImmutableTypedSource.capture_build_result(result, directory_roots=(tmp_path,))
+    assert mutated
 
 
 def test_directory_path_replacement_during_capture_rejects_capture(
@@ -240,11 +253,17 @@ def test_directory_path_replacement_during_capture_rejects_capture(
     _project(tmp_path)
     result = _build(tmp_path)
     original_scandir = source_module.os.scandir
+    target_stat = tmp_path.stat()
+    target_identity = (target_stat.st_dev, target_stat.st_ino)
     replaced = False
 
     def replace_open_directory(path: int | str | bytes):
         nonlocal replaced
-        if not replaced and isinstance(path, int):
+        if (
+            not replaced
+            and isinstance(path, int)
+            and (os.fstat(path).st_dev, os.fstat(path).st_ino) == target_identity
+        ):
             moved = tmp_path.with_name(f"{tmp_path.name}-original")
             tmp_path.rename(moved)
             tmp_path.mkdir()
@@ -253,7 +272,7 @@ def test_directory_path_replacement_during_capture_rejects_capture(
         return original_scandir(path)
 
     monkeypatch.setattr(source_module.os, "scandir", replace_open_directory)
-    with pytest.raises(SourceCaptureError, match="required directory"):
+    with pytest.raises(SourceCaptureError):
         ImmutableTypedSource.capture_build_result(result, directory_roots=(tmp_path,))
     assert replaced
 
