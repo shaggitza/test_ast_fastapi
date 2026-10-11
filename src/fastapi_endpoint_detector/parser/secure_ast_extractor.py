@@ -1311,7 +1311,13 @@ class SecureASTExtractor:
                 raise SecureASTExtractorError(
                     f"explicit app entry module {module_name!r} is not project-local or unique"
                 )
-            explicit_object = self._object_at(explicit_module, symbol, None)
+            explicit_object = self._resolve_object(
+                ast.Name(id=symbol, ctx=ast.Load()),
+                explicit_module,
+                aliases,
+                modules,
+                2**31 - 1,
+            )
             if explicit_object is not None:
                 if explicit_object.kind != "app":
                     raise SecureASTExtractorError("explicit app entry object is not a FastAPI app")
