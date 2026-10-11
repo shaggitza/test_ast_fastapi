@@ -121,6 +121,88 @@ def _project(root: Path) -> tuple[Path, Path]:
     return contracts, diff
 
 
+def _savepoint_target_project(root: Path) -> tuple[Path, Path]:
+    contracts, diff = _ordered_project(root)
+    source = root / "main.py"
+    text = source.read_text(encoding="utf-8")
+    text = text.replace(
+        "    def begin_nested(self) -> None: pass",
+        "    def begin_nested(self) -> NestedTransaction: return NestedTransaction()",
+        1,
+    )
+    text += (
+        "\n@app.post('/nested-target')\n"
+        "def nested_target() -> None:\n"
+        "    session = Session()\n"
+        "    transaction = session.begin_nested()\n"
+        "    session.add('nested-target')\n"
+        "    transaction.commit()\n\n"
+        "@app.post('/nested-target-rollback')\n"
+        "def nested_target_rollback() -> None:\n"
+        "    session = Session()\n"
+        "    transaction = session.begin_nested()\n"
+        "    session.add('nested-target-rollback')\n"
+        "    transaction.rollback()\n\n"
+        "@app.post('/nested-rebound-target')\n"
+        "def nested_rebound_target() -> None:\n"
+        "    session = Session()\n"
+        "    transaction = session.begin_nested()\n"
+        "    session.add('nested-rebound')\n"
+        "    transaction = session.begin_nested()\n"
+        "    transaction.commit()\n\n"
+        "@app.post('/nested-alias-target')\n"
+        "def nested_alias_target() -> None:\n"
+        "    session = Session()\n"
+        "    transaction = session.begin_nested()\n"
+        "    alias = transaction\n"
+        "    session.add('nested-alias')\n"
+        "    alias.commit()\n\n"
+        "@app.post('/nested-foreign-target')\n"
+        "def nested_foreign_target() -> None:\n"
+        "    session = Session()\n"
+        "    session.begin_nested()\n"
+        "    session.add('nested-foreign')\n"
+        "    foreign = ForeignTransaction()\n"
+        "    foreign.commit()\n\n"
+        "@final\n"
+        "class ForeignTransaction:\n"
+        "    def commit(self) -> None: pass\n"
+        "    def rollback(self) -> None: pass\n\n"
+        "@final\n"
+        "class NestedTransaction:\n"
+        "    def commit(self) -> None: pass\n"
+        "    def rollback(self) -> None: pass\n"
+    )
+    source.write_text(text, encoding="utf-8")
+
+    document = yaml.safe_load(contracts.read_text(encoding="utf-8"))
+    for item in document["contracts"]:
+        if item["id"] == "begin_nested":
+            item["behavior"]["returns_transaction_scope"] = "savepoint"
+    document["contracts"].extend(
+        [
+            {
+                "id": "nested-transaction-commit",
+                "symbol": "main.NestedTransaction.commit",
+                "invocation": "instance_method",
+                "operation": "commit",
+                "channel": "sql",
+                "behavior": {"transaction_target_from_receiver": True},
+            },
+            {
+                "id": "nested-transaction-rollback",
+                "symbol": "main.NestedTransaction.rollback",
+                "invocation": "instance_method",
+                "operation": "rollback",
+                "channel": "sql",
+                "behavior": {"transaction_target_from_receiver": True},
+            },
+        ]
+    )
+    contracts.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return contracts, diff
+
+
 def _candidate_projection(report: AnalysisReport) -> list[dict[str, object]]:
     return [item.model_dump(mode="json") for item in report.candidate_endpoints]
 
@@ -267,6 +349,7 @@ def _langflow_fixture_transaction_reports(fixture: Path):
         fixture,
         audit,
         transaction,
+        effects,
         max_pairs=8,
     )
     return audit, transaction, paths
@@ -888,7 +971,7 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
     _assert_open_receiver_flush_is_unmatched(configured)
     paths = configured.sql_transaction_path_report
     assert paths is not None
-    assert paths.schema_version == 5
+    assert paths.schema_version == 6
     assert paths.summary.model_dump() == {
         "ordered_paths": 4,
         "ordered_flushes": 1,
@@ -980,6 +1063,72 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         assert "sql_transaction_path_report" in rendered or "sql ordered paths" in rendered
     for output_format in ("text", "markdown", "html"):
         assert "flushes" in get_formatter(output_format).format(configured).lower()
+
+
+def test_savepoint_boundary_target_requires_exact_returned_transaction_binding(
+    tmp_path: Path,
+) -> None:
+    contracts, diff = _savepoint_target_project(tmp_path)
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                sql_transaction_diagnostics=True,
+                sql_transaction_ordered_paths=True,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    paths = report.sql_transaction_path_report
+    assert paths is not None
+    target_paths = {
+        item.function_name: item
+        for item in paths.ordered_paths
+        if item.receiver_relation == "returned_transaction"
+    }
+    assert set(target_paths) == {"nested_target", "nested_target_rollback"}
+    assert target_paths["nested_target"].boundary == "commit"
+    assert target_paths["nested_target"].boundary_target_scope.value == "savepoint"
+    assert target_paths["nested_target_rollback"].boundary == "rollback"
+    assert target_paths["nested_target_rollback"].boundary_target_scope.value == "savepoint"
+    direct_session_boundary = next(
+        item
+        for item in paths.ordered_paths
+        if item.function_name == "nested" and item.boundary == "commit"
+    )
+    assert direct_session_boundary.begin_scope.value == "savepoint"
+    assert direct_session_boundary.boundary_target_scope.value == "unknown"
+    assert not any(
+        item.function_name
+        in {"nested_rebound_target", "nested_alias_target", "nested_foreign_target"}
+        and item.receiver_relation == "returned_transaction"
+        for item in paths.ordered_paths
+    )
+    foreign_call = next(
+        item
+        for item in report.effect_contract_audit.occurrences
+        if item.source_spelling == "foreign.commit"
+    )
+    assert foreign_call.canonical_symbol == "main.ForeignTransaction.commit"
+    assert foreign_call.audit_status.value == "unmatched"
+    assert all(item.persistence_status == "not_established" for item in paths.ordered_paths)
+    assert report.sql_transaction_report is not None
+    assert report.sql_transaction_report.status == "diagnostic_only"
+    assert _candidate_projection(report) == _candidate_projection(
+        ChangeMapper(
+            app_path=tmp_path,
+            config=Config(
+                analysis=AnalysisConfig(
+                    effect_contracts=contracts,
+                    sql_transaction_diagnostics=True,
+                )
+            ),
+            secure_ast=True,
+            use_cache=False,
+        ).analyze_diff(diff)
+    )
 
 
 def test_ordered_paths_are_explicit_and_atomically_bounded(tmp_path: Path) -> None:
@@ -1292,7 +1441,9 @@ def test_source_projection_covers_each_shared_handler_route() -> None:
         resolver_versions=("pinned_fixture_ast@1",),
     )
     transaction = build_sql_transaction_diagnostics(effects, audit)
-    paths = build_sql_transaction_path_diagnostics(fixture, audit, transaction, max_pairs=1)
+    paths = build_sql_transaction_path_diagnostics(
+        fixture, audit, transaction, effects, max_pairs=1
+    )
     expected_ids = {ref.id for occurrence in audit.occurrences for ref in occurrence.endpoints}
     assert len(expected_ids) == 2
     assert {item.endpoint_id for item in paths.source_projections} == expected_ids

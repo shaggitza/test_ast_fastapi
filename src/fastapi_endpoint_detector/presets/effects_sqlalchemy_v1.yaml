@@ -47,14 +47,14 @@ contracts:
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction, context_exit: transaction_commit_rollback}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction, context_exit: transaction_commit_rollback, returns_transaction_scope: transaction}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-session-begin-nested
     symbol: sqlalchemy.orm.session.Session.begin_nested
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint, context_exit: savepoint_release_rollback}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint, context_exit: savepoint_release_rollback, returns_transaction_scope: savepoint}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-session-commit
     symbol: sqlalchemy.orm.session.Session.commit
@@ -69,6 +69,20 @@ contracts:
     operation: rollback
     channel: sql
     behavior: {async_mode: sync, timing: immediate}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-transaction-commit
+    symbol: sqlalchemy.orm.session.SessionTransaction.commit
+    invocation: instance_method
+    operation: commit
+    channel: sql
+    behavior: {async_mode: sync, timing: immediate, transaction_target_from_receiver: true}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-session-transaction-rollback
+    symbol: sqlalchemy.orm.session.SessionTransaction.rollback
+    invocation: instance_method
+    operation: rollback
+    channel: sql
+    behavior: {async_mode: sync, timing: immediate, transaction_target_from_receiver: true}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-async-session-add
     symbol: sqlalchemy.ext.asyncio.session.AsyncSession.add
@@ -110,14 +124,14 @@ contracts:
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction, context_exit: transaction_commit_rollback}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: transaction, context_exit: transaction_commit_rollback, returns_transaction_scope: transaction}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-async-session-begin-nested
     symbol: sqlalchemy.ext.asyncio.session.AsyncSession.begin_nested
     invocation: instance_method
     operation: begin
     channel: sql
-    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint, context_exit: savepoint_release_rollback}
+    behavior: {async_mode: sync, timing: context_enter, transaction_scope: savepoint, context_exit: savepoint_release_rollback, returns_transaction_scope: savepoint}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
   - id: sqlalchemy-async-session-commit
     symbol: sqlalchemy.ext.asyncio.session.AsyncSession.commit
@@ -132,4 +146,18 @@ contracts:
     operation: rollback
     channel: sql
     behavior: {async_mode: async, timing: await}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-transaction-commit
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSessionTransaction.commit
+    invocation: instance_method
+    operation: commit
+    channel: sql
+    behavior: {async_mode: async, timing: await, transaction_target_from_receiver: true}
+    package: {distribution: sqlalchemy, version: ">=2,<3"}
+  - id: sqlalchemy-async-session-transaction-rollback
+    symbol: sqlalchemy.ext.asyncio.session.AsyncSessionTransaction.rollback
+    invocation: instance_method
+    operation: rollback
+    channel: sql
+    behavior: {async_mode: async, timing: await, transaction_target_from_receiver: true}
     package: {distribution: sqlalchemy, version: ">=2,<3"}
