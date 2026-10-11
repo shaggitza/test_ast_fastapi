@@ -5657,8 +5657,8 @@ class SecureASTExtractor:
                 return self._handler(class_target, function)
         return None
 
-    @staticmethod
     def _class_method_may_be_mutated(  # noqa: PLR0911, PLR0912
+        self,
         defining_module: _Module,
         class_name: str,
         method_name: str,
@@ -5671,7 +5671,7 @@ class SecureASTExtractor:
             class_expressions: set[str] = set()
             for statement in consumer.tree.body:
                 if isinstance(statement, ast.ImportFrom):
-                    source = statement.module or ""
+                    source = self._absolute_import(consumer, statement)
                     if source == defining_module.name:
                         for item in statement.names:
                             if item.name == class_name:

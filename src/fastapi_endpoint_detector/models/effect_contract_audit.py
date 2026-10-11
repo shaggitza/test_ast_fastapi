@@ -222,7 +222,7 @@ class EffectContractAuditScope(_StrictAuditModel):
     track_transitive: bool
     max_depth: int = Field(ge=1)
     cache_enabled: bool
-    package_applicability: Literal["not_evaluated"] = "not_evaluated"
+    package_applicability: Literal["not_evaluated", "source_pins_evaluated"] = "not_evaluated"
 
     @model_validator(mode="after")
     def validate_endpoint_totals(self) -> EffectContractAuditScope:
@@ -259,6 +259,7 @@ class EffectContractAuditProvenance(_StrictAuditModel):
     preset_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     contract_hashes: dict[str, str]
     resolver_versions: tuple[str, ...] = Field(min_length=1)
+    package_evidence_hash: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
     occurrence_corpus_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     audit_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
@@ -407,6 +408,8 @@ class EffectContractAudit(_StrictAuditModel):
                 for item in self.occurrences
             ],
         }
+        if self.provenance.package_evidence_hash is not None:
+            audit_payload["package_evidence_hash"] = self.provenance.package_evidence_hash
         if self.provenance.audit_hash != _semantic_hash(audit_payload):
             raise ValueError("audit hash does not match report contents")
         return self

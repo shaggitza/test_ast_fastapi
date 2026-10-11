@@ -78,6 +78,19 @@ CMD uvicorn app:api --port 8000
     ]
 
 
+def test_dockerfile_instructions_accept_tabs_between_instruction_and_arguments() -> None:
+    observations = extract_dockerfile_observations(
+        'ENV\tPORT=8000 ROOT_PATH=/service\nEXPOSE\t8000\nCMD\t["uvicorn", "app:app"]\n'
+    )
+
+    assert [(item.kind, item.key, item.value, item.certainty) for item in observations] == [
+        ("environment", "PORT", "8000", "exact"),
+        ("environment", "ROOT_PATH", "/service", "exact"),
+        ("exposed_port", None, "8000", "exact"),
+        ("container_argv", "cmd", ("uvicorn", "app:app"), "exact"),
+    ]
+
+
 def test_subprocess_observations_require_literal_argv_without_shell() -> None:
     observations = extract_subprocess_observations(
         """import subprocess

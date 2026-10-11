@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- Cached endpoint call sites are reused only when freshly rebuilt dependency typing and distribution metadata still match the cache fingerprint.
+- Applicability provenance now records metadata by distribution name and exact adjacent path, handles package initializers by their actual relative paths, and checks Python-only source pins against the target interpreter version.
+- Attached contract evidence carries the same applicability status as its embedded audit; empty source-hash defaults no longer alter hashes for existing unpinned contracts.
+
+### Added
+- Added exact Motor 3.6.0 insert, update, and delete bindings to MongoDB preset 1.1.0. The vendor source proof is pinned to wheel SHA-256 `9f07ed96f1754963d4386944e1b52d403a5350c687edc60da487d66f98dbf894`; `motor/core.pyi` SHA-256 `648fa05c34b81d6510b0cc672ac041e9ebfbb88c7ffbb5573e6d40c8571dcde0`, `motor/motor_asyncio.pyi` SHA-256 `6103c4af1c7c81ba3f7bccbfb478f897982eb0e38fef6592a111a22e41eee736`, and `motor/py.typed` SHA-256 `cf044d8d9395de5785cc67707e46ef18e7c66c1a2994879e66ee20edde8ff76f`.
+- Extended the bounded Motor probe to snapshot `.pyi` declarations and `py.typed` markers from hash-pinned wheels without importing Motor or PyMongo.
+
+### Changed
+- Bumped the MongoDB preset to 1.2.0 (revision 3) for enforced Motor package evidence.
+- Pinned Motor 3.6.0 wheel `METADATA` SHA-256 `dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d` alongside declaration source hashes.
+- Motor bindings now require the parsed Motor 3.6.0 declaration hashes and the exact hash of its wheel `METADATA`; the audit records target source and version evidence and leaves missing or mismatched evidence unmatched.
 - **Simplified to mypy-only analysis**: Removed `import` (grimp-based) and `coverage` analysis backends
   - Removed `dependency_graph.py` module and grimp dependency
   - Removed `coverage_analyzer.py` module and coverage.py dependency
@@ -58,6 +70,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Full documentation
 
 ---
+
+## [Unreleased]
+
+### Changed
+- Enforce Motor preset applicability against the exact Motor 3.6.0 typed declaration bytes parsed by mypy. Missing, changed, or unverified declaration sources leave calls unmatched with `package_applicability_unverified`.
+- The effect audit CLI and change mapper now report when exact typed-source applicability pins were evaluated.
 
 ## Version History Template
 

@@ -68,6 +68,9 @@ class YamlFormatter(BaseFormatter):
                 [frame.model_dump(mode="json", exclude_none=True) for frame in stack]
                 for stack in affected.call_stacks
             ],
+            "execution_evidence": [
+                evidence.model_dump(mode="json") for evidence in affected.execution_evidence
+            ],
             "effect_evidence": [
                 evidence.model_dump(mode="json", exclude_none=True)
                 for evidence in affected.effect_evidence
@@ -90,6 +93,10 @@ class YamlFormatter(BaseFormatter):
             "app_path": report.app_path,
             "diff_source": report.diff_source,
             "analysis_completeness": report.analysis_completeness,
+            "analysis_limitations": [
+                limitation.model_dump(mode="json", exclude_none=True)
+                for limitation in report.analysis_limitations
+            ],
             "endpoint_lifecycle": [
                 entry.model_dump(mode="json", exclude_none=True)
                 for entry in report.endpoint_lifecycle
