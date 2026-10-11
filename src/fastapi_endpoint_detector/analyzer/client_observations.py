@@ -546,6 +546,79 @@ def _has_assignment_operator(tokens: list[_Token], index: int, source: str) -> b
     )
 
 
+def _is_destructuring_write(  # noqa: PLR0911, PLR0912, PLR0915
+    tokens: list[_Token], index: int
+) -> bool:
+    """Recognize a bare name used as a target in a bounded assignment pattern."""
+    if index and tokens[index - 1].value in {".", "?."}:
+        if index >= 3 and all(item.value == "." for item in tokens[index - 3 : index]):
+            pass  # Rest binding in an array/object assignment pattern.
+        else:
+            return False
+    pairs = {"[": "]", "{": "}"}
+    # The nearest containing pattern determines whether this name is a target.
+    for opening in range(index - 1, -1, -1):
+        opener = tokens[opening].value
+        if opener not in pairs:
+            continue
+        if opening and (
+            tokens[opening - 1].kind in {"id", "string"}
+            or tokens[opening - 1].value in {")", "]", ".", "?."}
+        ):
+            # `Foreign[fetch] = value` assigns a property, not a pattern.
+            continue
+        depth = 1
+        closing = opening + 1
+        while closing < len(tokens) and depth:
+            if tokens[closing].value == opener:
+                depth += 1
+            elif tokens[closing].value == pairs[opener]:
+                depth -= 1
+            closing += 1
+        if depth or not opening < index < closing - 1:
+            continue
+        end = closing - 1
+        after = end + 1
+        while after < len(tokens) and tokens[after].value == ")":
+            after += 1
+        if after >= len(tokens) or tokens[after].value != "=":
+            continue
+        # Locate this direct child slot, respecting nested patterns.
+        slot_start = opening + 1
+        level = 0
+        for pos in range(opening + 1, index):
+            value = tokens[pos].value
+            if value in {"[", "{", "("}:
+                level += 1
+            elif value in {"]", "}", ")"}:
+                level -= 1
+            elif value == "," and level == 0:
+                slot_start = pos + 1
+        slot_end = index + 1
+        level = 0
+        while slot_end < end:
+            value = tokens[slot_end].value
+            if value in {"[", "{", "("}:
+                level += 1
+            elif value in {"]", "}", ")"}:
+                level -= 1
+            elif value == "," and level == 0:
+                break
+            slot_end += 1
+        slot = tokens[slot_start:slot_end]
+        if any(item.value == "=" for item in slot[: index - slot_start]):
+            return False  # A name in a default value is a read, not a target.
+        if opener == "[":
+            return True
+        # In object patterns, property keys and computed keys are reads.
+        if index > opening + 1 and tokens[index - 1].value == ":":
+            return True
+        if index + 1 < slot_end and tokens[index + 1].value == ":":
+            return False
+        return not (slot and slot[0].value == "[")
+    return False
+
+
 def _shadowed_client_names(tokens: list[_Token], source: str) -> tuple[set[str], set[str]]:  # noqa: PLR0912, PLR0915
     """Fail closed file-wide when a client global has any local binding.
 
@@ -729,13 +802,17 @@ def _shadowed_client_names(tokens: list[_Token], source: str) -> tuple[set[str],
             shadowed.update(names)
             continue
         for expression in expression_tokens:
-            has_assignment = any(item.value == "=" for item in expression)
             for index, expression_token in enumerate(expression):
                 if (
                     expression_token.kind == "id"
                     and expression_token.value in names
-                    and (index == 0 or expression[index - 1].value not in {".", "["})
-                    and (has_assignment or _has_assignment_operator(expression, index, source))
+                    and (
+                        (
+                            _is_global_axios(expression, index)
+                            and _has_assignment_operator(expression, index, source)
+                        )
+                        or _is_destructuring_write(expression, index)
+                    )
                 ):
                     bind(expression_token)
     return shadowed, axios_imports

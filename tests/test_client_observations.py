@@ -174,6 +174,71 @@ def test_template_interpolation_rebinding_invalidates_later_global_join() -> Non
         assert join_established_surfaces(observations, surfaces) == ()
 
 
+def test_template_interpolation_destructuring_writes_and_read_controls() -> None:
+    surfaces = (EstablishedSurface("admin", "/admin", "GET", "https://api.test", True),)
+    writes = (
+        "[fetch]=foreign",
+        "[unused, fetch]=foreign",
+        "[[fetch]]=foreign",
+        "[fetch = fallback]=foreign",
+        "[...fetch]=foreign",
+        "({...fetch}=foreign)",
+        "({fetch}=foreign)",
+        "({client: fetch}=foreign)",
+        "({client: [fetch]}=foreign)",
+        "({client: fetch = fallback}=foreign)",
+        "fetch += foreign",
+        "fetch ||= foreign",
+        "++fetch",
+        "fetch++",
+    )
+    for write in writes:
+        source = f"fetch(`${{base}}/x?q=${{{write}}}`, {{method:'GET'}}); fetch('https://api.test/admin');"
+        observations = extract_client_observations(source, Path("client.ts"))
+        assert observations == (), (write, observations)
+        assert join_established_surfaces(observations, surfaces) == ()
+
+    reads = (
+        "Foreign[fetch]",
+        "Foreign.fetch",
+        "fetch.client.name",
+        "fetch",
+        "Foreign[fetch]=foreign",
+        "fetch === foreign",
+    )
+    for read in reads:
+        source = f"fetch(`${{base}}/x?q=${{{read}}}`, {{method:'GET'}}); fetch('https://api.test/admin');"
+        observations = extract_client_observations(source, Path("client.ts"))
+        assert len(observations) == 2, (read, observations)
+        assert [item.surface_id for item in join_established_surfaces(observations, surfaces)] == [
+            "admin"
+        ], read
+
+
+def test_template_interpolation_write_detection_covers_each_client_global() -> None:
+    for name, later_call in (
+        ("fetch", "fetch('https://api.test/admin');"),
+        ("axios", "axios.get('https://api.test/admin');"),
+        ("WebSocket", "new WebSocket('wss://api.test/admin');"),
+    ):
+        for pattern in (f"[{name}]=foreign", f"({{{name}}}=foreign)", f"({{x: [{name}]}}=foreign)"):
+            first = f"fetch(`${{base}}/x?q=${{{pattern}}}`, {{method:'GET'}}); "
+            observations = extract_client_observations(first + later_call, Path("client.ts"))
+            expected = () if name == "fetch" else observations[:1]
+            assert observations == expected, pattern
+
+    for name, later_call in (
+        ("fetch", "fetch('https://api.test/admin');"),
+        ("axios", "axios.get('https://api.test/admin');"),
+        ("WebSocket", "new WebSocket('wss://api.test/admin');"),
+    ):
+        for write in (f"{name} += foreign", f"{name} ||= foreign", f"++{name}", f"{name}++"):
+            first = f"fetch(`${{base}}/x?q=${{{write}}}`, {{method:'GET'}}); "
+            observations = extract_client_observations(first + later_call, Path("client.ts"))
+            expected = () if name == "fetch" else observations[:1]
+            assert observations == expected, write
+
+
 def test_template_query_strings_comments_and_foreign_members_are_not_rebindings() -> None:
     source = r"""fetch(`${api.base}/items?q=${"fetch=foreign"}`, {method:'GET'});
 fetch(`${base}/items?q=${/* fetch=foreign */ query}`, {method:'GET'});
