@@ -552,6 +552,16 @@ class _CallableUnion:
 
 
 @dataclass(frozen=True)
+class _PartialCallableAlternatives:
+    """Bounded alternative partials, including each creation-time capture."""
+
+    alternatives: tuple[_PartialCallable, ...]
+
+
+_PartialValue = _PartialCallable | _PartialCallableAlternatives
+
+
+@dataclass(frozen=True)
 class _ExecutorSummary:
     """Exact callback and forwarding semantics for one executor wrapper."""
 
@@ -573,7 +583,8 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v4-raising-snapshots-iteration-possible"
+        "conditional-elif-try-else-guaranteed-finally-v5-"
+        "partial-forwarding-alternatives-exception-types"
     )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
@@ -2367,6 +2378,7 @@ class MypyAnalyzer:
                     ],
                     ...,
                 ],
+                tuple[tuple[str, _PartialValue], ...],
             ],
             int,
         ] = {}
@@ -2408,7 +2420,7 @@ class MypyAnalyzer:
                 dependency_start,
                 dependency_end,
             )
-            visited[(dependency_fullname, False, None, (), (), ())] = dependency_depth
+            visited[(dependency_fullname, False, None, (), (), (), ())] = dependency_depth
             if dependency_depth < self.max_depth:
                 self._trace_references(
                     dependency_node,
@@ -3370,6 +3382,49 @@ class MypyAnalyzer:
             return None
         return environment
 
+    def _join_partial_environments(
+        self, environments: list[dict[str, _PartialValue]]
+    ) -> dict[str, _PartialValue]:
+        """Retain whole partial captures on every path, without a prefix winner."""
+        if not environments:
+            return {}
+        common = set(environments[0])
+        all_names = set(common)
+        for environment in environments[1:]:
+            common &= environment.keys()
+            all_names.update(environment)
+        if all_names - common:
+            self._record_analysis_limitation("UNKNOWN_PARTIAL_BINDING")
+        joined: dict[str, _PartialValue] = {}
+        for name in sorted(common):
+            alternatives: list[_PartialCallable] = []
+            inherited_possible = False
+            overflow = False
+            for environment in environments:
+                value = environment[name]
+                if isinstance(value, _PartialCallableAlternatives):
+                    inherited_possible = True
+                    candidates = value.alternatives
+                else:
+                    candidates = (value,)
+                for candidate in candidates:
+                    if candidate not in alternatives:
+                        alternatives.append(candidate)
+                    if len(alternatives) > self.MAX_POINTS_TO_TARGETS:
+                        overflow = True
+                        break
+                if overflow:
+                    break
+            if overflow:
+                self._record_analysis_limitation(
+                    "MAX_POINTS_TO_TARGETS", limit=self.MAX_POINTS_TO_TARGETS
+                )
+            elif len(alternatives) == 1 and not inherited_possible:
+                joined[name] = alternatives[0]
+            elif alternatives:
+                joined[name] = _PartialCallableAlternatives(tuple(alternatives))
+        return joined
+
     def _bind_callable_arguments(
         self,
         function: Any,
@@ -3461,6 +3516,75 @@ class MypyAnalyzer:
             argument.kind not in (ARG_POS, ARG_OPT, ARG_NAMED, ARG_NAMED_OPT)
             for argument in arguments
         ):
+            return None
+        return environment
+
+    def _is_explicit_partial_call(self, expression: Any, import_map: dict[str, str]) -> bool:
+        """Identify the unshadowed standard partial constructor from source imports."""
+        from mypy.nodes import CallExpr
+
+        return (
+            isinstance(expression, CallExpr)
+            and self._explicit_import_fullname(expression.callee, import_map) == "functools.partial"
+        )
+
+    def _bind_partial_arguments(
+        self,
+        function: Any,
+        call: Any,
+        caller_environment: dict[str, _PartialValue],
+        *,
+        caller_imports: dict[str, str] | None = None,
+        skip_implicit_receiver: bool = False,
+    ) -> dict[str, _PartialValue] | None:
+        """Forward partial objects only through a strict, finite argument binding."""
+        from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, NameExpr
+
+        arguments = list(getattr(self._actual_function(function), "arguments", ()))
+        if skip_implicit_receiver:
+            if not arguments:
+                return None
+            arguments = arguments[1:]
+        if any(
+            argument.kind not in (ARG_POS, ARG_OPT, ARG_NAMED, ARG_NAMED_OPT)
+            for argument in arguments
+        ):
+            return None
+        positional_arguments = [
+            argument for argument in arguments if argument.kind in (ARG_POS, ARG_OPT)
+        ]
+        by_name = {
+            argument.variable.name: argument for argument in arguments if not argument.pos_only
+        }
+        assigned: set[str] = set()
+        positional = 0
+        environment: dict[str, _PartialValue] = {}
+        for expression, kind, name in zip(call.args, call.arg_kinds, call.arg_names, strict=True):
+            if kind == ARG_POS and name is None:
+                if positional >= len(positional_arguments):
+                    return None
+                parameter = positional_arguments[positional].variable.name
+                positional += 1
+            elif kind == ARG_NAMED and name in by_name:
+                parameter = name
+            else:
+                return None
+            if parameter in assigned:
+                return None
+            assigned.add(parameter)
+            if self._is_explicit_partial_call(expression, caller_imports or {}):
+                self._record_analysis_limitation("INLINE_PARTIAL_ARGUMENT_UNSUPPORTED")
+                return None
+            if isinstance(expression, NameExpr):
+                value = caller_environment.get(expression.name)
+                if value is not None:
+                    environment[parameter] = value
+        required = {
+            argument.variable.name
+            for argument in arguments
+            if argument.kind in (ARG_POS, ARG_NAMED)
+        }
+        if required - assigned:
             return None
         return environment
 
@@ -4922,6 +5046,7 @@ class MypyAnalyzer:
                     ],
                     ...,
                 ],
+                tuple[tuple[str, _PartialValue], ...],
             ],
             int,
         ],
@@ -4936,6 +5061,7 @@ class MypyAnalyzer:
             str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]
         ]
         | None = None,
+        initial_partial_environment: dict[str, _PartialValue] | None = None,
         finite_edge_budget: list[int] | None = None,
     ) -> None:
         """
@@ -5018,14 +5144,14 @@ class MypyAnalyzer:
         callable_environment: dict[
             str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]
         ] = dict(initial_callable_environment or {})
-        partial_environment: dict[str, _PartialCallable] = {}
+        partial_environment: dict[str, _PartialValue] = dict(initial_partial_environment or {})
         lambda_environment: dict[str, Any] = {}
         lambda_execution_states: dict[int, str] = {}
         possible_execution_depth = [0]
         try_callable_snapshots: list[
             list[dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]]
         ] = []
-        try_partial_snapshots: list[list[dict[str, _PartialCallable]]] = []
+        try_partial_snapshots: list[list[dict[str, _PartialValue]]] = []
         try_assignment_target_ids: list[set[int]] = []
         try_unbound_name_load_ids: list[set[int]] = []
         try_definite_unbound_name_load_ids: list[set[int]] = []
@@ -5065,6 +5191,7 @@ class MypyAnalyzer:
                 str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]
             ]
             | None = None,
+            target_partial_environment: dict[str, _PartialValue] | None = None,
             edge_kind: str | None = None,
         ) -> None:
             """Resolve a fullname and preserve LOW provenance through descendants."""
@@ -5089,6 +5216,7 @@ class MypyAnalyzer:
             environment_key = tuple(sorted((target_environment or {}).items()))
             string_environment_key = tuple(sorted((target_string_environment or {}).items()))
             callable_environment_key = tuple(sorted((target_callable_environment or {}).items()))
+            partial_environment_key = tuple(sorted((target_partial_environment or {}).items()))
             visit_key = (
                 fullname,
                 target_low_confidence,
@@ -5096,6 +5224,7 @@ class MypyAnalyzer:
                 environment_key,
                 string_environment_key,
                 callable_environment_key,
+                partial_environment_key,
             )
             previous_depth = visited.get(visit_key)
             should_recurse = previous_depth is None or target_depth < previous_depth
@@ -5180,6 +5309,7 @@ class MypyAnalyzer:
                         initial_environment=target_environment,
                         initial_string_environment=target_string_environment,
                         initial_callable_environment=target_callable_environment,
+                        initial_partial_environment=target_partial_environment,
                         finite_edge_budget=finite_edge_budget,
                     )
             else:
@@ -5241,6 +5371,7 @@ class MypyAnalyzer:
                                 initial_environment=target_environment,
                                 initial_string_environment=target_string_environment,
                                 initial_callable_environment=target_callable_environment,
+                                initial_partial_environment=target_partial_environment,
                                 finite_edge_budget=finite_edge_budget,
                             )
                 # Ambiguous or unresolved symbols are not converted into
@@ -5374,213 +5505,268 @@ class MypyAnalyzer:
                     string_environment = original_strings
                     traced = True
 
-                partial_alias = partial_environment.get(callee.name)
-                callable_alias_value: Any = (
-                    (partial_alias.declaration, partial_alias.receiver)
-                    if partial_alias is not None
-                    else callable_environment.get(callee.name)
+                partial_binding = partial_environment.get(callee.name)
+                partial_aliases = (
+                    partial_binding.alternatives
+                    if isinstance(partial_binding, _PartialCallableAlternatives)
+                    else (partial_binding,)
                 )
-                callable_alias_is_possible = isinstance(callable_alias_value, _CallableUnion)
-                callable_aliases = (
-                    callable_alias_value.targets
-                    if callable_alias_is_possible
-                    else (callable_alias_value,)
-                    if callable_alias_value is not None
-                    else ()
-                )
-                if callable_aliases:
-                    binding_call: Any = call
-                    invocation_keywords = {
-                        name
-                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
-                        if kind == ARG_NAMED and name is not None
-                    }
-                    partial_function = (
-                        self._function_node_for_fullname(partial_alias.declaration[0])
+                for partial_alias in partial_aliases:
+                    callable_alias_value: Any = (
+                        (partial_alias.declaration, partial_alias.receiver)
                         if partial_alias is not None
-                        else None
+                        else callable_environment.get(callee.name)
                     )
-                    positional_formals = []
-                    if partial_function is not None:
-                        partial_arguments = list(
-                            getattr(self._actual_function(partial_function[0]), "arguments", ())
-                        )
-                        if (
-                            partial_alias is not None
-                            and partial_alias.declaration[1] == InvocationKind.INSTANCE_METHOD
-                        ):
-                            partial_arguments = partial_arguments[1:]
-                        positional_formals = [
-                            item for item in partial_arguments if item.kind in (ARG_POS, ARG_OPT)
-                        ]
-                    positional_partial_parameters = (
-                        {
-                            positional_formals[index].variable.name
-                            for index, kind in enumerate(partial_alias.arg_kinds)
-                            if kind == ARG_POS and index < len(positional_formals)
+                    callable_alias_is_possible = isinstance(
+                        callable_alias_value, _CallableUnion
+                    ) or isinstance(partial_binding, _PartialCallableAlternatives)
+                    callable_aliases = (
+                        callable_alias_value.targets
+                        if isinstance(callable_alias_value, _CallableUnion)
+                        else (callable_alias_value,)
+                        if callable_alias_value is not None
+                        else ()
+                    )
+                    if callable_aliases:
+                        binding_call: Any = call
+                        invocation_keywords = {
+                            name
+                            for kind, name in zip(call.arg_kinds, call.arg_names, strict=True)
+                            if kind == ARG_NAMED and name is not None
                         }
-                        if partial_alias is not None and partial_function is not None
-                        else set()
-                    )
-                    invocation_positional_parameters: set[str] = set()
-                    invocation_parameters = set(invocation_keywords)
-                    if partial_function is not None:
-                        partial_positional_count = (
-                            sum(kind == ARG_POS for kind in partial_alias.arg_kinds)
+                        partial_function = (
+                            self._function_node_for_fullname(partial_alias.declaration[0])
                             if partial_alias is not None
-                            else 0
+                            else None
                         )
-                        positional_formals = positional_formals[partial_positional_count:]
-                        invocation_positional_count = 0
-                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
-                            if kind == ARG_POS and name is None:
-                                if invocation_positional_count < len(positional_formals):
-                                    parameter_name = positional_formals[
-                                        invocation_positional_count
-                                    ].variable.name
-                                    invocation_parameters.add(parameter_name)
-                                    invocation_positional_parameters.add(parameter_name)
-                                invocation_positional_count += 1
-                    stored_keyword_parameters: set[str] = set()
-                    if partial_alias is not None and partial_function is not None:
-                        for kind, name in zip(
-                            partial_alias.arg_kinds,
-                            partial_alias.arg_names,
-                            strict=True,
-                        ):
-                            if kind == ARG_NAMED and name is not None:
-                                stored_keyword_parameters.add(name)
-                    invalid_partial_duplicate = bool(
-                        partial_alias is not None
-                        and (
-                            any(
-                                parameter in invocation_keywords
-                                for parameter in positional_partial_parameters
+                        positional_formals = []
+                        if partial_function is not None:
+                            partial_arguments = list(
+                                getattr(self._actual_function(partial_function[0]), "arguments", ())
                             )
-                            or bool(stored_keyword_parameters & invocation_positional_parameters)
+                            if (
+                                partial_alias is not None
+                                and partial_alias.declaration[1] == InvocationKind.INSTANCE_METHOD
+                            ):
+                                partial_arguments = partial_arguments[1:]
+                            positional_formals = [
+                                item
+                                for item in partial_arguments
+                                if item.kind in (ARG_POS, ARG_OPT)
+                            ]
+                        positional_partial_parameters = (
+                            {
+                                positional_formals[index].variable.name
+                                for index, kind in enumerate(partial_alias.arg_kinds)
+                                if kind == ARG_POS and index < len(positional_formals)
+                            }
+                            if partial_alias is not None and partial_function is not None
+                            else set()
                         )
-                    )
-                    if partial_alias is not None:
-                        from types import SimpleNamespace as _CallShape
-
-                        kept_bound = [
-                            (expression, kind, name)
-                            for expression, kind, name in zip(
-                                partial_alias.args,
+                        invocation_positional_parameters: set[str] = set()
+                        invocation_parameters = set(invocation_keywords)
+                        if partial_function is not None:
+                            partial_positional_count = (
+                                sum(kind == ARG_POS for kind in partial_alias.arg_kinds)
+                                if partial_alias is not None
+                                else 0
+                            )
+                            positional_formals = positional_formals[partial_positional_count:]
+                            invocation_positional_count = 0
+                            for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
+                                if kind == ARG_POS and name is None:
+                                    if invocation_positional_count < len(positional_formals):
+                                        parameter_name = positional_formals[
+                                            invocation_positional_count
+                                        ].variable.name
+                                        invocation_parameters.add(parameter_name)
+                                        invocation_positional_parameters.add(parameter_name)
+                                    invocation_positional_count += 1
+                        stored_keyword_parameters: set[str] = set()
+                        if partial_alias is not None and partial_function is not None:
+                            for kind, name in zip(
                                 partial_alias.arg_kinds,
                                 partial_alias.arg_names,
                                 strict=True,
-                            )
-                            if name is None or name not in invocation_keywords
-                        ]
-                        binding_call = _CallShape(
-                            args=[*(item[0] for item in kept_bound), *call.args],
-                            arg_kinds=[*(item[1] for item in kept_bound), *call.arg_kinds],
-                            arg_names=[*(item[2] for item in kept_bound), *call.arg_names],
-                        )
-                    for declaration, bound_receiver in callable_aliases:
-                        alias_fullname, alias_invocation = declaration
-                        if (
-                            call_site is not None
-                            and call_site.status != CallResolutionStatus.EXACT
-                            and alias_invocation == InvocationKind.FUNCTION
-                            and not callable_alias_is_possible
-                            and not invalid_partial_duplicate
-                        ):
-                            deps.add_resolved_call_site(
-                                call_site.model_copy(
-                                    update={
-                                        "canonical_symbol": alias_fullname,
-                                        "invocation": alias_invocation,
-                                        "status": CallResolutionStatus.EXACT,
-                                        "reason_code": None,
-                                    }
+                            ):
+                                if kind == ARG_NAMED and name is not None:
+                                    stored_keyword_parameters.add(name)
+                        invalid_partial_duplicate = bool(
+                            partial_alias is not None
+                            and (
+                                any(
+                                    parameter in invocation_keywords
+                                    for parameter in positional_partial_parameters
+                                )
+                                or bool(
+                                    stored_keyword_parameters & invocation_positional_parameters
                                 )
                             )
-                        target_strings = None
-                        resolved_function = self._function_node_for_fullname(alias_fullname)
-                        if resolved_function is not None:
-                            target_strings = self._bind_finite_string_arguments(
-                                resolved_function[0],
-                                binding_call,
-                                string_environment,
-                                skip_implicit_receiver=(
-                                    alias_invocation == InvocationKind.INSTANCE_METHOD
-                                ),
-                            )
-                        target_callables = (
-                            self._bind_callable_arguments(
-                                resolved_function[0],
-                                binding_call,
-                                callable_environment,
-                                flow_environment,
-                                import_map,
-                                (),
-                                finite_budget,
-                                skip_implicit_receiver=(
-                                    alias_invocation == InvocationKind.INSTANCE_METHOD
-                                ),
-                            )
-                            if resolved_function is not None
-                            else None
                         )
                         if partial_alias is not None:
-                            # Creation-time callable values win over later rebinding
-                            # of the source variable used to construct the partial.
-                            if target_callables is None:
-                                target_callables = {}
-                            for parameter, captured_value in partial_alias.bound_callables:
-                                if parameter not in invocation_parameters:
-                                    target_callables[parameter] = captured_value
-                        if partial_alias is not None:
-                            if target_strings is None:
-                                target_strings = {}
-                            for parameter, captured_values in partial_alias.bound_strings:
-                                if parameter not in invocation_parameters:
-                                    target_strings[parameter] = captured_values
-                        deps.add_reference(current_file, call.line, alias_fullname)
-                        alias_is_unawaited_coroutine = bool(
-                            resolved_function is not None
-                            and getattr(
-                                self._actual_function(resolved_function[0]), "is_coroutine", False
+                            from types import SimpleNamespace as _CallShape
+
+                            kept_bound = [
+                                (expression, kind, name)
+                                for expression, kind, name in zip(
+                                    partial_alias.args,
+                                    partial_alias.arg_kinds,
+                                    partial_alias.arg_names,
+                                    strict=True,
+                                )
+                                if name is None or name not in invocation_keywords
+                            ]
+                            binding_call = _CallShape(
+                                args=[*(item[0] for item in kept_bound), *call.args],
+                                arg_kinds=[*(item[1] for item in kept_bound), *call.arg_kinds],
+                                arg_names=[*(item[2] for item in kept_bound), *call.arg_names],
                             )
-                            and id(call) not in awaited_call_ids
+                        partial_binding_unknown = bool(
+                            partial_alias is not None
+                            and (
+                                partial_function is None
+                                or self._bind_partial_arguments(
+                                    partial_function[0],
+                                    binding_call,
+                                    partial_environment,
+                                    caller_imports=import_map,
+                                    skip_implicit_receiver=(
+                                        partial_alias.declaration[1]
+                                        == InvocationKind.INSTANCE_METHOD
+                                    ),
+                                )
+                                is None
+                            )
                         )
-                        if invalid_partial_duplicate:
-                            deps.add_analysis_limitation(
-                                AnalysisLimitation(
-                                    file_path=current_file,
-                                    call_line=call.line,
-                                    cap="INVALID_PARTIAL_ARGUMENTS",
+                        for declaration, bound_receiver in callable_aliases:
+                            alias_fullname, alias_invocation = declaration
+                            if (
+                                call_site is not None
+                                and call_site.status != CallResolutionStatus.EXACT
+                                and alias_invocation == InvocationKind.FUNCTION
+                                and not callable_alias_is_possible
+                                and not invalid_partial_duplicate
+                                and not partial_binding_unknown
+                            ):
+                                deps.add_resolved_call_site(
+                                    call_site.model_copy(
+                                        update={
+                                            "canonical_symbol": alias_fullname,
+                                            "invocation": alias_invocation,
+                                            "status": CallResolutionStatus.EXACT,
+                                            "reason_code": None,
+                                        }
+                                    )
+                                )
+                            target_strings = None
+                            resolved_function = self._function_node_for_fullname(alias_fullname)
+                            if resolved_function is not None:
+                                target_strings = self._bind_finite_string_arguments(
+                                    resolved_function[0],
+                                    binding_call,
+                                    string_environment,
+                                    skip_implicit_receiver=(
+                                        alias_invocation == InvocationKind.INSTANCE_METHOD
+                                    ),
+                                )
+                            target_callables = (
+                                self._bind_callable_arguments(
+                                    resolved_function[0],
+                                    binding_call,
+                                    callable_environment,
+                                    flow_environment,
+                                    import_map,
+                                    (),
+                                    finite_budget,
+                                    skip_implicit_receiver=(
+                                        alias_invocation == InvocationKind.INSTANCE_METHOD
+                                    ),
+                                )
+                                if resolved_function is not None
+                                else None
+                            )
+                            target_partials = (
+                                self._bind_partial_arguments(
+                                    resolved_function[0],
+                                    binding_call,
+                                    partial_environment,
+                                    caller_imports=import_map,
+                                    skip_implicit_receiver=(
+                                        alias_invocation == InvocationKind.INSTANCE_METHOD
+                                    ),
+                                )
+                                if resolved_function is not None
+                                else None
+                            )
+                            if partial_alias is not None and not partial_binding_unknown:
+                                # Creation-time callable values win over later rebinding
+                                # of the source variable used to construct the partial.
+                                if target_callables is None:
+                                    target_callables = {}
+                                for parameter, captured_value in partial_alias.bound_callables:
+                                    if parameter not in invocation_parameters:
+                                        target_callables[parameter] = captured_value
+                            if partial_alias is not None and not partial_binding_unknown:
+                                if target_strings is None:
+                                    target_strings = {}
+                                for parameter, captured_values in partial_alias.bound_strings:
+                                    if parameter not in invocation_parameters:
+                                        target_strings[parameter] = captured_values
+                            deps.add_reference(current_file, call.line, alias_fullname)
+                            alias_is_unawaited_coroutine = bool(
+                                resolved_function is not None
+                                and getattr(
+                                    self._actual_function(resolved_function[0]),
+                                    "is_coroutine",
+                                    False,
+                                )
+                                and id(call) not in awaited_call_ids
+                            )
+                            if invalid_partial_duplicate:
+                                deps.add_analysis_limitation(
+                                    AnalysisLimitation(
+                                        file_path=current_file,
+                                        call_line=call.line,
+                                        cap="INVALID_PARTIAL_ARGUMENTS",
+                                        call_column=call.column,
+                                    )
+                                )
+                            elif partial_binding_unknown:
+                                deps.add_analysis_limitation(
+                                    AnalysisLimitation(
+                                        file_path=current_file,
+                                        call_line=call.line,
+                                        cap="UNRESOLVED_PARTIAL_ARGUMENTS",
+                                        call_column=call.column,
+                                    )
+                                )
+                            elif not alias_is_unawaited_coroutine:
+                                resolve_and_trace(
+                                    alias_fullname,
+                                    call.line,
                                     call_column=call.column,
+                                    low_confidence_edge=callable_alias_is_possible,
+                                    target_receiver=(
+                                        bound_receiver
+                                        if alias_invocation == InvocationKind.INSTANCE_METHOD
+                                        else None
+                                    ),
+                                    target_string_environment=target_strings,
+                                    target_callable_environment=target_callables,
+                                    target_partial_environment=target_partials,
+                                    edge_kind="callable_alias_invocation",
                                 )
-                            )
-                        elif not alias_is_unawaited_coroutine:
-                            resolve_and_trace(
-                                alias_fullname,
-                                call.line,
-                                call_column=call.column,
-                                low_confidence_edge=callable_alias_is_possible,
-                                target_receiver=(
-                                    bound_receiver
-                                    if alias_invocation == InvocationKind.INSTANCE_METHOD
-                                    else None
-                                ),
-                                target_string_environment=target_strings,
-                                target_callable_environment=target_callables,
-                                edge_kind="callable_alias_invocation",
-                            )
-                        elif resolved_function is not None:
-                            header_start, header_end = self._callable_header_lines(
-                                resolved_function[0], resolved_function[1]
-                            )
-                            deps.add_symbol_reference(
-                                resolved_function[1],
-                                alias_fullname,
-                                header_start,
-                                header_end,
-                            )
-                        traced = True
+                            elif resolved_function is not None:
+                                header_start, header_end = self._callable_header_lines(
+                                    resolved_function[0], resolved_function[1]
+                                )
+                                deps.add_symbol_reference(
+                                    resolved_function[1],
+                                    alias_fullname,
+                                    header_start,
+                                    header_end,
+                                )
+                            traced = True
 
             canonical_symbol = (call_site.canonical_symbol if call_site is not None else None) or ""
             generator_consumer = self.GENERATOR_CONSUMERS.get(canonical_symbol)
@@ -5692,12 +5878,22 @@ class MypyAnalyzer:
             )
             if callback_binding is not None:
                 callback_expression, forwarded_call = callback_binding
-                callback = self._exact_executor_callback(
-                    callback_expression,
-                    flow_environment,
-                    import_map,
-                    finite_budget,
-                    allow_async=allow_async_callback,
+                partial_callback = (
+                    isinstance(callback_expression, NameExpr)
+                    and callback_expression.name in partial_environment
+                ) or self._is_explicit_partial_call(callback_expression, import_map)
+                if partial_callback:
+                    self._record_analysis_limitation("PARTIAL_EXECUTOR_CALLBACK_UNSUPPORTED")
+                callback = (
+                    None
+                    if partial_callback
+                    else self._exact_executor_callback(
+                        callback_expression,
+                        flow_environment,
+                        import_map,
+                        finite_budget,
+                        allow_async=allow_async_callback,
+                    )
                 )
                 if callback is not None:
                     declaration, callback_receiver = callback
@@ -5779,6 +5975,13 @@ class MypyAnalyzer:
                         (),
                         finite_budget,
                     )
+                target_partials = (
+                    self._bind_partial_arguments(
+                        resolved_function[0], call, partial_environment, caller_imports=import_map
+                    )
+                    if resolved_function is not None
+                    else None
+                )
                 if not unawaited_coroutine:
                     resolve_and_trace(
                         call_site.canonical_symbol,
@@ -5786,6 +5989,7 @@ class MypyAnalyzer:
                         call_column=call.column,
                         target_string_environment=target_strings,
                         target_callable_environment=target_callables,
+                        target_partial_environment=target_partials,
                         low_confidence_edge=eager_generator_expression_depth[0] > 0,
                         edge_kind=(
                             "consumed_generator_expression"
@@ -6056,7 +6260,7 @@ class MypyAnalyzer:
                 callable_value: tuple[tuple[str, InvocationKind], _FinitePointsTo | None] | None = (
                     None
                 )
-                partial_value: _PartialCallable | None = (
+                partial_value: _PartialValue | None = (
                     partial_environment.get(n.rvalue.name)
                     if isinstance(n.rvalue, NameExpr)
                     else None
@@ -6153,6 +6357,20 @@ class MypyAnalyzer:
                                 # independently, and surface the lost precision.
                                 self._record_analysis_limitation(
                                     "CALLABLE_UNION_PARTIAL", limit=len(target_value.targets)
+                                )
+                                target_value = None
+                            if any(
+                                (
+                                    isinstance(argument, NameExpr)
+                                    and argument.name in partial_environment
+                                )
+                                or self._is_explicit_partial_call(argument, import_map)
+                                for argument in n.rvalue.args
+                            ):
+                                # Nested partial captures need creation-time partial
+                                # snapshots. Raw argument ASTs are not those values.
+                                self._record_analysis_limitation(
+                                    "NESTED_PARTIAL_CAPTURE_UNSUPPORTED"
                                 )
                                 target_value = None
                             if target_value is not None:
@@ -6316,7 +6534,7 @@ class MypyAnalyzer:
                 branch_callables: list[
                     dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
                 ] = []
-                branch_partials: list[dict[str, _PartialCallable]] = []
+                branch_partials: list[dict[str, _PartialValue]] = []
                 branch_lambdas: list[dict[str, Any]] = []
                 selected: int | None = None
                 unknown_before_selection = False
@@ -6426,19 +6644,7 @@ class MypyAnalyzer:
                             )
                         }
                     callable_environment = self._join_callable_environments(branch_callables)
-                    common_partials = (
-                        set.intersection(*(set(branch) for branch in branch_partials))
-                        if branch_partials
-                        else set()
-                    )
-                    partial_environment = {
-                        name: branch_partials[0][name]
-                        for name in common_partials
-                        if all(
-                            branch[name] == branch_partials[0][name]
-                            for branch in branch_partials[1:]
-                        )
-                    }
+                    partial_environment = self._join_partial_environments(branch_partials)
                     common_lambdas = (
                         set.intersection(*(set(branch) for branch in branch_lambdas))
                         if branch_lambdas
@@ -6574,7 +6780,7 @@ class MypyAnalyzer:
                 callable_snapshots: list[
                     dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
                 ] = []
-                partial_snapshots: list[dict[str, _PartialCallable]] = [before_partials]
+                partial_snapshots: list[dict[str, _PartialValue]] = [before_partials]
                 from types import GetSetDescriptorType, MemberDescriptorType
 
                 from mypy.nodes import (
@@ -6735,10 +6941,10 @@ class MypyAnalyzer:
                 handler_callables: list[
                     dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
                 ] = []
-                handler_partials: list[dict[str, _PartialCallable]] = []
+                handler_partials: list[dict[str, _PartialValue]] = []
                 handler_lambdas: list[dict[str, Any]] = []
                 for handler in n.handlers:
-                    distinct_partial_snapshots: list[dict[str, _PartialCallable]] = []
+                    distinct_partial_snapshots: list[dict[str, _PartialValue]] = []
                     for partial_snapshot in partial_snapshots:
                         if partial_snapshot not in distinct_partial_snapshots:
                             distinct_partial_snapshots.append(partial_snapshot)
@@ -6763,7 +6969,11 @@ class MypyAnalyzer:
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
-                            walk_node(exc_type)
+                            possible_execution_depth[0] += 1
+                            try:
+                                walk_node(exc_type)
+                            finally:
+                                possible_execution_depth[0] -= 1
                 if n.else_body:
                     callable_environment = dict(body_callables)
                     partial_environment = dict(body_partials)
@@ -6782,12 +6992,7 @@ class MypyAnalyzer:
                 if callable_paths:
                     callable_environment = self._join_callable_environments(callable_paths)
                 if partial_paths:
-                    common_partial = set.intersection(*(set(path) for path in partial_paths))
-                    partial_environment = {
-                        key: partial_paths[0][key]
-                        for key in common_partial
-                        if all(path[key] == partial_paths[0][key] for path in partial_paths[1:])
-                    }
+                    partial_environment = self._join_partial_environments(partial_paths)
                 if lambda_paths:
                     common_lambda = set.intersection(*(set(path) for path in lambda_paths))
                     lambda_environment = {
