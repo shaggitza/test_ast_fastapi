@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
+from packaging.version import InvalidVersion, Version
 
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
@@ -241,6 +246,10 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
     max_depth: int,
     cache_enabled: bool,
     resolver_versions: Iterable[str],
+    verified_mypy_source_hashes: dict[str, str] | None = None,
+    verified_package_source_hashes: dict[str, str] | None = None,
+    verified_package_versions: dict[str, str] | None = None,
+    target_python_version: str | None = None,
 ) -> EffectContractAudit:
     """Match exact contract keys against a complete endpoint-reachable call corpus."""
     root = source_root.resolve()
@@ -255,6 +264,38 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
     contract_by_key = {
         (contract.symbol, contract.invocation.value): contract
         for contract in loaded.document.contracts
+    }
+    applicability_contracts = [
+        contract
+        for contract in loaded.document.contracts
+        if contract.package is not None and contract.package.source_hashes
+    ]
+    pinned_source_paths = sorted(
+        {
+            path
+            for contract in applicability_contracts
+            if (package := contract.package) is not None
+            for path in package.source_hashes
+        }
+    )
+    pinned_distributions = sorted(
+        {
+            canonicalize_name(package.distribution or "")
+            for contract in applicability_contracts
+            if (package := contract.package) is not None and package.distribution is not None
+        }
+    )
+    observed_target_sources = {
+        **(verified_mypy_source_hashes or {}),
+        **(verified_package_source_hashes or {}),
+    }
+    package_evidence = {
+        "source_hashes": {path: observed_target_sources.get(path) for path in pinned_source_paths},
+        "versions": {
+            distribution: (verified_package_versions or {}).get(distribution)
+            for distribution in pinned_distributions
+        },
+        "python_version": target_python_version or platform.python_version(),
     }
     endpoint_rows = list(endpoint_call_sites)
     physical: dict[
@@ -339,8 +380,40 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             }
         )
         contract = None
+        applicability_failure = False
         if payload["resolver_status"] == CallResolutionStatus.EXACT.value:
             contract = contract_by_key.get((payload["canonical_symbol"], payload["invocation"]))
+            if (
+                contract is not None
+                and contract.package is not None
+                and contract.package.source_hashes
+            ):
+                applicability_failure = any(
+                    observed_target_sources.get(path) != digest
+                    for path, digest in contract.package.source_hashes.items()
+                )
+                distribution = canonicalize_name(contract.package.distribution or "")
+                observed_version = (verified_package_versions or {}).get(distribution)
+                if contract.package.distribution is not None:
+                    if observed_version is None:
+                        applicability_failure = True
+                    else:
+                        try:
+                            applicability_failure |= not SpecifierSet(
+                                contract.package.version or ""
+                            ).contains(Version(observed_version))
+                        except (InvalidVersion, ValueError):
+                            applicability_failure = True
+                if contract.package.python is not None:
+                    python_version = target_python_version or platform.python_version()
+                    try:
+                        applicability_failure |= not SpecifierSet(contract.package.python).contains(
+                            Version(python_version)
+                        )
+                    except (InvalidVersion, ValueError):
+                        applicability_failure = True
+                if applicability_failure:
+                    contract = None
         resolver_status = CallResolutionStatus(payload["resolver_status"])
         if contract is not None:
             audit_status = AuditCallStatus.MATCHED
@@ -365,7 +438,11 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             resolver=payload["resolver"],
             resolver_version=payload["resolver_version"],
             receiver_candidates=tuple(payload["receiver_candidates"]),
-            reason_code=payload["reason_code"],
+            reason_code=(
+                "package_applicability_unverified"
+                if applicability_failure
+                else payload["reason_code"]
+            ),
             receiver_origin=(
                 ResourceIdentityEvidence.model_validate(payload["receiver_origin"])
                 if payload["receiver_origin"] is not None
@@ -382,6 +459,11 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         corpus_payload.append(
             {
                 **{key: value for key, value in payload.items() if key != "arguments"},
+                "reason_code": (
+                    "package_applicability_unverified"
+                    if applicability_failure
+                    else payload["reason_code"]
+                ),
                 "id": call_id,
                 "endpoint_ids": [endpoint.id for endpoint in endpoint_tuple],
             }
@@ -434,6 +516,16 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         track_transitive=track_transitive,
         max_depth=max_depth,
         cache_enabled=cache_enabled,
+        package_applicability=(
+            "source_pins_evaluated"
+            if applicability_contracts
+            and (
+                verified_mypy_source_hashes is not None
+                or verified_package_source_hashes is not None
+                or verified_package_versions is not None
+            )
+            else "not_evaluated"
+        ),
     )
     summary = EffectContractAuditSummary(
         contracts=len(coverage),
@@ -494,6 +586,16 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                 }
                 for item in occurrences
             ],
+            **(
+                {"package_evidence_hash": _semantic_hash(package_evidence)}
+                if applicability_contracts
+                and (
+                    verified_mypy_source_hashes is not None
+                    or verified_package_source_hashes is not None
+                    or verified_package_versions is not None
+                )
+                else {}
+            ),
         }
     )
     provenance = EffectContractAuditProvenance(
@@ -503,6 +605,16 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         preset_hash=loaded.preset_hash,
         contract_hashes=dict(sorted(loaded.contract_hashes.items())),
         resolver_versions=declared_resolvers,
+        package_evidence_hash=(
+            _semantic_hash(package_evidence)
+            if applicability_contracts
+            and (
+                verified_mypy_source_hashes is not None
+                or verified_package_source_hashes is not None
+                or verified_package_versions is not None
+            )
+            else None
+        ),
         occurrence_corpus_hash=occurrence_corpus_hash,
         audit_hash=audit_hash,
     )

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import html
 import json
+import platform
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -698,6 +699,10 @@ def audit_effect_contracts_command(
             max_depth=effective_depth,
             cache_enabled=not no_cache,
             resolver_versions=(f"mypy@{analyzer.resolver_version}",),
+            verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=analyzer.verified_package_source_hashes,
+            verified_package_versions=analyzer.verified_package_versions,
+            target_python_version=platform.python_version(),
         )
         data = audit.model_dump(mode="json", exclude_none=True)
         if output_format == "json":
@@ -721,7 +726,8 @@ def audit_effect_contracts_command(
                 f"{summary.unresolved_calls} unresolved)",
                 f"Config hash: {audit.provenance.config_hash}",
                 f"Corpus hash: {audit.provenance.occurrence_corpus_hash}",
-                "Package applicability: not evaluated",
+                "Package applicability: "
+                f"{audit.scope.package_applicability.replace('_', ' ')}",
                 "Matches do not alter endpoint candidates or confidence.",
             ]
             for occurrence in audit.occurrences:

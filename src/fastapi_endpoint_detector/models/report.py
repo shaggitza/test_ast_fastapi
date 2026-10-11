@@ -45,13 +45,20 @@ def _source_project_root(app_path: str) -> Path:
 
 
 def _contract_hash(contract: EffectContract) -> str:
-    payload = json.dumps(
-        contract.model_dump(mode="json", exclude_none=True),
+    payload = contract.model_dump(mode="json", exclude_none=True)
+    package = payload.get("package")
+    if isinstance(package, dict) and not package.get("source_hashes"):
+        package.pop("source_hashes", None)
+    behavior = payload.get("behavior")
+    if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
+        behavior.pop("stage_receiver_from_yield")
+    canonical_bytes = json.dumps(
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+    return f"sha256:{hashlib.sha256(canonical_bytes).hexdigest()}"
 
 
 class ConfidenceLevel(str, Enum):
@@ -102,6 +109,21 @@ class EvidenceStatus(str, Enum):
     CONDITIONAL = "conditional"
     REACHABILITY_ONLY = "reachability_only"
     UNRESOLVED = "unresolved"
+
+
+class ExecutionEvidence(BaseModel):
+    """Source backed distinction between a lexical edge and its execution proof."""
+
+    model_config = {"frozen": True, "extra": "forbid"}
+    file_path: str
+    start_line: int
+    start_column: int
+    end_line: int
+    end_column: int
+    execution_state: Literal[
+        "lexical_reference", "possible_execution", "established_execution", "deferred_execution"
+    ]
+    provenance: str
 
 
 class ChangeEffectKind(str, Enum):
@@ -214,7 +236,7 @@ class ContractEffectEvidence(BaseModel):
     resolver: str
     resolver_version: str
     matcher: str
-    package_applicability: Literal["not_evaluated"] = "not_evaluated"
+    package_applicability: Literal["not_evaluated", "source_pins_evaluated"] = "not_evaluated"
     resource_identity_status: FiniteValueStatus = FiniteValueStatus.UNAVAILABLE
     resource_identity: ResourceIdentityEvidence = Field(
         default_factory=lambda: ResourceIdentityEvidence(
@@ -307,6 +329,10 @@ class AffectedEndpoint(BaseModel):
     effect_evidence: list[EffectEvidence] = Field(
         default_factory=list,
         description="Structured reachability, effect, and data-observation evidence.",
+    )
+    execution_evidence: tuple[ExecutionEvidence, ...] = Field(
+        default_factory=tuple,
+        description="Precise callable-body evidence with execution state and provenance.",
     )
     contract_evidence: tuple[ContractEffectEvidence, ...] = Field(
         default_factory=tuple,
@@ -402,6 +428,16 @@ class OrphanChange(BaseModel):
         return "; ".join(parts) if parts else "No lines"
 
 
+class AnalysisLimitationReport(BaseModel):
+    """Structured evidence for a source-correlated analyzer capability limit."""
+
+    file_path: str
+    call_line: int
+    cap: str
+    target_count: int | None = None
+    limit: int | None = None
+
+
 class AnalysisReport(BaseModel):
     """Complete analysis report."""
 
@@ -465,6 +501,7 @@ class AnalysisReport(BaseModel):
         default="complete",
         description="Whether every changed side was analyzed with its required snapshot.",
     )
+    analysis_limitations: list[AnalysisLimitationReport] = Field(default_factory=list)
     effect_contract_audit: EffectContractAudit | None = Field(
         default=None,
         description="Complete exact contract audit when configured.",
@@ -870,6 +907,7 @@ class AnalysisReport(BaseModel):
                 or evidence.occurrence_corpus_hash != provenance.occurrence_corpus_hash
                 or evidence.contract_source_path != provenance.contract_source_path
                 or evidence.matcher != provenance.matcher
+                or evidence.package_applicability != audit.scope.package_applicability
             ):
                 raise ValueError("contract evidence provenance is inconsistent with audit")
         for candidate in self.candidate_endpoints:
