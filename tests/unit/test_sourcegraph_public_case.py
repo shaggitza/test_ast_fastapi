@@ -73,24 +73,64 @@ def test_schema_pins_every_case_identity_field() -> None:
         assert case_properties[field]["const"] == value
 
 
-def test_available_requires_the_existing_provider_evidence_envelope() -> None:
+def available_result() -> dict[str, object]:
+    return result(
+        status="available",
+        error=None,
+        provider_evidence={
+            "kind": "reverse_reference",
+            "binding": {key: CASE[key] for key in ("repository", "revision", "path", "symbol")},
+            "evidence": [],
+            "receipt": {},
+            "validation": {
+                "status": "schema_validated_supplied_evidence",
+                "provider_authenticated": False,
+                "scorable": False,
+            },
+        },
+    )
+
+
+def test_available_requires_reviewed_frozen_v1_receipt() -> None:
     with pytest.raises(PublicCaseProtocolError, match="available results require"):
         validate_result(result(status="available", error=None))
-    evidence = {
-        "kind": "reverse_reference",
-        "binding": {},
-        "evidence": [],
-        "receipt": {},
-        "validation": {
-            "status": "schema_validated_supplied_evidence",
-            "provider_authenticated": False,
-            "scorable": False,
-        },
+    assert protocol.FROZEN_AVAILABLE_RESULT_SHA256_V1 == {}
+    with pytest.raises(PublicCaseProtocolError, match="not a frozen v1 receipt"):
+        validate_result(available_result())
+
+
+@pytest.mark.parametrize("field", ["repository", "revision", "path", "symbol"])
+def test_available_binding_rejects_different_frozen_source_identity(field: str) -> None:
+    value = available_result()
+    envelope = value["provider_evidence"]
+    assert isinstance(envelope, dict)
+    envelope["binding"][field] = "different"
+    with pytest.raises(PublicCaseProtocolError, match="frozen case identity"):
+        validate_result(value)
+
+
+@pytest.mark.parametrize("binding", [{}, {"repository": CASE["repository"]}])
+def test_available_binding_requires_every_frozen_identity_field(binding: object) -> None:
+    value = available_result()
+    envelope = value["provider_evidence"]
+    assert isinstance(envelope, dict)
+    envelope["binding"] = binding
+    with pytest.raises(PublicCaseProtocolError, match="frozen case identity"):
+        validate_result(value)
+
+
+def test_self_issued_marker_and_receipt_are_not_a_frozen_result() -> None:
+    value = available_result()
+    envelope = value["provider_evidence"]
+    assert isinstance(envelope, dict)
+    envelope["evidence"] = [{"symbol": CASE["symbol"]}]
+    envelope["receipt"] = {
+        "response_sha256": "a" * 64,
+        "provider": "sourcegraph",
+        "status": "schema_validated_supplied_evidence",
     }
-    validated = validate_result(
-        result(status="available", error=None, provider_evidence=evidence),
-    )
-    assert validated["provider_evidence"] == evidence
+    with pytest.raises(PublicCaseProtocolError, match="not a frozen v1 receipt"):
+        validate_result(value)
 
 
 @pytest.mark.parametrize(
@@ -236,4 +276,17 @@ def test_result_protocol_has_no_network_or_provider_imports() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module is not None
     )
-    assert imports <= {"__future__", "typing"}
+    assert imports <= {"__future__", "hashlib", "json", "typing"}
+
+
+def test_schema_admits_only_current_frozen_unavailable_or_error_records() -> None:
+    schema = json.loads(
+        Path("benchmarks/providers/sourcegraph_public_case_v1.schema.json").read_text()
+    )
+    assert set(schema["properties"]["status"]["enum"]) == {"unavailable", "error"}
+    binding = schema["properties"]["provider_evidence"]["properties"]["binding"]
+    assert binding["additionalProperties"] is False
+    assert set(binding["required"]) == {"repository", "revision", "path", "symbol"}
+    assert {
+        field: declaration["const"] for field, declaration in binding["properties"].items()
+    } == {key: CASE[key] for key in ("repository", "revision", "path", "symbol")}

@@ -1,7 +1,14 @@
-"""Versioned untrusted result protocol for one bounded Sourcegraph public case."""
+"""Frozen Sourcegraph case protocol; v1 contains unavailable records only.
+
+An available result needs an exact reviewed frozen-record digest in addition to
+its source identity. The current integrity allowlist is empty. This protocol
+does not authenticate a provider or make supplied evidence scorable.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 
@@ -22,6 +29,35 @@ FROZEN_CASE_PROFILE = {
     "path": "backend/open_webui/utils/security_headers.py",
     "symbol": "SecurityHeadersMiddleware",
 }
+
+
+# Exact whole-record integrity pins, not provider authentication or scoring approval.
+# No reviewed available result exists in v1; adding one needs a protocol amendment.
+FROZEN_AVAILABLE_RESULT_SHA256_V1: dict[str, str] = {}
+
+
+def _canonical_result_sha256(value: object) -> str:
+    try:
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+    except (TypeError, ValueError, UnicodeEncodeError) as error:
+        raise PublicCaseProtocolError("available result is not canonical JSON") from error
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_frozen_available_result(
+    value: dict[str, Any], envelope: dict[str, Any], operation: str
+) -> None:
+    binding = envelope["binding"]
+    expected_binding = {
+        key: FROZEN_CASE_PROFILE[key] for key in ("repository", "revision", "path", "symbol")
+    }
+    if binding != expected_binding:
+        raise PublicCaseProtocolError("available binding differs from frozen case identity")
+    allowed_digest = FROZEN_AVAILABLE_RESULT_SHA256_V1.get(operation)
+    if allowed_digest is None or _canonical_result_sha256(value) != allowed_digest:
+        raise PublicCaseProtocolError("available result is not a frozen v1 receipt")
 
 
 def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
@@ -119,6 +155,7 @@ def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
             raise PublicCaseProtocolError(
                 "available results require supplied evidence and raw response"
             )
+        _validate_frozen_available_result(value, envelope, operation)
     elif (
         value["provider_evidence"] is not None
         or not isinstance(value["error"], str)
