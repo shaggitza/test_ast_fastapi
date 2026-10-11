@@ -14,6 +14,7 @@ from fastapi_endpoint_detector.executor.vm_executor import (
     VMExecutor,
     VMExecutorError,
 )
+from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
 
 _DIGEST = "registry.example/detector@sha256:" + "a" * 64
 
@@ -351,6 +352,73 @@ def test_list_and_analyze_preserve_equivalent_app_configuration(tmp_path: Path) 
     assert analyze_request["diff_path"] == "/workspace/change.diff"
 
 
+def test_lifespan_manifest_uses_same_hardened_worker_request(tmp_path: Path) -> None:
+    app = tmp_path / "application.py"
+    app.write_text("application = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+    identity = {
+        "module": "sample",
+        "symbol": "lifespan",
+        "file": str(app.resolve()),
+        "line": 1,
+        "column": 0,
+        "end_line": 1,
+        "end_column": 1,
+        "source_sha256": "sha256:" + "a" * 64,
+    }
+    manifest = {
+        "schema_version": 1,
+        "protocol": "framework-phase-manifest-v1",
+        "entries": [
+            {
+                "callback": identity,
+                "registration": identity,
+                "phase": "startup",
+                "execution_conditions": [],
+                "contract_id": "fastapi-lifespan-startup",
+                "contract_sha256": load_surface_preset("framework-v1").document.contract_hashes[
+                    "fastapi-lifespan-startup"
+                ],
+                "source_sha256": "sha256:" + "c" * 64,
+                "callback_file_sha256": "d" * 64,
+                "registration_file_sha256": "e" * 64,
+                "inventory_sha256": "sha256:" + "f" * 64,
+                "engine_sha256": "sha256:" + "1" * 64,
+                "config_sha256": "sha256:" + "2" * 64,
+            }
+        ],
+    }
+
+    command = executor._container_command(
+        app,
+        None,
+        "application",
+        "json",
+        tmp_path / "phase.cid",
+        "phase-name",
+        phase_manifest=manifest,
+    )
+    request = json.loads(command[-1])
+
+    assert request["phase"] == "list"
+    assert request["phase_manifest"]["entries"][0]["callback"]["file"] == (
+        "/workspace/application.py"
+    )
+    assert (
+        request["phase_manifest_sha256"]
+        == "sha256:"
+        + hashlib.sha256(
+            json.dumps(request["phase_manifest"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+    assert "--runtime" in command
+    assert executor.policy.runtime in command
+    assert "--network" in command and command[command.index("--network") + 1] == "none"
+    assert "--pid" in command and command[command.index("--pid") + 1] == ""
+    assert "--security-opt" in command
+
+
 def test_selected_runtime_entry_is_explicit_in_worker_argv(tmp_path: Path) -> None:
     app = tmp_path / "app"
     app.mkdir()
@@ -458,6 +526,120 @@ def test_analyze_uses_bounded_executor_and_parses_json(tmp_path: Path) -> None:
     request = json.loads(command[-1])
     assert request["phase"] == "list"
     assert request["app_path"] == "/workspace/app.py"
+
+
+def test_worker_error_is_preserved_before_phase_observation_validation(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    manifest = _phase_manifest_for_test(app)
+    with (
+        patch.object(
+            executor,
+            "_execute_bounded",
+            return_value=(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "schema_version": 3,
+                        "message": (
+                            "Failed to load FastAPI app: selected runtime module 'main' "
+                            "is not present"
+                        ),
+                    }
+                ),
+                "",
+            ),
+        ),
+        pytest.raises(VMExecutorError, match="selected runtime module 'main' is not present"),
+    ):
+        executor.analyze_in_vm(app, phase_manifest=manifest)
+
+
+def test_successful_worker_response_still_requires_phase_observation(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    manifest = _phase_manifest_for_test(app)
+    with (
+        patch.object(
+            executor,
+            "_execute_bounded",
+            return_value=('{"status":"ok","endpoints":[]}', ""),
+        ),
+        pytest.raises(VMExecutorError, match="malformed phase observation"),
+    ):
+        executor.analyze_in_vm(app, phase_manifest=manifest)
+
+
+def test_host_phase_boundary_discards_application_process_positive_claims(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    manifest = _phase_manifest_for_test(app)
+    entry = manifest["entries"][0]
+    container_identity = {**entry["callback"], "file": "/workspace/app.py"}
+    claimed = {
+        "schema_version": 1,
+        "protocol": "framework-phase-observation-v1",
+        "manifest_sha256": "sha256:" + "0" * 64,
+        "observed": [
+            {
+                "callback": container_identity,
+                "registration": {**entry["registration"], "file": "/workspace/app.py"},
+                "phase": "startup",
+                "manifest_sha256": "sha256:" + "0" * 64,
+                "execution_conditions": [],
+            }
+        ],
+        "unavailable": [],
+        "execution_status": "completed",
+        "role": "positive_observation_only",
+    }
+
+    sanitized = VMExecutor._host_phase_observation(claimed, manifest, app, "/workspace/app.py")
+
+    assert sanitized["observed"] == []
+    assert sanitized["role"] == "self_reported_nonpositive"
+    assert sanitized["unavailable"][0]["reason"].endswith("self-reported")
+
+
+def _phase_manifest_for_test(app: Path) -> dict[str, Any]:
+    identity = {
+        "module": "sample",
+        "symbol": "lifespan",
+        "file": str(app.resolve()),
+        "line": 1,
+        "column": 0,
+        "end_line": 1,
+        "end_column": 1,
+        "source_sha256": "sha256:" + "a" * 64,
+    }
+    return {
+        "schema_version": 1,
+        "protocol": "framework-phase-manifest-v1",
+        "entries": [
+            {
+                "callback": identity,
+                "registration": identity,
+                "phase": "startup",
+                "execution_conditions": [],
+                "contract_id": "fastapi-lifespan-startup",
+                "contract_sha256": load_surface_preset("framework-v1").document.contract_hashes[
+                    "fastapi-lifespan-startup"
+                ],
+                "source_sha256": "sha256:" + "c" * 64,
+                "callback_file_sha256": "d" * 64,
+                "registration_file_sha256": "e" * 64,
+                "inventory_sha256": "sha256:" + "f" * 64,
+                "engine_sha256": "sha256:" + "1" * 64,
+                "config_sha256": "sha256:" + "2" * 64,
+            }
+        ],
+    }
 
 
 def test_invalid_json_and_endpoint_payload_fail_closed(tmp_path: Path) -> None:
@@ -611,3 +793,58 @@ def test_seccomp_profile_is_packaged_and_deny_by_default() -> None:
     assert payload["syscalls"][0]["action"] == "SCMP_ACT_ALLOW"
     assert "mount" not in payload["syscalls"][0]["names"]
     assert "ptrace" not in payload["syscalls"][0]["names"]
+
+
+@pytest.mark.parametrize(
+    "config", [{}, {"User": "65532:65532"}, {"Volumes": None}, {"Volumes": {}}]
+)
+def test_image_config_accepts_omitted_or_empty_oci_volumes(config: dict[str, object]) -> None:
+    raw = json.dumps([{"RepoDigests": [_DIGEST], "Config": config}])
+    assert VMExecutor._validated_image_inspection(raw)["Config"] == config
+
+
+@pytest.mark.parametrize(
+    "config",
+    [None, [], "missing", {"Volumes": []}, {"Volumes": "invalid"}, {"Volumes": {"/writable": {}}}],
+)
+def test_image_config_still_rejects_malformed_or_declared_volumes(config: object) -> None:
+    raw = json.dumps([{"RepoDigests": [_DIGEST], "Config": config}])
+    with pytest.raises(VMExecutorError):
+        VMExecutor._validated_image_inspection(raw)
+
+
+def test_image_inspection_requires_a_configuration_object() -> None:
+    raw = json.dumps([{"RepoDigests": [_DIGEST]}])
+    with pytest.raises(VMExecutorError, match="Config"):
+        VMExecutor._validated_image_inspection(raw)
+
+
+def test_large_phase_request_uses_private_readonly_file(tmp_path: Path) -> None:
+    app = tmp_path / "application.py"
+    app.write_text("app = None\n", encoding="utf-8")
+    executor = _executor(tmp_path)
+    executor._resolved_image = executor.image
+    manifest = _phase_manifest_for_test(app)
+    entry = manifest["entries"][0]
+    manifest["entries"] = [
+        {**entry, "registration": {**entry["registration"], "column": n, "end_column": n + 1}}
+        for n in range(300)
+    ]
+    cidfile = tmp_path / "large.cid"
+    command = executor._container_command(
+        app, None, "app", "json", cidfile, "large-phase", phase_manifest=manifest
+    )
+    assert command[-2:] == ["--request-file", "/workspace/runtime-request.json"]
+    assert max(len(item.encode()) for item in command) < 64 * 1024
+    request_path = cidfile.with_suffix(".request.json")
+    assert request_path.stat().st_mode & 0o777 == 0o444
+    assert executor._mount(request_path, command[-1]) in command
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    assert len(request["phase_manifest"]["entries"]) == 300
+    assert (
+        request["phase_manifest_sha256"]
+        == "sha256:"
+        + hashlib.sha256(
+            json.dumps(request["phase_manifest"], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )

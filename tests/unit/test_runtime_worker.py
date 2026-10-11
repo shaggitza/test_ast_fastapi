@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import ast
+import asyncio
+import hashlib
 import io
 import json
 import sys
@@ -10,6 +13,13 @@ from typing import TYPE_CHECKING
 import pytest
 from pydantic import BaseModel
 
+from fastapi_endpoint_detector.analyzer.framework_phase_bridge import SourceIdentity
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
+    PhaseManifest,
+    PhaseManifestEntry,
+    PhaseObservation,
+)
+from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
 from fastapi_endpoint_detector.parser import runtime_worker
 from fastapi_endpoint_detector.parser.fastapi_extractor import (
     FastAPIExtractor,
@@ -72,11 +82,77 @@ def _toy_project(root: Path) -> Path:
     return package
 
 
+@pytest.mark.parametrize("kind", ["event", "lifespan"])
+def test_decorated_callback_definition_identity_and_execution(tmp_path: Path, kind: str) -> None:
+    package = _toy_project(tmp_path)
+    source = package / "factory.py"
+    if kind == "event":
+        content = (
+            "from fastapi import FastAPI\napp = FastAPI()\n"
+            "@app.on_event('startup')\nasync def startup():\n    pass\n"
+            "def create_app():\n    return app\n"
+        )
+        symbol = "startup"
+        contract = "fastapi-on-event"
+    else:
+        content = (
+            "from contextlib import asynccontextmanager\nfrom fastapi import FastAPI\n"
+            "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+            "app = FastAPI(lifespan=lifespan)\ndef create_app():\n    return app\n"
+        )
+        symbol = "lifespan"
+        contract = "fastapi-lifespan-startup"
+    source.write_text(content, encoding="utf-8")
+    function = next(
+        node
+        for node in ast.walk(ast.parse(content))
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == symbol
+    )
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    identity = SourceIdentity(
+        module="toy_api.factory",
+        symbol=symbol,
+        file=str(source.resolve()),
+        line=function.lineno,
+        column=0,
+        source_sha256="sha256:"
+        + hashlib.sha256(ast.get_source_segment(content, function).encode()).hexdigest(),
+    )
+    entry = PhaseManifestEntry(
+        callback=identity,
+        registration=identity,
+        phase="startup",
+        execution_conditions=("startup succeeds",),
+        contract_id=contract,
+        contract_sha256=load_surface_preset("framework-v1").document.contract_hashes[contract],
+        source_sha256="sha256:" + "a" * 64,
+        callback_file_sha256=digest,
+        registration_file_sha256=digest,
+        inventory_sha256="sha256:" + "b" * 64,
+        engine_sha256="sha256:" + "c" * 64,
+        config_sha256="sha256:" + "d" * 64,
+    )
+    request = json.loads(_request(tmp_path))
+    request["phase_manifest"] = PhaseManifest(entries=(entry,)).model_dump(mode="json")
+    observation = asyncio.run(runtime_worker._run_lifespan(request))
+    assert observation["execution_status"] == "completed"
+    assert observation["unavailable"] == []
+    assert len(observation["observed"]) == 1
+    assert observation["observed"][0]["callback"]["line"] == function.lineno
+    # Normalization does not authorize an incorrect manifest definition line.
+    wrong_identity = identity.model_copy(update={"line": function.decorator_list[0].lineno})
+    wrong_entry = entry.model_copy(update={"callback": wrong_identity})
+    request["phase_manifest"] = PhaseManifest(entries=(wrong_entry,)).model_dump(mode="json")
+    rejected = asyncio.run(runtime_worker._run_lifespan(request))
+    assert rejected["observed"] == []
+    assert rejected["unavailable"]
+
+
 def test_worker_list_uses_exact_selected_factory_and_bootstrap(tmp_path: Path, monkeypatch) -> None:
     _toy_project(tmp_path)
     monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
     payload, status = runtime_worker.run_request(_request(tmp_path, phase="list"))
-    assert status == 0
+    assert status == 0, payload
     assert payload["status"] == "ok"
     assert payload["phase"] == "list"
     assert [item["path"] for item in payload["endpoints"]] == ["/selected-root"]
@@ -85,6 +161,102 @@ def test_worker_list_uses_exact_selected_factory_and_bootstrap(tmp_path: Path, m
         "container_peak_rss_status": "unsupported",
         "source": None,
     }
+
+
+@pytest.mark.parametrize(("phase", "expected_phase"), [("list", "list"), ("analyze", "analyze")])
+def test_worker_keeps_list_or_impact_output_with_lifespan_observation(
+    tmp_path: Path, monkeypatch, phase: str, expected_phase: str
+) -> None:
+    package = _toy_project(tmp_path)
+    source = package / "factory.py"
+    file_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    identity = SourceIdentity(
+        module="toy_api.factory",
+        symbol="create_app",
+        file=str(source.resolve()),
+        line=2,
+        column=0,
+        source_sha256="sha256:" + file_digest,
+    )
+    entry = PhaseManifestEntry(
+        callback=identity,
+        registration=identity,
+        phase="startup",
+        execution_conditions=("startup succeeds",),
+        contract_id="fastapi-lifespan-startup",
+        contract_sha256=load_surface_preset("framework-v1").document.contract_hashes[
+            "fastapi-lifespan-startup"
+        ],
+        source_sha256=identity.source_sha256,
+        callback_file_sha256=file_digest,
+        registration_file_sha256=file_digest,
+        inventory_sha256=identity.source_sha256,
+        engine_sha256=identity.source_sha256,
+        config_sha256=identity.source_sha256,
+    )
+    manifest = PhaseManifest(entries=(entry,))
+    request = json.loads(
+        _request(
+            tmp_path,
+            phase=phase,
+            diff=(tmp_path / "change.diff") if phase == "analyze" else None,
+        )
+    )
+    if phase == "analyze":
+        request["diff_path"] = str(package / "change.diff")
+        (package / "change.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+    request["phase_manifest"] = manifest.model_dump(mode="json")
+    request["phase_manifest_sha256"] = manifest.digest
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(),
+        unavailable=(),
+        execution_status="completed",
+    ).model_dump(mode="json")
+    monkeypatch.setattr(runtime_worker, "_run_lifespan_isolated", lambda _request: observation)
+    monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
+    if phase == "analyze":
+        monkeypatch.setattr(
+            runtime_worker,
+            "_analyze",
+            lambda _request, _endpoints: {"candidate_endpoints": [], "affected_endpoints": []},
+        )
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    assert status == 0
+    assert payload["phase"] == expected_phase
+    if phase == "list":
+        assert "endpoints" in payload
+    else:
+        assert "candidate_endpoints" in payload
+    assert payload["phase_observation"] == observation
+
+
+def test_worker_accepts_complete_empty_phase_inventory(tmp_path: Path, monkeypatch) -> None:
+    _toy_project(tmp_path)
+    request = json.loads(_request(tmp_path, phase="list"))
+    manifest = PhaseManifest(entries=())
+    request["phase_manifest"] = manifest.model_dump(mode="json")
+    request["phase_manifest_sha256"] = manifest.digest
+    monkeypatch.setattr(
+        runtime_worker,
+        "_run_lifespan_isolated",
+        lambda _request: PhaseObservation(
+            manifest_sha256=manifest.digest,
+            observed=(),
+            unavailable=(),
+            execution_status="completed",
+        ).model_dump(mode="json"),
+    )
+    monkeypatch.setattr(runtime_worker, "_container_process_rss_bytes", lambda: None)
+
+    payload, status = runtime_worker.run_request(json.dumps(request))
+
+    assert status == 0, payload
+    assert payload["endpoints"]
+    assert payload["phase_observation"]["execution_status"] == "completed"
+    assert payload["phase_observation"]["observed"] == []
 
 
 def test_worker_requires_complete_exact_pins_and_bounded_config(tmp_path: Path) -> None:
@@ -348,3 +520,38 @@ def test_worker_analyze_uses_the_selected_runtime_inventory(tmp_path: Path, monk
     assert payload["phase"] == "analyze"
     assert payload["total_endpoints"] == 1
     assert payload["candidate_endpoints"] == []
+
+
+def test_request_file_cli_preserves_large_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    raw = json.dumps({"transport_control": "x" * (150 * 1024)})
+    request_file = tmp_path / "request.json"
+    request_file.write_text(raw, encoding="utf-8")
+    seen = []
+
+    def fake_request(value: str) -> tuple[dict[str, object], int]:
+        seen.append(value)
+        return {"status": "success"}, 0
+
+    monkeypatch.setattr(runtime_worker, "run_request", fake_request)
+    monkeypatch.setattr(sys, "argv", ["runtime_worker", "--request-file", str(request_file)])
+    assert runtime_worker.main() == 0
+    assert seen == [raw]
+    assert json.loads(capsys.readouterr().out) == {"status": "success"}
+
+
+def test_request_file_cli_rejects_oversized_payload_before_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request_file = tmp_path / "request.json"
+    request_file.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+
+    def unexpected_request(value: str) -> tuple[dict[str, object], int]:
+        raise AssertionError("oversized input must not reach application work")
+
+    monkeypatch.setattr(runtime_worker, "run_request", unexpected_request)
+    monkeypatch.setattr(sys, "argv", ["runtime_worker", "--request-file", str(request_file)])
+    with pytest.raises(SystemExit) as error:
+        runtime_worker.main()
+    assert error.value.code == 2
