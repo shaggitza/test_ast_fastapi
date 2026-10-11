@@ -7,7 +7,9 @@ import os
 import subprocess
 import sys
 import textwrap
+from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import mypy.build as mypy_build_module
 import pytest
@@ -110,6 +112,13 @@ def test_analyzer_import_and_cold_fallback_without_fcntl(tmp_path: Path) -> None
         "staging_failure",
         "postproof_read_failure",
         "postproof_validation_failure",
+        "artifact_list_module",
+        "artifact_dict_module",
+        "duplicate_module",
+        "malformed_external_record",
+        "external_source_budget",
+        "external_source_boundary",
+        "partial_hit",
     ],
 )
 def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # noqa: PLR0911, PLR0912, PLR0915
@@ -152,6 +161,29 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
     helper_bytes = helper.read_bytes()
     graph = {module: getattr(state, "source_hash", None) for module, state in seed.graph.items()}
     graph = {module: digest for module, digest in graph.items() if isinstance(digest, str)}
+    cache_row = {
+        "module": "helper",
+        "source_path": str(helper.resolve()),
+        "meta": meta_rel,
+        "data": data_rel,
+        "meta_sha256": meta_hash,
+        "data_sha256": data_hash,
+    }
+    cache_rows = [cache_row]
+    external_records = {
+        "helper": {
+            "path": str(helper.resolve()),
+            "sha256": hashlib.sha256(helper_bytes).hexdigest(),
+        }
+    }
+    if case == "artifact_list_module":
+        cache_rows = cast("list[dict[str, str]]", [{**cache_row, "module": ["helper"]}])
+    elif case == "artifact_dict_module":
+        cache_rows = cast("list[dict[str, str]]", [{**cache_row, "module": {"name": "helper"}}])
+    elif case == "duplicate_module":
+        cache_rows = [cache_row, dict(cache_row)]
+    elif case == "malformed_external_record":
+        external_records = cast("dict[str, dict[str, str]]", {"helper": []})
     manifest_digest = write_seed_manifest(
         seed_policy,
         _cache_dir=seed_cache,
@@ -162,22 +194,8 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
         options=manifest_options,
         mypy_version="1.19.1",
         graph=graph,
-        cache_rows=[
-            {
-                "module": "helper",
-                "source_path": str(helper.resolve()),
-                "meta": meta_rel,
-                "data": data_rel,
-                "meta_sha256": meta_hash,
-                "data_sha256": data_hash,
-            }
-        ],
-        external_sources={
-            "helper": {
-                "path": str(helper.resolve()),
-                "sha256": hashlib.sha256(helper_bytes).hexdigest(),
-            }
-        },
+        cache_rows=cache_rows,
+        external_sources=external_records,
     )
     policy = LocalTypedCachePolicy.local_user_store(store, expected_manifest_sha256=manifest_digest)
     if case == "tamper":
@@ -237,6 +255,42 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
             mypy_analyzer_module, "external_snapshots_unchanged", fail_external_validation
         )
 
+    if case in {"external_source_budget", "external_source_boundary", "partial_hit"}:
+        original_prepare = mypy_analyzer_module.prepare_cache_run
+        read_limits: list[int] = []
+        original_read = cache_admission_module._read_external
+
+        def record_read(path: Path, limit: int) -> bytes:
+            read_limits.append(limit)
+            return original_read(path, limit)
+
+        def prepare_modified_plan(*args: object, **kwargs: object) -> object:
+            if case in {"external_source_budget", "external_source_boundary"}:
+                budget = len(helper_bytes) - (case == "external_source_budget")
+                monkeypatch.setattr(cache_admission_module, "MAX_SOURCE_BYTES", budget)
+            plan, snapshots = original_prepare(*args, **kwargs)
+            if case == "partial_hit":
+                plan = replace(
+                    plan,
+                    admitted_modules=plan.admitted_modules | {"missing_admitted_module"},
+                )
+            return plan, snapshots
+
+        monkeypatch.setattr(cache_admission_module, "_read_external", record_read)
+        monkeypatch.setattr(mypy_analyzer_module, "prepare_cache_run", prepare_modified_plan)
+        if case == "external_source_budget":
+
+            def unexpected_consumer_check(*args: object, **kwargs: object) -> bool:
+                raise AssertionError(
+                    "overflow reached external source decoding/consumer validation"
+                )
+
+            monkeypatch.setattr(
+                cache_admission_module,
+                "_known_event_registration_consumers",
+                unexpected_consumer_check,
+            )
+
     analyzer = MypyAnalyzer(
         main,
         module_root=tmp_path,
@@ -292,11 +346,38 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
         assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
         analyzer.release_typed_snapshot()
         return
-    if case in {"unknown", "tamper", "source_tamper"}:
+    if case in {
+        "unknown",
+        "tamper",
+        "source_tamper",
+        "artifact_list_module",
+        "artifact_dict_module",
+        "duplicate_module",
+        "malformed_external_record",
+        "external_source_budget",
+    }:
         assert observation.get("disposition") == "cold_fallback", observation
         assert "helper" in analyzer._build_result.manager.rechecked_modules
+        if case == "external_source_budget":
+            assert observation["reason"] == (
+                "external source is not a bounded single-link regular file"
+            )
+            assert read_limits == [len(helper_bytes) - 1]
+        assert set(store.glob("r13-run-*")) == initial_run_dirs
+        assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
         analyzer.release_typed_snapshot()
         return
+    if case == "partial_hit":
+        assert observation["cache_hit_modules"] == ["helper"]
+        assert observation["graph_source_hashes_match"] is False
+        assert observation["fallback"] == "cache_proof_failed"
+        assert "helper" in analyzer._build_result.manager.rechecked_modules
+        assert set(store.glob("r13-run-*")) == initial_run_dirs
+        assert len(list(Path("/proc/self/fd").iterdir())) == initial_fd_count
+        analyzer.release_typed_snapshot()
+        return
+    if case == "external_source_boundary":
+        assert read_limits[0] == len(helper_bytes)
     assert observation.get("cache_hit_modules") == ["helper"], observation
     assert observation["roots_fresh"] is True
     assert observation["graph_source_hashes_match"] is True, observation

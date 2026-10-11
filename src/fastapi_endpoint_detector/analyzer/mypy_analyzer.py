@@ -1004,10 +1004,13 @@ class MypyAnalyzer:
                         and getattr(self._build_result.graph[module], "tree", None) is not None
                         and module not in self._build_result.manager.rechecked_modules
                     }
-                    graph_source_hashes_match = all(
-                        getattr(self._build_result.graph[module], "meta_source_hash", None)
-                        == cache_plan.expected_graph.get(module)
-                        for module in hit_modules
+                    graph_source_hashes_match = hit_modules == set(
+                        cache_plan.admitted_modules
+                    ) and all(
+                        isinstance(cache_plan.expected_graph.get(module), str)
+                        and getattr(self._build_result.graph[module], "meta_source_hash", None)
+                        == cache_plan.expected_graph[module]
+                        for module in cache_plan.admitted_modules
                     )
                     roots_fresh = set(self._module_to_path) <= set(
                         self._build_result.manager.rechecked_modules

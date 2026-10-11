@@ -281,9 +281,20 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
     artifacts = manifest.get("artifacts")
     if not isinstance(graph, dict) or not isinstance(artifacts, list):
         raise CacheAdmissionError("local cache graph or artifacts are malformed")
-    if not isinstance(manifest.get("external_sources"), dict) or {
-        row.get("module") for row in artifacts if isinstance(row, dict)
-    } != set(manifest["external_sources"]):
+    external_source_records = manifest.get("external_sources")
+    if not isinstance(external_source_records, dict) or not all(
+        isinstance(module, str) and isinstance(row, dict)
+        for module, row in external_source_records.items()
+    ):
+        raise CacheAdmissionError("local cache external source inventory is malformed")
+    artifact_modules: list[str] = []
+    for row in artifacts:
+        if not isinstance(row, dict) or not isinstance(row.get("module"), str):
+            raise CacheAdmissionError("local cache artifact identity is malformed")
+        artifact_modules.append(row["module"])
+    if len(artifact_modules) != len(set(artifact_modules)) or set(artifact_modules) != set(
+        external_source_records
+    ):
         raise CacheAdmissionError("cache artifacts do not match the external source inventory")
     actual_options = _options_record(options)
     semantic = {
@@ -312,14 +323,15 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
         cache_total = 0
         cache_count = 0
         current_external_sources: dict[str, bytes] = {}
-        source_records = manifest.get("external_sources")
-        if not isinstance(source_records, dict):
-            raise CacheAdmissionError("local cache external source inventory is malformed")
+        external_source_total = 0
+        source_records = external_source_records
         for module, row in sorted(source_records.items()):
             if not isinstance(row, dict) or not isinstance(row.get("path"), str):
                 raise CacheAdmissionError("local cache external source entry is malformed")
             path = Path(row["path"])
-            data = _read_external(path, MAX_SOURCE_FILE_BYTES)
+            remaining_source_bytes = MAX_SOURCE_BYTES - external_source_total
+            data = _read_external(path, min(MAX_SOURCE_FILE_BYTES, remaining_source_bytes))
+            external_source_total += len(data)
             if _digest(data) != row.get("sha256"):
                 raise CacheAdmissionError(f"external source changed for {module}")
             current_external_sources[str(path.resolve())] = data
