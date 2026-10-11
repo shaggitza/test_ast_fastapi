@@ -574,6 +574,7 @@ class ChangeMapper:
         use_scip: bool = False,
         baseline_app_path: Path | None = None,
         bootstrap_entry: str | None = None,
+        typed_graph_shadow: bool = False,
     ) -> None:
         """
         Initialize the change mapper.
@@ -588,6 +589,7 @@ class ChangeMapper:
             use_scip: Use SCIP rather than mypy for reverse dependency analysis.
             baseline_app_path: Explicit baseline snapshot used for removed SCIP lines.
             bootstrap_entry: Exact secure-AST MODULE:FUNCTION registration seed.
+            typed_graph_shadow: Opt in to the unvalidated private typed-graph diagnostic.
         """
         self.app_path = app_path.resolve()
         self.config = config or Config()
@@ -612,6 +614,7 @@ class ChangeMapper:
         self.app_variable = app_variable
         self.app_entry = app_entry
         self.bootstrap_entry = bootstrap_entry
+        self.typed_graph_shadow = typed_graph_shadow
         self.use_cache = use_cache
         self.secure_ast = secure_ast
         self.use_scip = use_scip
@@ -2216,6 +2219,8 @@ class ChangeMapper:
         warnings: list[str] = []
         # Failures describe this attempt; a recovered snapshot must be retried.
         self._baseline_failure = None
+        # This private opt-in diagnostic is per-run state, never stale report data.
+        self._typed_graph_shadow = ()
 
         def report_progress(current: int, total: int, desc: str) -> None:
             if progress_callback:
@@ -2563,6 +2568,21 @@ class ChangeMapper:
         has_removals: bool,
     ) -> None:
         """Run a diagnostic graph query while legacy mapper evidence stays authoritative."""
+        self._typed_graph_shadow = ()
+        if not self.typed_graph_shadow:
+            return
+        try:
+            self._collect_typed_graph_shadow(diff_files, has_removals)
+        except Exception:
+            # The shadow is unvalidated and must never prevent the authoritative report.
+            self._typed_graph_shadow = ()
+
+    def _collect_typed_graph_shadow(
+        self,
+        diff_files: list[Any],
+        has_removals: bool,
+    ) -> None:
+        """Build target/baseline diagnostics; caller isolates all ordinary failures."""
         shadow: list[tuple[str, Any, Any]] = []
         target_changes = [
             (item.path.as_posix(), line)
@@ -2574,21 +2594,18 @@ class ChangeMapper:
             or self.source_inventory.unresolved_imports
             or self.source_inventory.module_collisions
         ):
-            try:
-                graph = build_shadow_graph(
-                    self.mypy_analyzer,
-                    _mypy_inventory(self.source_inventory)[0],
-                    self.registry.get_all(),
-                )
-                result = query_changed_lines(
-                    graph,
-                    _mypy_inventory(self.source_inventory)[0],
-                    target_changes,
-                    side="target",
-                )
-                shadow.append(("target", graph, result))
-            except (OSError, RuntimeError, TypeError, ValueError):
-                pass
+            graph = build_shadow_graph(
+                self.mypy_analyzer,
+                _mypy_inventory(self.source_inventory)[0],
+                self.registry.get_all(),
+            )
+            result = query_changed_lines(
+                graph,
+                _mypy_inventory(self.source_inventory)[0],
+                target_changes,
+                side="target",
+            )
+            shadow.append(("target", graph, result))
         if has_removals and self.baseline_app_path is not None and self._baseline_failure is None:
             baseline_changes = [
                 (item.path.as_posix(), line)
@@ -2600,21 +2617,18 @@ class ChangeMapper:
                 or self.baseline_source_inventory.unresolved_imports
                 or self.baseline_source_inventory.module_collisions
             ):
-                try:
-                    graph = build_shadow_graph(
-                        self.baseline_mypy_analyzer,
-                        _mypy_inventory(self.baseline_source_inventory)[0],
-                        self.baseline_mypy_registry.get_all(),
-                    )
-                    result = query_changed_lines(
-                        graph,
-                        _mypy_inventory(self.baseline_source_inventory)[0],
-                        baseline_changes,
-                        side="baseline",
-                    )
-                    shadow.append(("baseline", graph, result))
-                except (OSError, RuntimeError, TypeError, ValueError):
-                    pass
+                graph = build_shadow_graph(
+                    self.baseline_mypy_analyzer,
+                    _mypy_inventory(self.baseline_source_inventory)[0],
+                    self.baseline_mypy_registry.get_all(),
+                )
+                result = query_changed_lines(
+                    graph,
+                    _mypy_inventory(self.baseline_source_inventory)[0],
+                    baseline_changes,
+                    side="baseline",
+                )
+                shadow.append(("baseline", graph, result))
         self._typed_graph_shadow = tuple(shadow)
 
     def get_endpoints(self) -> list[Endpoint]:

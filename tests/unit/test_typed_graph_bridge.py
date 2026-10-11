@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from fastapi_endpoint_detector.analyzer import change_mapper as change_mapper_module
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.source_inventory import (
@@ -102,7 +103,7 @@ def test_public_mapper_invokes_snapshot_graph_without_replacing_legacy_report(
         "def handler() -> int: return helper()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(app, secure_ast=True, use_cache=False)
+    mapper = ChangeMapper(app, secure_ast=True, use_cache=False, typed_graph_shadow=True)
     diff = (
         "diff --git a/app.py b/app.py\n"
         "--- a/app.py\n"
@@ -120,3 +121,182 @@ def test_public_mapper_invokes_snapshot_graph_without_replacing_legacy_report(
     assert any(edge.caller == "app.handler" and edge.callee == "app.helper" for edge in graph.edges)
     assert any(item.occurrence.symbol == "app.handler" for item in query.evidence)
     assert report.candidate_endpoints == report.affected_endpoints
+
+
+def _public_mapper_fixture(tmp_path: Path, **kwargs: object) -> tuple[ChangeMapper, str]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def helper() -> int: return 1\n"
+        "@app.get('/')\n"
+        "def handler() -> int: return helper()\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(app, secure_ast=True, use_cache=False, **kwargs)
+    diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-def helper() -> int: return 0\n"
+        "+def helper() -> int: return 1\n"
+    )
+    return mapper, diff
+
+
+def test_shadow_is_opt_in_and_disabled_run_clears_previous_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mapper, diff = _public_mapper_fixture(tmp_path)
+
+    def forbidden(*args: object, **kwargs: object) -> object:
+        raise AssertionError("default mapper called typed graph diagnostic")
+
+    mapper._typed_graph_shadow = (("stale", object(), object()),)
+    monkeypatch.setattr(change_mapper_module, "build_shadow_graph", forbidden)
+    report = mapper.analyze_diff(diff)
+    assert report.candidate_endpoints == report.affected_endpoints
+    assert mapper._typed_graph_shadow == ()
+
+
+@pytest.mark.parametrize("failure", [KeyError("adapter"), AttributeError("query")])
+def test_shadow_ordinary_failures_do_not_abort_authoritative_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    mapper, diff = _public_mapper_fixture(tmp_path, typed_graph_shadow=True)
+
+    def broken(*args: object, **kwargs: object) -> object:
+        raise failure
+
+    mapper._typed_graph_shadow = (("stale", object(), object()),)
+    monkeypatch.setattr(change_mapper_module, "build_shadow_graph", broken)
+    report = mapper.analyze_diff(diff)
+    mapper.typed_graph_shadow = False
+    expected = mapper.analyze_diff(diff)
+    assert report.candidate_endpoints == expected.candidate_endpoints
+    assert report.affected_endpoints == expected.affected_endpoints
+    assert report.endpoint_lifecycle == expected.endpoint_lifecycle
+    assert report.errors == expected.errors
+    assert report.warnings == expected.warnings
+    assert report.analysis_completeness == expected.analysis_completeness
+    assert mapper._typed_graph_shadow == ()
+
+
+def test_shadow_baseline_failure_isolated_and_does_not_retain_target_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target_root = tmp_path / "target"
+    baseline_root = tmp_path / "baseline"
+    target_root.mkdir()
+    baseline_root.mkdir()
+    app_text = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def helper() -> int: return 1\n"
+        "@app.get('/')\n"
+        "def handler() -> int: return helper()\n"
+    )
+    target_app = target_root / "app.py"
+    baseline_app = baseline_root / "app.py"
+    target_app.write_text(app_text, encoding="utf-8")
+    baseline_app.write_text(app_text.replace("return 1", "return 0"), encoding="utf-8")
+    mapper = ChangeMapper(
+        target_app,
+        secure_ast=True,
+        use_cache=False,
+        baseline_app_path=baseline_app,
+        typed_graph_shadow=True,
+    )
+    original = change_mapper_module.build_shadow_graph
+    calls = 0
+
+    def target_ok_baseline_broken(analyzer: MypyAnalyzer, *args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        if analyzer is mapper.baseline_mypy_analyzer:
+            raise KeyError("baseline adapter")
+        return original(analyzer, *args, **kwargs)
+
+    monkeypatch.setattr(change_mapper_module, "build_shadow_graph", target_ok_baseline_broken)
+    diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-def helper() -> int: return 0\n"
+        "+def helper() -> int: return 1\n"
+    )
+    report = mapper.analyze_diff(diff)
+    assert calls == 2
+    assert report.candidate_endpoints == report.affected_endpoints
+    assert mapper._typed_graph_shadow == ()
+
+
+@pytest.mark.parametrize("failing_side", ["target", "baseline"])
+def test_shadow_query_failures_are_isolated_on_both_sides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_side: str
+) -> None:
+    target_root = tmp_path / "target"
+    baseline_root = tmp_path / "baseline"
+    target_root.mkdir()
+    baseline_root.mkdir()
+    app_text = (
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def helper() -> int: return 1\n"
+        "@app.get('/')\n"
+        "def handler() -> int: return helper()\n"
+    )
+    target_app = target_root / "app.py"
+    baseline_app = baseline_root / "app.py"
+    target_app.write_text(app_text, encoding="utf-8")
+    baseline_app.write_text(app_text.replace("return 1", "return 0"), encoding="utf-8")
+    mapper = ChangeMapper(
+        target_app,
+        secure_ast=True,
+        use_cache=False,
+        baseline_app_path=baseline_app,
+        typed_graph_shadow=True,
+    )
+    original = change_mapper_module.query_changed_lines
+
+    def query_with_failure(*args: object, **kwargs: object):
+        if kwargs.get("side") == failing_side:
+            raise AttributeError(f"{failing_side} query")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(change_mapper_module, "query_changed_lines", query_with_failure)
+    mapper._typed_graph_shadow = (("stale", object(), object()),)
+    diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-def helper() -> int: return 0\n"
+        "+def helper() -> int: return 1\n"
+    )
+    report = mapper.analyze_diff(diff)
+    mapper.typed_graph_shadow = False
+    expected = mapper.analyze_diff(diff)
+    assert report.candidate_endpoints == expected.candidate_endpoints
+    assert report.affected_endpoints == expected.affected_endpoints
+    assert report.endpoint_lifecycle == expected.endpoint_lifecycle
+    assert report.errors == expected.errors
+    assert report.warnings == expected.warnings
+    assert report.analysis_completeness == expected.analysis_completeness
+    assert mapper._typed_graph_shadow == ()
+
+
+def test_shadow_does_not_swallow_process_interrupts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mapper, diff = _public_mapper_fixture(tmp_path, typed_graph_shadow=True)
+
+    def interrupted(*args: object, **kwargs: object) -> object:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(change_mapper_module, "build_shadow_graph", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        mapper.analyze_diff(diff)
