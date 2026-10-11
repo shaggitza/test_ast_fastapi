@@ -1,0 +1,13 @@
+diff --git a/main.py b/main.py
+index 248275f..e67a2a3 100644
+--- a/main.py
++++ b/main.py
+@@ -1,7 +1,7 @@
+ from fastapi import FastAPI
+ app = FastAPI()
+ def startup_helper() -> str:
+-    return 'baseline'
++    return 'target'
+ @app.on_event('startup')
+ async def startup() -> None:
+     startup_helper()
