@@ -1,11 +1,11 @@
 schema_version: 1
 preset:
   id: stdlib-filesystem-effects
-  version: 2.0.0
+  version: 3.0.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_filesystem_v1.yaml
-    revision: "2"
+    revision: "3"
 contracts:
   - id: pathlib-read-text
     symbol: pathlib.Path.read_text
@@ -66,4 +66,32 @@ contracts:
     channel: filesystem
     resource: {kind: receiver}
     value: {kind: argument, index: 0}
+    package: {python: ">=3.10,<3.14"}
+  - id: pathlib-touch
+    symbol: pathlib.Path.touch
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    package: {python: ">=3.10,<3.14"}
+  - id: pathlib-mkdir
+    symbol: pathlib.Path.mkdir
+    invocation: instance_method
+    operation: write
+    channel: filesystem
+    resource: {kind: receiver}
+    package: {python: ">=3.10,<3.14"}
+  - id: pathlib-unlink
+    symbol: pathlib.Path.unlink
+    invocation: instance_method
+    operation: delete
+    channel: filesystem
+    resource: {kind: receiver}
+    package: {python: ">=3.10,<3.14"}
+  - id: pathlib-rmdir
+    symbol: pathlib.Path.rmdir
+    invocation: instance_method
+    operation: delete
+    channel: filesystem
+    resource: {kind: receiver}
     package: {python: ">=3.10,<3.14"}

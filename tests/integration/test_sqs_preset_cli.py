@@ -41,7 +41,11 @@ def test_public_cli_validates_sqs_preset() -> None:
             "message_bus",
             {"kind": "keyword", "name": "QueueUrl", "path": []},
             {"kind": "keyword", "name": "MessageBody", "path": []},
-            {"distribution": "mypy-boto3-sqs", "version": "==1.35.91"},
+            {
+                "distribution": "mypy-boto3-sqs",
+                "version": "==1.35.91",
+                "source_hashes": {},
+            },
         ),
         "typed-sqs-send-message-batch": (
             "mypy_boto3_sqs.client.SQSClient.send_message_batch",
@@ -49,7 +53,11 @@ def test_public_cli_validates_sqs_preset() -> None:
             "message_bus",
             {"kind": "keyword", "name": "QueueUrl", "path": []},
             {"kind": "keyword", "name": "Entries", "path": []},
-            {"distribution": "mypy-boto3-sqs", "version": "==1.35.91"},
+            {
+                "distribution": "mypy-boto3-sqs",
+                "version": "==1.35.91",
+                "source_hashes": {},
+            },
         ),
     }
 

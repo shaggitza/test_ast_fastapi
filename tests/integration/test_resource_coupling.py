@@ -824,3 +824,117 @@ def test_state_message_operation_mixing_fails_closed(tmp_path: Path) -> None:
             secure_ast=True,
             use_cache=False,
         ).analyze_diff(diff)
+
+
+@pytest.mark.parametrize(
+    ("source_path", "destination_path", "expected_producers"),
+    [
+        ("shared.txt", "shared.txt", {"remove-source", "produce-destination"}),
+        ("source.txt", "destination.txt", {"produce-destination"}),
+    ],
+)
+def test_source_removal_and_destination_production_have_distinct_resources(
+    tmp_path: Path,
+    source_path: str,
+    destination_path: str,
+    expected_producers: set[str],
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n\n"
+        "app = FastAPI()\n"
+        "def remove_path(path: str) -> None: pass\n"
+        "def produce_path(path: str) -> None: pass\n"
+        "def read_path(path: str) -> str: return path\n\n"
+        "@app.delete('/source')\n"
+        "def source_remover() -> None:\n"
+        f"    remove_path({source_path!r})\n\n"
+        "@app.post('/destination')\n"
+        "def destination_writer() -> None:\n"
+        f"    produce_path({destination_path!r})\n\n"
+        "@app.get('/reader')\n"
+        "def reader() -> str:\n"
+        f"    return read_path({destination_path!r})\n",
+        encoding="utf-8",
+    )
+    contracts = tmp_path / "effects.yaml"
+    contracts.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "preset": {
+                    "id": "move-resource-test",
+                    "version": "1.0.0",
+                    "provenance": {"kind": "user", "source": "effects.yaml"},
+                },
+                "contracts": [
+                    {
+                        "id": "remove-source",
+                        "symbol": "main.remove_path",
+                        "invocation": "function",
+                        "operation": "delete",
+                        "channel": "filesystem",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                    {
+                        "id": "produce-destination",
+                        "symbol": "main.produce_path",
+                        "invocation": "function",
+                        "operation": "write",
+                        "channel": "filesystem",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                    {
+                        "id": "read-destination",
+                        "symbol": "main.read_path",
+                        "invocation": "function",
+                        "operation": "read",
+                        "channel": "filesystem",
+                        "resource": {"kind": "argument", "index": 0},
+                    },
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    coupling = tmp_path / "coupling.yaml"
+    coupling.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "mode": "report_only",
+                "groups": [
+                    {
+                        "id": "filesystem-paths",
+                        "resource_space": "filesystem-paths-test",
+                        "producer_contract_ids": ["produce-destination", "remove-source"],
+                        "consumer_contract_ids": ["read-destination"],
+                    }
+                ],
+                "limits": {"max_endpoint_links_per_resource": 8, "max_edges": 16},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    diff = tmp_path / "change.diff"
+    diff.write_text(
+        "diff --git a/main.py b/main.py\n--- a/main.py\n+++ b/main.py\n"
+        "@@ -4,1 +4,1 @@\n-def remove_path(path: str) -> None: pass\n"
+        "+def remove_path(path: str) -> None: return None\n",
+        encoding="utf-8",
+    )
+
+    report = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(effect_contracts=contracts, resource_coupling=coupling)
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert report.resource_coupling_graph is not None
+    assert {
+        edge.producer_contract_id for edge in report.resource_coupling_graph.edges
+    } == expected_producers
