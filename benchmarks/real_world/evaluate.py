@@ -1167,6 +1167,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "repository": record_key[0],
             "pr": record_key[1],
             "truth_status": expected_record.get("status", "adjudicated"),
+            "truth_positive": bool(expected),
+            "terminal_status": "evaluable",
             "truth_sha256": hashlib.sha256(
                 json.dumps(
                     truth_source_by_key[record_key], sort_keys=True, separators=(",", ":")
@@ -1174,8 +1176,16 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             ).hexdigest(),
             "prediction_status": prediction_status(predicted_record),
             "unresolved_count": len(unresolved),
-            "raw": {"tp": tp, "fp": fp, "fn": fn},
-            "normalized": {"tp": normalized["tp"], "fp": normalized["fp"], "fn": normalized["fn"]},
+            "raw": (
+                {"tp": tp, "fp": fp, "fn": fn}
+                if prediction_is_completed(predicted_record)
+                else None
+            ),
+            "normalized": (
+                {"tp": normalized["tp"], "fp": normalized["fp"], "fn": normalized["fn"]}
+                if prediction_is_completed(predicted_record)
+                else None
+            ),
         }
         residual_expected = [
             claim
@@ -1382,7 +1392,7 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             ],
         },
         "comparison_evidence": {
-            "schema_version": 1,
+            "schema_version": 2,
             "scope": scope_id,
             "normalization_version": ALIAS_VERSION,
             "truth_sha256": truth_artifact.sha256,
@@ -1404,7 +1414,38 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             "selection_keys": [
                 {"repository": repository, "pr": pr} for repository, pr in sorted(truth)
             ],
-            "per_pr": [per_pr_evidence[item] for item in sorted(per_pr_evidence)],
+            "per_pr": [
+                per_pr_evidence.get(
+                    item,
+                    {
+                        "repository": item[0],
+                        "pr": item[1],
+                        "truth_status": truth[item].get("status", "adjudicated"),
+                        "truth_positive": bool(entrypoints(truth[item]))
+                        if truth[item].get("status", "adjudicated") == "adjudicated"
+                        else None,
+                        "truth_sha256": hashlib.sha256(
+                            json.dumps(
+                                truth_source_by_key[item],
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest(),
+                        "prediction_status": prediction_status(predictions[item])
+                        if item in predictions
+                        else "missing",
+                        "unresolved_count": len(predictions[item].get("unresolved", []))
+                        if item in predictions
+                        else None,
+                        "terminal_status": "evaluable"
+                        if truth[item].get("status", "adjudicated") == "adjudicated"
+                        else truth[item]["status"],
+                        "raw": None,
+                        "normalized": None,
+                    },
+                )
+                for item in sorted(truth)
+            ],
             "attested": False,
             "attestation_reason": "truth selection and source inventory are not fully attested",
         },
@@ -1424,6 +1465,23 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - raw and normalized metrics share
             else None
         ),
         "adjudicated_prs": evaluated,
+        "terminal_denominators": {
+            "total": len(truth),
+            "terminal": len(truth),
+            "evaluable": evaluated,
+            "positive": truth_positive_prs,
+            "negative": negative_control_prs,
+            "unknown": unknown_label_prs,
+            "not_evaluable": not_evaluable_prs,
+            "missing_prediction": sum(item not in predictions for item in truth),
+            "prediction_status": {
+                status: sum(
+                    item in predictions and prediction_status(predictions[item]) == status
+                    for item in truth
+                )
+                for status in ("completed", "partial", "unresolved")
+            },
+        },
         "unknown_label_prs": unknown_label_prs,
         "not_evaluable_prs": not_evaluable_prs,
         "prediction_coverage": ratio(len(adjudicated_keys & set(predictions)), evaluated),

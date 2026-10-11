@@ -21,6 +21,8 @@ def reports(*, attested: bool = True, n: int = 40):
         base = {
             **key,
             "truth_status": "adjudicated",
+            "truth_positive": True,
+            "terminal_status": "evaluable",
             "truth_sha256": f"{pr:064x}",
             "prediction_status": "completed",
             "unresolved_count": 0,
@@ -40,7 +42,7 @@ def reports(*, attested: bool = True, n: int = 40):
                 "official_scoring_eligible": attested,
             },
             "comparison_evidence": {
-                "schema_version": 1,
+                "schema_version": 2,
                 "scope": "fastapi-adapter-v1",
                 "normalization_version": ALIAS_VERSION,
                 "truth_sha256": "a" * 64,
@@ -100,7 +102,7 @@ def test_missing_rows_and_not_evaluable_coverage_fail_closed():
         compare(baseline, candidate)
     baseline, candidate = reports()
     candidate["comparison_evidence"]["per_pr"][0]["truth_status"] = "not_evaluable"
-    with pytest.raises(ValueError, match="not-evaluable"):
+    with pytest.raises(ValueError, match="truth status"):
         compare(baseline, candidate)
 
 
@@ -113,12 +115,12 @@ def test_unattested_artifacts_are_report_only():
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("unresolved_count", False), ("unresolved_count", -1), ("prediction_status", "unresolved")],
+    [("unresolved_count", False), ("unresolved_count", -1), ("prediction_status", "bogus")],
 )
 def test_malformed_prediction_completion_metadata_fails_closed(field, value):
     baseline, candidate = reports()
     candidate["comparison_evidence"]["per_pr"][0][field] = value
-    with pytest.raises(ValueError, match="unresolved prediction"):
+    with pytest.raises(ValueError, match="prediction"):
         compare(baseline, candidate)
 
 
@@ -181,7 +183,7 @@ def test_changed_rows_without_changed_artifact_hash_remain_report_only():
     assert result["gate_decision"] == "report_only"
 
 
-@pytest.mark.parametrize("version", [True, False, 1.0, "1", None])
+@pytest.mark.parametrize("version", [True, False, 1.0, "2", None, 1])
 def test_direct_comparison_rejects_untyped_schema_version(version):
     baseline, candidate = reports(n=1)
     for report in (baseline, candidate):
@@ -254,6 +256,100 @@ def test_repository_cluster_bootstrap_reports_fp_and_recall_gates():
     assert measures["false_positive_pr_rate"]["bound_test"] == "upper_at_most"
 
 
+def test_micro_bootstrap_excludes_selected_repositories_outside_quality_subset():
+    baseline, candidate = reports(n=2)
+    for report in (baseline, candidate):
+        evidence = report["comparison_evidence"]
+        row = evidence["per_pr"][1]
+        key = evidence["selection_keys"][1]
+        row["repository"] = key["repository"] = "owner/noncompleted"
+        row["prediction_status"] = "partial"
+        row["unresolved_count"] = 1
+        row["raw"] = row["normalized"] = None
+        canonical_keys = sorted(
+            evidence["selection_keys"], key=lambda item: (item["repository"], item["pr"])
+        )
+        evidence["selection_sha256"] = hashlib.sha256(
+            json.dumps(canonical_keys, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    result = compare(baseline, candidate, seed=37)
+    measures = result["metrics"]["raw"]["measures"]
+    assert result["denominators"]["total"] == 2
+    assert result["denominators"]["paired_completed_evaluable"] == 1
+    assert result["per_run"]["baseline"]["counts"]["partial"] == 1
+    assert measures["precision"]["decision"] != "unsupported"
+    assert measures["recall"]["decision"] != "unsupported"
+    assert measures["f1"]["decision"] != "unsupported"
+    assert (
+        result["macro_metrics"]["raw"]["repository_macro"]["recall"]["interval_status"]
+        == "supported"
+    )
+
+
+def test_unknown_and_missing_predictions_remain_terminal_denominators_not_negatives():
+    baseline, candidate = reports(n=3)
+    for report in (baseline, candidate):
+        rows = report["comparison_evidence"]["per_pr"]
+        rows[1].update(
+            truth_status="unknown",
+            truth_positive=None,
+            terminal_status="unknown",
+            prediction_status="missing",
+            unresolved_count=None,
+            raw=None,
+            normalized=None,
+        )
+        rows[2]["prediction_status"] = "partial"
+        rows[2]["unresolved_count"] = 1
+        rows[2]["raw"] = rows[2]["normalized"] = None
+    result = compare(baseline, candidate)
+    assert result["denominators"]["total"] == 3
+    assert result["denominators"]["unknown"] == 1
+    assert result["denominators"]["negative"] == 0
+    assert result["per_run"]["baseline"]["counts"]["missing"] == 1
+    assert result["denominators"]["paired_completed_evaluable"] == 1
+    assert result["gate_decision"] == "report_only"
+
+
+def test_all_unresolved_terminals_are_reported_with_unsupported_scores():
+    baseline, candidate = reports(n=3)
+    for report in (baseline, candidate):
+        for row in report["comparison_evidence"]["per_pr"]:
+            row["prediction_status"] = "unresolved"
+            row["unresolved_count"] = 1
+            row["raw"] = row["normalized"] = None
+    result = compare(baseline, candidate)
+    assert result["per_run"]["baseline"]["counts"]["unresolved"] == 3
+    assert result["denominators"]["paired_completed_evaluable"] == 0
+    assert result["diagnostics"]["baseline"]["failure"] == 1.0
+    assert result["macro_metrics"]["raw"]["pr_macro"]["recall"]["interval_status"].startswith(
+        "unsupported"
+    )
+
+
+def test_unequal_repository_clusters_macro_intervals_and_leave_one_out_are_deterministic():
+    baseline, candidate = reports(n=5)
+    rows_a = baseline["comparison_evidence"]["per_pr"]
+    rows_b = candidate["comparison_evidence"]["per_pr"]
+    keys = baseline["comparison_evidence"]["selection_keys"]
+    for index, (left, right, key) in enumerate(zip(rows_a, rows_b, keys, strict=True)):
+        repo = "owner/small" if index == 0 else "owner/large"
+        left["repository"] = right["repository"] = key["repository"] = repo
+    canonical = sorted(keys, key=lambda item: (item["repository"], item["pr"]))
+    digest = hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    for report in (baseline, candidate):
+        report["comparison_evidence"]["selection_sha256"] = digest
+    first = compare(baseline, candidate, seed=91)
+    second = compare(baseline, candidate, seed=91)
+    assert first == second
+    macro = first["macro_metrics"]["normalized"]["repository_macro"]["recall"]
+    assert macro["paired_repository_cluster_interval"] is not None
+    assert set(first["leave_one_repository_out"]) == {"owner/small", "owner/large"}
+
+
 def test_cluster_bootstrap_repeats_and_negative_control_fp_gate_is_numeric():
     baseline, candidate = reports(n=6)
     rows_a = baseline["comparison_evidence"]["per_pr"]
@@ -264,6 +360,7 @@ def test_cluster_bootstrap_repeats_and_negative_control_fp_gate_is_numeric():
         left["repository"] = right["repository"] = key["repository"] = repository
         if index in {0, 3}:
             for row in (left, right):
+                row["truth_positive"] = False
                 row["raw"] = row["normalized"] = {"tp": 0, "fp": 0, "fn": 0}
             right["raw"] = right["normalized"] = {"tp": 0, "fp": 1, "fn": 0}
     canonical_keys = sorted(keys, key=lambda item: (item["repository"], item["pr"]))
@@ -278,3 +375,94 @@ def test_cluster_bootstrap_repeats_and_negative_control_fp_gate_is_numeric():
     fp_gate = first["metrics"]["raw"]["measures"]["false_positive_pr_rate"]
     assert fp_gate["delta"] == pytest.approx(1.0)
     assert fp_gate["decision"] == "fail"
+
+
+@pytest.mark.parametrize(
+    ("baseline_status", "candidate_status", "baseline_unresolved", "candidate_unresolved"),
+    [
+        ("missing", "completed", None, 0),
+        ("partial", "completed", 1, 0),
+        ("unresolved", "completed", 1, 0),
+    ],
+)
+def test_per_run_terminal_outcomes_pair_truth_without_becoming_confusion_counts(
+    baseline_status, candidate_status, baseline_unresolved, candidate_unresolved
+):
+    baseline, candidate = reports(n=2)
+    base_row = baseline["comparison_evidence"]["per_pr"][0]
+    candidate_row = candidate["comparison_evidence"]["per_pr"][0]
+    for row, status, unresolved in (
+        (base_row, baseline_status, baseline_unresolved),
+        (candidate_row, candidate_status, candidate_unresolved),
+    ):
+        row["prediction_status"] = status
+        row["unresolved_count"] = unresolved
+        if status != "completed":
+            row["raw"] = row["normalized"] = None
+
+    result = compare(baseline, candidate, seed=11)
+    assert result["denominators"]["positive"] == 2
+    assert result["denominators"]["negative"] == 0
+    assert result["denominators"]["paired_completed_evaluable"] == 1
+    assert result["per_run"]["baseline"]["counts"][baseline_status] == 1
+    assert result["per_run"]["candidate"]["counts"][candidate_status] == 2
+    assert result["per_run_deltas"]["counts"][baseline_status] == -1
+    assert result["metrics"]["raw"]["measures"]["precision"]["baseline"] == 1.0
+    assert result["metrics"]["raw"]["measures"]["precision"]["candidate"] == pytest.approx(0.8)
+    assert result["gate_decision"] == "report_only"
+
+
+def test_all_partial_quality_subset_reports_terminal_counts_and_unsupported_metrics():
+    baseline, candidate = reports(n=3)
+    for report in (baseline, candidate):
+        for row in report["comparison_evidence"]["per_pr"]:
+            row["prediction_status"] = "partial"
+            row["unresolved_count"] = 1
+            row["raw"] = row["normalized"] = None
+
+    result = compare(baseline, candidate, seed=29)
+    assert result["denominators"]["total"] == 3
+    assert result["denominators"]["evaluable"] == 3
+    assert result["denominators"]["paired_completed_evaluable"] == 0
+    assert result["per_run"]["baseline"]["counts"]["partial"] == 3
+    assert result["per_run"]["candidate"]["counts"]["partial"] == 3
+    assert result["per_run"]["baseline"]["abstention"] == 1.0
+    for metric in ("raw", "normalized"):
+        assert result["metrics"][metric]["supported"] is False
+        for measure in result["metrics"][metric]["measures"].values():
+            assert measure["decision"] == "unsupported"
+            assert measure["baseline"] is measure["candidate"] is measure["delta"] is None
+            assert measure["interval"] is None
+            assert measure["undefined_samples"] == 10_000
+    assert result["macro_metrics"]["raw"]["pr_macro"]["recall"]["interval_status"].startswith(
+        "unsupported"
+    )
+
+
+@pytest.mark.parametrize("truth_status", ["unknown", "not_evaluable"])
+def test_non_evaluable_only_selection_keeps_denominators_without_quality_scores(truth_status):
+    baseline, candidate = reports(n=2)
+    for report in (baseline, candidate):
+        for row in report["comparison_evidence"]["per_pr"]:
+            row.update(
+                truth_status=truth_status,
+                truth_positive=None,
+                terminal_status=truth_status,
+                raw=None,
+                normalized=None,
+            )
+
+    result = compare(baseline, candidate, seed=31)
+    assert result["denominators"]["total"] == 2
+    assert result["denominators"]["evaluable"] == 0
+    assert result["denominators"]["unknown"] == (2 if truth_status == "unknown" else 0)
+    assert result["denominators"]["not_evaluable"] == (2 if truth_status == "not_evaluable" else 0)
+    assert result["denominators"]["paired_completed_evaluable"] == 0
+    assert result["per_run"]["baseline"]["counts"]["completed"] == 2
+    for metric in ("raw", "normalized"):
+        assert result["metrics"][metric]["supported"] is False
+        for measure in result["metrics"][metric]["measures"].values():
+            assert measure["decision"] == "unsupported"
+            assert measure["baseline"] is measure["candidate"] is measure["delta"] is None
+            assert measure["interval"] is None
+            assert measure["undefined_samples"] == 10_000
