@@ -1,6 +1,6 @@
 {
   "exit_code": 0,
-  "raw_artifact": "/tmp/gh283-medium-measurement-r3-20261011.raw.json",
+  "raw_artifact": "incremental-mypy-dag-r3-20261011.raw.json",
   "raw_sha256": "3e37254eba3b7fd099244dbf0905c2fcb6d2f569dde2a9aedfa1f9a76bd2b2cc",
   "raw_bytes": 733538,
   "stderr_bytes": 0,
