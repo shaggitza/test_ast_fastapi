@@ -7,6 +7,7 @@ published and integrated with those official paths.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -21,6 +22,9 @@ from benchmarks.real_world.ground_truth_v2.schema import canonical_json
 _PROTOCOL = "ground-truth-review-canary-pre-readiness-recovery-v1"
 _DOMAIN = (_PROTOCOL + "\0").encode()
 _HASH = re.compile(r"^sha256:[0-9a-f]{64}$")
+_ATTEMPT = re.compile(r"^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$")
+_ENTRY = re.compile(r"^[0-9]{6}-[A-Za-z0-9_-]+\.json$")
+_ARCHIVE = re.compile(r"^evidence/(?!\.\.?(/|$))(?:[A-Za-z0-9_-]+/)*(?!\.\.?(/|$))[A-Za-z0-9._-]+$")
 _ZERO = "sha256:" + "0" * 64
 _REQUIRED = {
     "schema_version",
@@ -87,6 +91,15 @@ def _time(value: Any, label: str) -> datetime:
     return result.astimezone(timezone.utc)
 
 
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RecoveryError("recovery JSON contains duplicate keys")
+        result[key] = value
+    return result
+
+
 def _entry_hash(record: dict[str, Any]) -> str:
     body = {key: value for key, value in record.items() if key != "entry_hash"}
     return "sha256:" + hashlib.sha256(_DOMAIN + canonical_json(body)).hexdigest()
@@ -122,7 +135,7 @@ def validate_prepare_preflight(
             raise RecoveryError(f"caller {name} hash differs from authenticated custody")
 
 
-def validate_grant(  # noqa: PLR0912
+def validate_grant(  # noqa: PLR0912, PLR0915
     record: dict[str, Any],
     *,
     expected: dict[str, Any],
@@ -135,8 +148,38 @@ def validate_grant(  # noqa: PLR0912
         raise RecoveryError("grant fields do not match the strict schema")
     if record["schema_version"] != 1 or record["protocol"] != _PROTOCOL:
         raise RecoveryError("unsupported recovery protocol")
+    expected_keys = _REQUIRED - {
+        "schema_version",
+        "protocol",
+        "sequence",
+        "evidence",
+        "no_launch_proof",
+        "custody_inventory_sha256",
+        "issued_at",
+        "expires_at",
+        "previous_hash",
+        "entry_hash",
+    }
+    if set(expected) != expected_keys:
+        raise RecoveryError("expected recovery binding fields are incomplete")
+    if (
+        not isinstance(record["sequence"], int)
+        or isinstance(record["sequence"], bool)
+        or record["sequence"] < 1
+    ):
+        raise RecoveryError("recovery sequence is invalid")
+    for key in ("campaign_id", "canonical_campaign_path", "reviewer_id"):
+        if not isinstance(record[key], str) or not record[key]:
+            raise RecoveryError(f"{key} must be a nonempty string")
+    attempt_id = record.get("attempt_id")
+    if not isinstance(attempt_id, str) or not _ATTEMPT.fullmatch(attempt_id):
+        raise RecoveryError("attempt id is invalid")
+    lane = record.get("lane")
+    if not isinstance(lane, str) or lane not in {"A", "B"} or not attempt_id.endswith("-" + lane):
+        raise RecoveryError("attempt id and lane do not match")
     if record["sequence"] != sequence or record["previous_hash"] != previous_hash:
         raise RecoveryError("recovery chain sequence or head mismatch")
+    _hash(record["previous_hash"], "previous_hash")
     for key in (
         "campaign_manifest_sha256",
         "corpus_sha256",
@@ -153,7 +196,7 @@ def validate_grant(  # noqa: PLR0912
         raise RecoveryError("recovery must reference an operational_failed event")
     phases = {
         "prebinding": (
-            "canonical campaign path mismatch",
+            "runtime custody paths or profile changed",
             {"failed_event", "no_launch_census", "cleanup_inventory"},
         ),
         "binding_created_broker_not_ready": (
@@ -162,7 +205,9 @@ def validate_grant(  # noqa: PLR0912
         ),
     }
     phase = record["failure_phase"]
-    if phase not in phases or record["failure_reason"] != phases[phase][0]:
+    if not isinstance(phase, str) or phase not in phases:
+        raise RecoveryError("failure phase and reason are not an allowed pair")
+    if record["failure_reason"] != phases[phase][0]:
         raise RecoveryError("failure phase and reason are not an allowed pair")
     if any(record.get(key) != value for key, value in expected.items()):
         raise RecoveryError("grant identity or custody binding mismatch")
@@ -172,20 +217,20 @@ def validate_grant(  # noqa: PLR0912
         for item in evidence
     ):
         raise RecoveryError("evidence inventory is malformed")
+    if any(not isinstance(item["kind"], str) for item in evidence):
+        raise RecoveryError("evidence kind is malformed")
     kinds = [item["kind"] for item in evidence]
     if len(kinds) != len(set(kinds)) or set(kinds) != phases[phase][1]:
         raise RecoveryError("evidence cardinality does not match the failure phase")
     for item in evidence:
         _hash(item["sha256"], "evidence sha256")
-        if (
-            not isinstance(item["archive_path"], str)
-            or not item["archive_path"].startswith("evidence/")
-            or ".." in Path(item["archive_path"]).parts
+        if not isinstance(item["archive_path"], str) or not _ARCHIVE.fullmatch(
+            item["archive_path"]
         ):
             raise RecoveryError("evidence archive path is unsafe")
-    failed_evidence = next(item for item in evidence if item["kind"] == "failed_event")
-    if failed_evidence["sha256"] != record["failed_event_entry_hash"]:
-        raise RecoveryError("failed event evidence hash does not match its ledger binding")
+    # Evidence sha256 hashes archived bytes; the ledger entry hash uses a
+    # domain-separated canonical record hash. The official adapter verifies the
+    # archived event body against failed_event_entry_hash after reading it.
     proof = record["no_launch_proof"]
     if (
         not isinstance(proof, dict)
@@ -206,15 +251,77 @@ def validate_grant(  # noqa: PLR0912
         raise RecoveryError("recovery grant entry hash is invalid")
 
 
-def _load_chain(root: Path) -> list[dict[str, Any]]:
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if root.is_symlink() or not root.is_dir() or stat.S_IMODE(root.stat().st_mode) != 0o700:
-        raise RecoveryError("recovery ledger root must be a private directory")
+def _open_chain_root(root: Path, *, create: bool) -> int:
+    """Open every directory component with O_NOFOLLOW; return the final dir fd."""
+    absolute = Path(os.path.abspath(root))  # noqa: PTH100
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(absolute.anchor, flags)
+    try:
+        for component in absolute.parts[1:]:
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise RecoveryError("recovery ledger root is unavailable") from None
+                with contextlib.suppress(FileExistsError):
+                    os.mkdir(component, 0o700, dir_fd=descriptor)
+                child = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        status = os.fstat(descriptor)
+        if (
+            not stat.S_ISDIR(status.st_mode)
+            or status.st_uid != os.getuid()
+            or stat.S_IMODE(status.st_mode) != 0o700
+        ):
+            raise RecoveryError("recovery ledger root must be an owned private directory")
+        return descriptor
+    except OSError as exc:
+        os.close(descriptor)
+        raise RecoveryError("recovery ledger path contains an unsafe or missing component") from exc
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _load_chain_fd(root_fd: int) -> list[dict[str, Any]]:  # noqa: PLR0912
+    names = sorted(os.listdir(root_fd))
+    if any(not _ENTRY.fullmatch(name) for name in names):
+        raise RecoveryError("recovery ledger contains an unexpected entry")
     rows: list[dict[str, Any]] = []
-    for index, path in enumerate(sorted(root.glob("[0-9][0-9][0-9][0-9][0-9][0-9]-*.json")), 1):
-        if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o400:
-            raise RecoveryError("recovery ledger contains an unsafe entry")
-        row = json.loads(path.read_bytes())
+    for index, name in enumerate(names, 1):
+        expected_name = re.compile(rf"^{index:06d}-.+\.json$")
+        if not expected_name.fullmatch(name):
+            raise RecoveryError("recovery ledger sequence is invalid")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(name, flags, dir_fd=root_fd)
+        except OSError as exc:
+            raise RecoveryError("recovery ledger contains an unsafe entry") from exc
+        try:
+            status = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(status.st_mode)
+                or status.st_uid != os.getuid()
+                or stat.S_IMODE(status.st_mode) != 0o400
+            ):
+                raise RecoveryError("recovery ledger contains an unsafe entry")
+            chunks = []
+            while True:
+                block = os.read(descriptor, 1024 * 1024)
+                if not block:
+                    break
+                chunks.append(block)
+            raw = b"".join(chunks)
+            row = json.loads(raw, object_pairs_hook=_unique_pairs)
+            if canonical_json(row) != raw:
+                raise RecoveryError("recovery ledger entry is not canonical JSON")
+            if not isinstance(row, dict):
+                raise RecoveryError("recovery ledger entry is not an object")
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise RecoveryError("recovery ledger entry is malformed") from exc
+        finally:
+            os.close(descriptor)
         previous = rows[-1]["entry_hash"] if rows else _ZERO
         if (
             row.get("sequence") != index
@@ -222,6 +329,7 @@ def _load_chain(root: Path) -> list[dict[str, Any]]:
             or row.get("protocol") != _PROTOCOL
             or row.get("entry_hash") != _entry_hash(row)
             or not isinstance(row.get("attempt_id"), str)
+            or not _ATTEMPT.fullmatch(row["attempt_id"])
         ):
             raise RecoveryError("recovery ledger chain integrity is invalid")
         rows.append(row)
@@ -230,37 +338,54 @@ def _load_chain(root: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _load_chain(root: Path) -> list[dict[str, Any]]:
+    root_fd = _open_chain_root(root, create=False)
+    try:
+        return _load_chain_fd(root_fd)
+    finally:
+        os.close(root_fd)
+
+
 def append_grant(
     root: Path, record: dict[str, Any], *, expected: dict[str, Any], now: datetime
 ) -> dict[str, Any]:
-    """Append one grant to an isolated recovery ledger, refusing replay and clobber."""
-    root = root.resolve()
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    rows = _load_chain(root)
-    if any(row.get("attempt_id") == record.get("attempt_id") for row in rows):
-        raise RecoveryError("this attempt already has its one permitted recovery grant")
-    prior = rows[-1]["entry_hash"] if rows else _ZERO
-    candidate = dict(record)
-    candidate["sequence"] = len(rows) + 1
-    candidate["previous_hash"] = prior
-    candidate["protocol"] = _PROTOCOL
-    candidate["schema_version"] = 1
-    candidate["entry_hash"] = _entry_hash(candidate)
-    validate_grant(
-        candidate, expected=expected, previous_hash=prior, sequence=len(rows) + 1, now=now
-    )
-    target = root / f"{len(rows) + 1:06d}-{candidate['attempt_id']}.json"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(target, flags, 0o400)
+    """Append one grant through a no-follow directory descriptor; refuse replay/clobber."""
+    attempt_id = record.get("attempt_id")
+    if not isinstance(attempt_id, str) or not _ATTEMPT.fullmatch(attempt_id):
+        raise RecoveryError("attempt id is invalid")
+    root_fd = _open_chain_root(root, create=True)
     try:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(canonical_json(candidate))
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        target.unlink(missing_ok=True)
-        raise
-    return candidate
+        rows = _load_chain_fd(root_fd)
+        if any(row.get("attempt_id") == attempt_id for row in rows):
+            raise RecoveryError("this attempt already has its one permitted recovery grant")
+        prior = rows[-1]["entry_hash"] if rows else _ZERO
+        candidate = dict(record)
+        candidate["sequence"] = len(rows) + 1
+        candidate["previous_hash"] = prior
+        candidate["protocol"] = _PROTOCOL
+        candidate["schema_version"] = 1
+        candidate["entry_hash"] = _entry_hash(candidate)
+        validate_grant(
+            candidate, expected=expected, previous_hash=prior, sequence=len(rows) + 1, now=now
+        )
+        name = f"{len(rows) + 1:06d}-{attempt_id}.json"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(name, flags, 0o400, dir_fd=root_fd)
+        except OSError as exc:
+            raise RecoveryError("recovery grant path already exists or is unsafe") from exc
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(canonical_json(candidate))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.fsync(root_fd)
+        except BaseException:
+            os.unlink(name, dir_fd=root_fd)
+            raise
+        return candidate
+    finally:
+        os.close(root_fd)
 
 
 def validate_chain(

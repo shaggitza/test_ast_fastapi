@@ -33,7 +33,7 @@ def _expected() -> dict[str, Any]:
         "failed_event_entry_hash": HASH,
         "failed_event_kind": "operational_failed",
         "failure_phase": "prebinding",
-        "failure_reason": "canonical campaign path mismatch",
+        "failure_reason": "runtime custody paths or profile changed",
     }
 
 
@@ -229,4 +229,96 @@ def test_extension_has_no_launch_or_process_surface() -> None:
             / "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1"
             / "policy-v1.json"
         ).read_text()
+    )
+
+
+def test_attempt_id_and_lane_are_enforced_before_writer_path_creation(tmp_path: Path) -> None:
+    expected = _expected()
+    malformed = _record()
+    malformed["attempt_id"] = "../../escaped"
+    malformed["entry_hash"] = recovery._entry_hash(malformed)
+    with pytest.raises(recovery.RecoveryError, match="attempt id"):
+        recovery.validate_grant(
+            malformed,
+            expected=expected,
+            previous_hash=malformed["previous_hash"],
+            sequence=1,
+            now=NOW,
+        )
+    root = tmp_path / "ledger"
+    root.mkdir(mode=0o700)
+    with pytest.raises(recovery.RecoveryError, match="attempt id"):
+        recovery.append_grant(root, malformed, expected=expected, now=NOW)
+    assert not (tmp_path / "escaped.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("sequence", True, "sequence"),
+        ("lane", [], "attempt id and lane"),
+        ("failure_phase", [], "failure phase"),
+        ("campaign_id", True, "campaign_id"),
+        ("evidence", None, "evidence inventory"),
+    ],
+)
+def test_api_rejects_values_outside_the_published_schema(
+    field: str, value: Any, message: str
+) -> None:
+    row = _record()
+    row[field] = value
+    row["entry_hash"] = recovery._entry_hash(row)
+    with pytest.raises(recovery.RecoveryError, match=message):
+        recovery.validate_grant(
+            row,
+            expected=_expected(),
+            previous_hash=row["previous_hash"],
+            sequence=1,
+            now=NOW,
+        )
+
+
+def test_grant_writer_rejects_symlink_root_and_symlink_parent(tmp_path: Path) -> None:
+    expected = _expected()
+    real = tmp_path / "real"
+    real.mkdir(mode=0o700)
+    root_alias = tmp_path / "root-alias"
+    root_alias.symlink_to(real, target_is_directory=True)
+    with pytest.raises(recovery.RecoveryError, match="unsafe or missing"):
+        recovery.append_grant(root_alias, _record(), expected=expected, now=NOW)
+    parent_alias = tmp_path / "parent-alias"
+    parent_alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(recovery.RecoveryError, match="unsafe or missing"):
+        recovery.append_grant(parent_alias / "child-ledger", _record(), expected=expected, now=NOW)
+    assert not (tmp_path / "child-ledger").exists()
+
+
+def test_grant_writer_rejects_symlink_entry_leaf(tmp_path: Path) -> None:
+    expected = _expected()
+    root = tmp_path / "ledger"
+    root.mkdir(mode=0o700)
+    (root / f"000001-{expected['attempt_id']}.json").symlink_to(tmp_path / "outside")
+    with pytest.raises(recovery.RecoveryError, match="unsafe"):
+        recovery.append_grant(root, _record(), expected=expected, now=NOW)
+    assert not (tmp_path / "outside").exists()
+
+
+def test_published_schema_encodes_phase_reason_and_evidence_cardinality() -> None:
+    schema_path = (
+        ROOT
+        / "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1"
+        / "grant-schema-v1.json"
+    )
+    schema = json.loads(schema_path.read_bytes())
+    branches = {
+        item["if"]["properties"]["failure_phase"]["const"]: item["then"] for item in schema["allOf"]
+    }
+    prebinding = branches["prebinding"]["properties"]
+    broker = branches["binding_created_broker_not_ready"]["properties"]
+    assert prebinding["failure_reason"]["const"] == "runtime custody paths or profile changed"
+    assert prebinding["evidence"]["minItems"] == prebinding["evidence"]["maxItems"] == 3
+    assert broker["failure_reason"]["const"] == "broker failed before readiness"
+    assert broker["evidence"]["minItems"] == broker["evidence"]["maxItems"] == 5
+    assert schema["$defs"]["evidence"]["properties"]["archive_path"]["pattern"].startswith(
+        "^evidence/"
     )

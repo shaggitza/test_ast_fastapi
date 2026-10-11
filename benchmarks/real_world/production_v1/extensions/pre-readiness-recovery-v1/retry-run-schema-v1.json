@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ground-truth-pre-readiness-retry-run-v1.json",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "protocol",
+        "sequence",
+        "previous_hash",
+        "entry_hash",
+        "attempt_id",
+        "grant_entry_hash",
+        "run_id",
+        "kind",
+        "retry_ordinal",
+        "allocated_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "protocol": {
+          "const": "ground-truth-review-canary-pre-readiness-retry-run-v1"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$"
+        },
+        "grant_entry_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "const": "retry_consumed"
+        },
+        "retry_ordinal": {
+          "const": 1
+        },
+        "allocated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "protocol",
+        "sequence",
+        "previous_hash",
+        "entry_hash",
+        "attempt_id",
+        "grant_entry_hash",
+        "run_id",
+        "kind",
+        "binding_sha256",
+        "broker_bundle_lease_receipt_sha256",
+        "runtime_attestation_entry_hash",
+        "prepared_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "protocol": {
+          "const": "ground-truth-review-canary-pre-readiness-retry-run-v1"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$"
+        },
+        "grant_entry_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "const": "retry_prepared"
+        },
+        "binding_sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "runtime_attestation_entry_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "prepared_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "broker_bundle_lease_receipt_sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "protocol",
+        "sequence",
+        "previous_hash",
+        "entry_hash",
+        "attempt_id",
+        "grant_entry_hash",
+        "run_id",
+        "kind",
+        "failure",
+        "failed_at"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "protocol": {
+          "const": "ground-truth-review-canary-pre-readiness-retry-run-v1"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "previous_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "entry_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "attempt_id": {
+          "type": "string",
+          "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$"
+        },
+        "grant_entry_hash": {
+          "$ref": "#/$defs/hash"
+        },
+        "run_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "const": "retry_failed"
+        },
+        "failure": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "failed_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
