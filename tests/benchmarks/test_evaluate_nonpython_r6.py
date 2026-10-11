@@ -52,6 +52,38 @@ def test_archive_rejects_counterfeit_scanner_modules(
         evaluator._archive_scanner(ROOT, evaluator.SCANNER_COMMIT, tmp_path)
 
 
+def test_archive_uses_hash_pinned_bundle_when_commit_is_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def missing_commit(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        raise subprocess.CalledProcessError(128, "git rev-parse")
+
+    monkeypatch.setattr(subprocess, "run", missing_commit)
+    client_hash, deployment_hash = evaluator._archive_scanner(
+        ROOT, evaluator.SCANNER_COMMIT, tmp_path
+    )
+    assert client_hash == evaluator.CLIENT_SCANNER_SHA256
+    assert deployment_hash == evaluator.DEPLOYMENT_SCANNER_SHA256
+
+
+def test_archive_rejects_modified_pinned_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundled = tmp_path / "pinned_scanner"
+    bundled.mkdir()
+    for relative in (evaluator.CLIENT_SCANNER_PATH, evaluator.DEPLOYMENT_SCANNER_PATH):
+        source_name = Path(relative).name
+        (bundled / source_name).write_bytes(b"counterfeit scanner module\n")
+
+    def missing_commit(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        raise subprocess.CalledProcessError(128, "git rev-parse")
+
+    monkeypatch.setattr(evaluator, "FIXTURE", tmp_path)
+    monkeypatch.setattr(subprocess, "run", missing_commit)
+    with pytest.raises(evaluator.NonPythonFixtureError, match="module SHA-256"):
+        evaluator._archive_scanner(ROOT, evaluator.SCANNER_COMMIT, tmp_path / "out")
+
+
 def test_r6_rejects_modified_source_snapshot(tmp_path: Path) -> None:
     fixture = tmp_path / "nonpython_v1"
     shutil.copytree(FIXTURE, fixture)

@@ -397,23 +397,34 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
 
 def _archive_scanner(repo_root: Path, scanner_commit: str, target: Path) -> tuple[str, str | None]:
     _require_trusted_scanner_commit(scanner_commit)
-    resolved = subprocess.run(
-        ["git", "rev-parse", f"{scanner_commit}^{{commit}}"],
-        cwd=repo_root,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    if resolved != scanner_commit:
-        raise NonPythonFixtureError("scanner commit did not resolve to the requested exact SHA")
-    archive = subprocess.run(
-        ["git", "archive", "--format=tar", scanner_commit],
-        cwd=repo_root,
-        check=True,
-        stdout=subprocess.PIPE,
-    ).stdout
-    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tf:
-        tf.extractall(target)
+    try:
+        resolved = subprocess.run(
+            ["git", "rev-parse", f"{scanner_commit}^{{commit}}"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        # Depth-limited CI checkouts may omit this historical object. The
+        # fixture carries the exact approved module bytes, checked below.
+        bundled = FIXTURE / "pinned_scanner"
+        for relative in (CLIENT_SCANNER_PATH, DEPLOYMENT_SCANNER_PATH):
+            source_name = Path(relative).name
+            destination = target / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((bundled / source_name).read_bytes())
+    else:
+        if resolved != scanner_commit:
+            raise NonPythonFixtureError("scanner commit did not resolve to the requested exact SHA")
+        archive = subprocess.run(
+            ["git", "archive", "--format=tar", scanner_commit],
+            cwd=repo_root,
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tf:
+            tf.extractall(target)
     client_bytes = (target / CLIENT_SCANNER_PATH).read_bytes()
     deployment_path = target / DEPLOYMENT_SCANNER_PATH
     deployment_hash = sha256(deployment_path.read_bytes()) if deployment_path.is_file() else None
