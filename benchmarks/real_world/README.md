@@ -288,8 +288,25 @@ broader cross-surface research score. Raw exact and normalized metrics are both
 reported. Primary metrics are micro recall, precision, F1, positive-PR macro
 metrics, negative-control specificity, unresolved diagnostics, and separately
 named coverage rates. Evaluation rejects duplicate rows, malformed candidates,
-unknown schema-v3 keys, and missing selected adjudicated predictions before
-scoring, so a candidate cannot improve its score by omitting hard PRs. Missing,
+unknown schema-v3 keys, and missing selected adjudicated truth rows. Missing
+predictions for selected adjudicated truth remain terminal `missing` rows with
+null confusion counts and are retained in the full selection denominators;
+quality aggregates use only submitted completed predictions. In comparison
+evidence, baseline and candidate
+are paired by truth identity and truth hash while each run may independently
+report `completed`, `partial`, `unresolved`, or `missing`. Coverage, abstention,
+failure, and missing counts are reported per run with candidate-minus-baseline
+deltas over the full paired selection. Quality metrics, cluster intervals, and
+leave-one-repository-out quality results use only evaluable truth identities
+completed in both runs. Micro quality intervals resample whole repository
+clusters that contribute a denominator to that measure on either system,
+retaining all rows and repeated repository draws. Full-data point estimates
+and terminal denominators still use the full applicable subset. Eligible
+cluster counts and undefined draw counts are reported; one-cluster intervals
+are degenerate diagnostics, not decision-grade uncertainty estimates. A draw
+undefined on either system leaves the interval unsupported. A missing,
+partial, or unresolved prediction contributes
+no confusion counts and is never interpreted as a negative. Missing,
 `unknown`, and `not_evaluable` labels are never treated as negatives. Versioned
 scope membership and source hashes live under `scopes/`.
 
@@ -368,3 +385,33 @@ Agreement is intentionally computed from raw entrypoint IDs, before semantic
 aliases are resolved during adjudication. This is conservative: spelling and
 granularity differences count as disagreement even when both reviewers traced
 the same behavior.
+
+## Terminal evaluation evidence
+
+The comparator result uses schema 4. Its positive-only macro estimates preserve
+repeated repository draws, and false-positive-rate intervals report eligible
+negative-control repository counts and explicit unsupported reasons. Input
+comparison evidence remains schema 2.
+
+`evaluate.py` emits comparison-evidence schema 2 with exactly one row for each
+selected truth identity. `terminal_denominators` and the corresponding
+comparison report keep total, evaluable, positive, negative, unknown,
+not-evaluable, and prediction terminal-status counts visible. Unknown and
+not-evaluable truth rows have null confusion counts; missing, partial, and
+unresolved predictions remain explicit and are not counted as completed
+negative results. Omitted adjudicated predictions remain in truth denominators
+as missing terminal rows with null confusion counts. Comparative micro metrics
+use paired completed evaluable predictions; PR and repository macros use their
+truth-positive subset, keeping negative-control FP diagnostics separate.
+Repeated repository bootstrap draws retain their multiplicity. FP intervals
+resample eligible paired negative-control repository clusters and are
+unsupported with fewer than two such clusters. The comparator also reports
+seeded intervals and leave-one-repository-out sensitivity.
+
+The comparator remains `report_only`: its input attestations and embedded
+hashes are not independently anchored to source artifact bytes. Its inherited
+0.02 interval threshold is comparator policy, not a GH148 acceptance tolerance.
+Failure-phase, stress and held-out partition, and calibration breakdowns are
+marked unsupported when their required observed inputs are absent. These
+diagnostics do not assert that the canonical 2,500-record truth release is
+ready or scored.
