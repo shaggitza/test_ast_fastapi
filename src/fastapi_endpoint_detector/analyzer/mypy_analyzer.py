@@ -577,7 +577,7 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v5-zero-trip-and-context-local-bindings"
+        "conditional-elif-try-else-guaranteed-finally-v6-zero-trip-context-nested-loop-exits"
     )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
@@ -5234,6 +5234,7 @@ class MypyAnalyzer:
             LambdaExpr,
             ListComprehension,
             ListExpr,
+            MatchStmt,
             MemberExpr,
             NameExpr,
             OpExpr,
@@ -6853,6 +6854,8 @@ class MypyAnalyzer:
                                 WhileStmt,
                                 ForStmt,
                                 TryStmt,
+                                WithStmt,
+                                MatchStmt,
                                 BreakStmt,
                                 ContinueStmt,
                                 ReturnStmt,

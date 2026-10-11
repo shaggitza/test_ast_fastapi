@@ -2010,7 +2010,7 @@ class ChangeMapper:
                 )
             added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
             processed_added: set[int] = set()
-            if not added_lines and not removed_lines and diff_file.path.suffix == ".py":
+            if not added_lines and not removed_lines and diff_file.is_python_file:
                 for registry, changed_path, side in (
                     (self.registry, diff_file.path, "target"),
                     (
@@ -2019,7 +2019,7 @@ class ChangeMapper:
                         "baseline",
                     ),
                 ):
-                    if registry is None:
+                    if registry is None or changed_path.suffix != ".py":
                         continue
                     for endpoint in registry.get_by_file(changed_path):
                         reported_endpoint = (
