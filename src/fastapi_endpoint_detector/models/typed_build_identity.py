@@ -283,6 +283,69 @@ def _validate_record(record: str, *, domain: str, expected_digest: str) -> None:
         raise IdentityError("canonical record is not in canonical JSON form")
 
 
+def _decode_typed(value: object) -> object:  # noqa: PLR0911, PLR0912
+    """Decode the bounded tagged representation used by canonical records."""
+    if not isinstance(value, list) or not value or not isinstance(value[0], str):
+        raise IdentityError("canonical record contains a malformed typed value")
+    tag = value[0]
+    if tag == "null" and len(value) == 1:
+        return None
+    if tag == "bool" and len(value) == 2 and type(value[1]) is bool:
+        return value[1]
+    if tag == "int" and len(value) == 2 and isinstance(value[1], str):
+        return int(value[1])
+    if tag == "float64" and len(value) == 2 and isinstance(value[1], str):
+        return float.fromhex(value[1])
+    if tag == "str" and len(value) == 2 and isinstance(value[1], str):
+        return value[1]
+    if tag == "bytes-hex" and len(value) == 2 and isinstance(value[1], str):
+        return bytes.fromhex(value[1])
+    if tag == "enum" and len(value) == 3 and isinstance(value[1], str):
+        module, separator, qualified_name = value[1].rpartition(".")
+        if not separator or not module or not qualified_name:
+            raise IdentityError("canonical enum identity is malformed")
+        enum_type = Enum(  # type: ignore[misc]
+            qualified_name.rsplit(".", maxsplit=1)[-1],
+            {"_CANONICAL_VALUE": _decode_typed(value[2])},
+            module=module,
+        )
+        enum_type.__qualname__ = qualified_name
+        return next(iter(enum_type))
+    if (
+        tag in {"list", "tuple", "set", "frozenset"}
+        and len(value) == 2
+        and isinstance(value[1], list)
+    ):
+        items = [_decode_typed(item) for item in value[1]]
+        if tag == "list":
+            return items
+        if tag == "tuple":
+            return tuple(items)
+        return set(items) if tag == "set" else frozenset(items)
+    if tag == "mapping" and len(value) == 2 and isinstance(value[1], list):
+        result: dict[str, object] = {}
+        for pair in value[1]:
+            if not isinstance(pair, list) or len(pair) != 2:
+                raise IdentityError("canonical mapping entry is malformed")
+            key = _decode_typed(pair[0])
+            if not isinstance(key, str) or key in result:
+                raise IdentityError("canonical mapping key is invalid")
+            result[key] = _decode_typed(pair[1])
+        return result
+    raise IdentityError("canonical record contains an unknown typed value")
+
+
+def _record_value(record: str, domain: str) -> object:
+    envelope = json.loads(record)
+    if (
+        not isinstance(envelope, list)
+        or len(envelope) != 3
+        or envelope[:2] != [CANONICAL_ENCODING, domain]
+    ):
+        raise IdentityError("canonical record has an invalid envelope")
+    return _decode_typed(envelope[2])
+
+
 def _string_sequence(value: object, name: str) -> list[str]:
     if (
         not isinstance(value, (list, tuple))
@@ -425,7 +488,7 @@ class TypedBuildIdentityV2:
     schema: str = IDENTITY_SCHEMA
     canonical_encoding: str = CANONICAL_ENCODING
 
-    def __post_init__(self) -> None:  # noqa: PLR0912
+    def __post_init__(self) -> None:  # noqa: PLR0912, PLR0915
         if self.schema != IDENTITY_SCHEMA or self.canonical_encoding != CANONICAL_ENCODING:
             raise IdentityError("unsupported typed-build identity schema or encoding")
         if not isinstance(self.cache_disposition, CacheDisposition):
@@ -460,6 +523,113 @@ class TypedBuildIdentityV2:
             domain="typed-build-provenance-v2",
             expected_digest=self.typed_build_provenance_sha256,
         )
+        actual = _record_value(self.actual_options_record, "typed-actual-build-options-v2")
+        provenance = _record_value(self.provenance_record, "typed-build-provenance-v2")
+        if not isinstance(actual, Mapping) or set(actual) != {
+            "mypy_version",
+            "effective_mypy_options",
+            "actual_build_context",
+        }:
+            raise IdentityError("actual options record has an invalid shape")
+        provenance_fields = {
+            "mypy_version",
+            "semantic_context",
+            "semantic_mypy_options",
+            "actual_options",
+            "actual_build_context",
+            "source_inventory",
+            "provider_semantic_context",
+            "build_provenance",
+            "actual_build_options_sha256",
+            "source_inventory_sha256",
+            "typed_provider_semantic_sha256",
+            "cache_attestation_sha256",
+            "cache_disposition",
+            "cache_reason",
+            "cache_claim_facts",
+        }
+        if not isinstance(provenance, Mapping) or set(provenance) != provenance_fields:
+            raise IdentityError("provenance record has an invalid shape")
+        if (
+            actual["effective_mypy_options"] != provenance["actual_options"]
+            or actual["actual_build_context"] != provenance["actual_build_context"]
+            or actual["mypy_version"] != provenance["mypy_version"]
+        ):
+            raise IdentityError("actual options and provenance records disagree")
+        if provenance["actual_build_options_sha256"] != self.actual_build_options_sha256:
+            raise IdentityError("provenance actual-options digest disagrees")
+        if provenance["source_inventory_sha256"] != self.source_inventory_sha256:
+            raise IdentityError("provenance source digest disagrees")
+        if provenance["typed_provider_semantic_sha256"] != self.typed_provider_semantic_sha256:
+            raise IdentityError("provenance provider digest disagrees")
+        if provenance["cache_attestation_sha256"] != self.cache_attestation_sha256:
+            raise IdentityError("provenance cache attestation disagrees")
+        if provenance["cache_disposition"] != self.cache_disposition.value or provenance[
+            "cache_reason"
+        ] != (self.cache_reason.value if self.cache_reason is not None else None):
+            raise IdentityError("provenance disposition or reason disagrees")
+        if self.cache_disposition is CacheDisposition.AUTHENTICATED_DEPENDENCY_HIT:
+            _validate_hit_claim(provenance["cache_claim_facts"])
+        elif provenance["cache_claim_facts"] is not None:
+            raise IdentityError("non-hit disposition cannot retain cache hit claims")
+        version, options, build_context = (
+            provenance["mypy_version"],
+            actual["effective_mypy_options"],
+            actual["actual_build_context"],
+        )
+        semantic_context = provenance["semantic_context"]
+        inventory = provenance["source_inventory"]
+        provider_context = provenance["provider_semantic_context"]
+        build_provenance = provenance["build_provenance"]
+        if (
+            not isinstance(version, str)
+            or not isinstance(options, Mapping)
+            or not isinstance(build_context, Mapping)
+        ):
+            raise IdentityError("actual options record has invalid field types")
+        if (
+            not isinstance(inventory, list)
+            or not isinstance(provider_context, Mapping)
+            or not isinstance(build_provenance, Mapping)
+        ):
+            raise IdentityError("provenance source/provider records have invalid types")
+        if (
+            digest(actual, domain="typed-actual-build-options-v2")
+            != self.actual_build_options_sha256
+        ):
+            raise IdentityError("actual options digest is inconsistent")
+        normalized_context, normalized_inventory, _ = _validated_context(
+            semantic_context, inventory, build_context
+        )
+        if normalized_context != semantic_context or normalized_inventory != inventory:
+            raise IdentityError("provenance context or inventory is not canonical")
+        source_digest = digest(inventory, domain="typed-source-inventory-v2")
+        if source_digest != self.source_inventory_sha256:
+            raise IdentityError("source inventory digest is inconsistent")
+        semantic_options = semantic_mypy_options(options, mypy_version=version)
+        if provenance["semantic_mypy_options"] != semantic_options:
+            raise IdentityError("provenance semantic options are inconsistent")
+        semantic_digest = digest(
+            {
+                "mypy_version": version,
+                "semantic_mypy_options": semantic_options,
+                "analysis_context": semantic_context,
+                "source_inventory_sha256": source_digest,
+            },
+            domain="typed-semantic-config-v2",
+        )
+        if semantic_digest != self.semantic_config_sha256:
+            raise IdentityError("semantic config digest is inconsistent")
+        provider_digest = digest(
+            {
+                "semantic_config_sha256": semantic_digest,
+                "source_inventory_sha256": source_digest,
+                "context": provider_context,
+            },
+            domain="typed-provider-semantic-v2",
+        )
+        if provider_digest != self.typed_provider_semantic_sha256:
+            raise IdentityError("provider semantic digest is inconsistent")
         if self.cache_disposition is CacheDisposition.COLD:
             if (
                 self.cache_attestation_sha256 is not None
@@ -531,6 +701,7 @@ class TypedBuildIdentityV2:
             domain="typed-provider-semantic-v2",
         )
         provenance_value = {
+            "mypy_version": mypy_version,
             "semantic_context": semantic_context,
             "semantic_mypy_options": semantic_options,
             "actual_options": dict(mypy_options),

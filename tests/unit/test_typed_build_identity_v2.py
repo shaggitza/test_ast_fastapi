@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+from dataclasses import replace
 from enum import IntEnum
 
 import pytest
@@ -151,6 +154,8 @@ def test_mypy_projection_excludes_only_three_pinned_cache_controls() -> None:
 
 def test_identity_partition_retains_actual_options_and_resolution_context() -> None:
     baseline = _identity()
+    enum_context = _identity(provider_semantic_context={"fixture": _FixtureOptionEnum.ENABLED})
+    assert enum_context == TypedBuildIdentityV2.from_json(enum_context.to_json())
     changed_cache = _options()
     changed_cache["incremental"] = not bool(changed_cache["incremental"])
     cache_variant = _identity(mypy_options=changed_cache)
@@ -214,7 +219,7 @@ def test_identity_strict_roundtrip_and_disposition_nullability() -> None:
     altered["actual_options_record"] = "tampered"
     with pytest.raises(IdentityError, match="does not match"):
         TypedBuildIdentityV2.from_dict(altered)
-    with pytest.raises(IdentityError, match="dependency hit"):
+    with pytest.raises(IdentityError, match="disposition or reason"):
         TypedBuildIdentityV2(
             identity.semantic_config_sha256,
             identity.actual_build_options_sha256,
@@ -252,3 +257,52 @@ def test_identity_strict_roundtrip_and_disposition_nullability() -> None:
         },
     )
     assert hit.cache_disposition is CacheDisposition.AUTHENTICATED_DEPENDENCY_HIT
+
+
+def _record_payload(record: str) -> object:
+    return json.loads(record)[2]
+
+
+def test_outer_identity_fields_are_bound_to_retained_records() -> None:
+    identity = _identity()
+    for field, value in (
+        ("semantic_config_sha256", "sha256:" + "1" * 64),
+        ("source_inventory_sha256", "sha256:" + "2" * 64),
+        ("typed_provider_semantic_sha256", "sha256:" + "3" * 64),
+        ("cache_attestation_sha256", "sha256:" + "4" * 64),
+        ("cache_disposition", CacheDisposition.COLD_FALLBACK),
+        ("cache_reason", CacheReason.SOURCE_CHANGED),
+    ):
+        with pytest.raises(IdentityError):
+            replace(identity, **{field: value})  # type: ignore[arg-type]
+        serialized = identity.to_dict()
+        serialized[field] = (
+            value.value if isinstance(value, CacheDisposition | CacheReason) else value
+        )
+        with pytest.raises(IdentityError):
+            TypedBuildIdentityV2.from_dict(serialized)
+
+    provenance = _record_payload(identity.provenance_record)
+    assert isinstance(provenance, list) and provenance[0] == "mapping"
+    # A self-consistently resealed but structurally invalid provenance record
+    # must still fail the semantic record decoder.
+    malformed = copy.deepcopy(provenance)
+    malformed[1] = []
+    # Build a valid record envelope with the wrong top-level shape.
+    record = json.dumps(
+        ["fed-canonical-json-v1", "typed-build-provenance-v2", malformed], separators=(",", ":")
+    )
+    digest_value = "sha256:" + hashlib.sha256(record.encode()).hexdigest()
+    with pytest.raises(IdentityError, match="shape"):
+        replace(identity, provenance_record=record, typed_build_provenance_sha256=digest_value)
+
+
+def test_actual_options_and_source_graph_tampering_rejected() -> None:
+    identity = _identity()
+    actual = json.loads(identity.actual_options_record)
+    altered = copy.deepcopy(actual)
+    altered[2] = ["mapping", []]
+    raw = json.dumps(altered, separators=(",", ":"))
+    raw_digest = "sha256:" + hashlib.sha256(raw.encode()).hexdigest()
+    with pytest.raises(IdentityError):
+        replace(identity, actual_options_record=raw, actual_build_options_sha256=raw_digest)
