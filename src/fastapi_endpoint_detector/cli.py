@@ -726,8 +726,7 @@ def audit_effect_contracts_command(
                 f"{summary.unresolved_calls} unresolved)",
                 f"Config hash: {audit.provenance.config_hash}",
                 f"Corpus hash: {audit.provenance.occurrence_corpus_hash}",
-                "Package applicability: "
-                f"{audit.scope.package_applicability.replace('_', ' ')}",
+                f"Package applicability: {audit.scope.package_applicability.replace('_', ' ')}",
                 "Matches do not alter endpoint candidates or confidence.",
             ]
             for occurrence in audit.occurrences:
