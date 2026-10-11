@@ -1836,8 +1836,19 @@ class MypyAnalyzer:
                 qualified = (
                     fullname[len(module) + 1 :]
                     if fullname.startswith(f"{module}.")
+                    else fullname[len(module.rsplit(".", 1)[-1]) + 1 :]
+                    if fullname.startswith(f"{module.rsplit('.', 1)[-1]}.")
                     else fullname.rsplit(".", 1)[-1]
                 )
+                if qualified.endswith(".__call__"):
+                    # Mypy may expose an inherited method as if it were a
+                    # member of the provider class. Resolve the implementation
+                    # from the bounded source AST instead, so the typed seed is
+                    # attached to its actual declaring class and source body.
+                    effective_method = self._effective_dependency_call_method(file_path, qualified)
+                    if effective_method is None:
+                        continue
+                    qualified = effective_method
                 result = (
                     self._find_func_in_tree(
                         self._trees.get(module),
@@ -1852,6 +1863,56 @@ class MypyAnalyzer:
                 key = f"{module}.{result[1]}"
                 seeds[key] = min(seeds.get(key, 1), 1)
         return seeds
+
+    def _effective_dependency_call_method(self, file_path: str, qualified: str) -> str | None:
+        """Resolve one source-attested local single-inheritance callable method."""
+        class_path, separator, method_name = qualified.rpartition(".")
+        if not separator or method_name != "__call__" or "." in class_path:
+            return None
+        canonical = str(Path(file_path).resolve())
+        if canonical not in self._python_ast_cache:
+            try:
+                with Path(canonical).open("rb") as source_file:
+                    source = source_file.read(self.MAX_LAMBDA_SOURCE_FILE_BYTES + 1)
+                self._python_ast_cache[canonical] = (
+                    ast.parse(source, filename=canonical)
+                    if len(source) <= self.MAX_LAMBDA_SOURCE_FILE_BYTES
+                    else None
+                )
+            except (OSError, SyntaxError, UnicodeError, ValueError):
+                self._python_ast_cache[canonical] = None
+        tree = self._python_ast_cache[canonical]
+        if tree is None:
+            return None
+        class_name = class_path.rsplit(".", 1)[-1]
+        seen: set[str] = set()
+
+        def resolve(owner: str) -> str | None:
+            if owner in seen or len(seen) >= 16:
+                return None
+            seen.add(owner)
+            definitions = [
+                node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == owner
+            ]
+            if len(definitions) != 1:
+                return None
+            definition = definitions[0]
+            methods = [
+                node
+                for node in definition.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "__call__"
+            ]
+            if methods:
+                if len(methods) != 1 or methods[0].decorator_list:
+                    return None
+                return f"{owner}.__call__"
+            if len(definition.bases) != 1 or not isinstance(definition.bases[0], ast.Name):
+                return None
+            return resolve(definition.bases[0].id)
+
+        effective = resolve(class_name)
+        return effective
 
     def _python_dependency_closure(self, endpoint: Endpoint) -> dict[str, int]:
         """Expand explicit and source-attested runtime dependencies to bounded depth."""
