@@ -7,12 +7,20 @@ unchanged. The selector is available only with the explicit `--graphify`
 overlay; neither path starts Graphify or installs/imports its package.
 
 The raw document has exactly `nodes`, `edges`, `hyperedges`, `input_tokens`, and
-`output_tokens`. The adapter bounds those arrays and counters, requires empty
-hyperedges, rejects unsupported record fields and malformed provenance, checks
-all referenced source paths against the selected project root, and validates
-line markers against exact source bytes. Graph and source hashes are computed
-from bounded reads; mutation checks and the exclusive receipt writer remain in
-place. Raw line markers are never widened into byte or column ranges.
+`output_tokens`. The adapter bounds those arrays and counters and requires empty
+hyperedges. For this raw schema only, the pinned extractor's `_origin` field is
+accepted on nodes and edges when its value is exactly `ast`; missing or other
+values fail closed. This is validated input metadata, not authentication that
+the file was actually emitted by Graphify. The node-link v1 field allowlists
+remain unchanged.
+
+Every node and edge must identify a project-confined regular `source_file`;
+the adapter retains bounded exact-byte reads, SHA-256 hashes, mutation checks,
+and the exclusive receipt writer. A producer edge may omit `source_location`.
+When the location is absent or null, its source file is still checked and
+hashed, but its span is unknown and the edge cannot be traversed. A supplied
+raw marker must be one line (`L<number>`) and fit the exact source bytes. Raw
+line markers are never widened into byte or column ranges.
 
 Raw `source` and `target` values are retained as producer endpoint order. That
 does not establish a directed graph: the pinned producer's raw form is not the
@@ -25,9 +33,11 @@ confidence; the adapter does not promote them to HIGH/MEDIUM/LOW. Physical
 records remain separate tuple entries, including repeated records. The
 producer itself may already have deduplicated repeated tuples before writing.
 
-This is an independently specified synthetic raw fixture contract, not an
-observation of Graphify output. `tests/fixtures/graphify_0_9_30_raw_synthetic.json`
-was not emitted by Graphify and must not be cited as producer-behavior evidence.
+This is an independently specified synthetic raw fixture contract, with
+records shaped from the pinned source constructors (including `_origin` and
+constructors that omit a line marker); it is not an observation of Graphify
+output. `tests/fixtures/graphify_0_9_30_raw_synthetic.json` was not emitted by
+Graphify and must not be cited as producer-behavior evidence.
 The release source artifacts and inspected file hashes are recorded in the
 controlled-probe research at commit
 `35cc919ef02b0a6570b95cda6425bbdf2a6a4c5f`, including

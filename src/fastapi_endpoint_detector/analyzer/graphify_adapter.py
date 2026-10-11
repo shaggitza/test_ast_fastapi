@@ -114,6 +114,7 @@ class GraphifyNode:
     source_sha256: str
     span: GraphifySourceSpan | None
     extractor_strength: GraphifyStrength | None
+    producer_origin: str | None = None
 
 
 @dataclass(frozen=True)
@@ -128,6 +129,7 @@ class GraphifyEdge:
     span: GraphifySourceSpan | None
     edge_key: int | str | None = None
     context_identity: str | None = None
+    producer_origin: str | None = None
 
     @property
     def traversable(self) -> bool:
@@ -427,6 +429,18 @@ def _strength(value: object, location: str, *, optional: bool = False) -> Graphi
     return cast("GraphifyStrength", value)
 
 
+def _raw_origin(item: dict[str, object], location: str, *, raw_schema: bool) -> str | None:
+    """Validate Graphify's AST marker only in the raw producer schema."""
+    if not raw_schema:
+        if "_origin" in item:
+            raise GraphifyAdapterError(f"{location} has unsupported schema field '_origin'")
+        return None
+    origin = item.get("_origin")
+    if origin != "ast":
+        raise GraphifyAdapterError(f"{location}._origin must be the pinned value 'ast'")
+    return "ast"
+
+
 def _validate_optional_fields(item: dict[str, object], location: str) -> None:
     if "confidence_score" in item:
         score = _finite_number(item["confidence_score"], f"{location}.confidence_score")
@@ -531,13 +545,15 @@ def _adapt_nodes(
         if not isinstance(raw_node, dict):
             raise GraphifyAdapterError(f"{location} must be an object")
         node = cast("dict[str, object]", raw_node)
-        extra = set(node) - _NODE_KEYS
+        allowed_node_keys = _NODE_KEYS | ({"_origin"} if raw_schema else set())
+        extra = set(node) - allowed_node_keys
         missing = _NODE_REQUIRED_KEYS - set(node)
         if extra or missing:
             raise GraphifyAdapterError(
                 f"{location} has unsupported schema; "
                 f"extra={sorted(extra)}, missing={sorted(missing)}"
             )
+        producer_origin = _raw_origin(node, location, raw_schema=raw_schema)
         node_id = _bounded_string(node["id"], f"{location}.id")
         if node_id in node_ids:
             raise GraphifyAdapterError(f"duplicate Graphify node id: {node_id}")
@@ -570,6 +586,7 @@ def _adapt_nodes(
                 source.sha256,
                 span,
                 strength,
+                producer_origin,
             )
         )
     return tuple(nodes), node_ids
@@ -588,13 +605,15 @@ def _adapt_edges(
         if not isinstance(raw_edge, dict):
             raise GraphifyAdapterError(f"{location} must be an object")
         edge = cast("dict[str, object]", raw_edge)
-        extra = set(edge) - _EDGE_KEYS
+        allowed_edge_keys = _EDGE_KEYS | ({"_origin"} if raw_schema else set())
+        extra = set(edge) - allowed_edge_keys
         missing = _EDGE_REQUIRED_KEYS - set(edge)
         if extra or missing:
             raise GraphifyAdapterError(
                 f"{location} has unsupported schema; "
                 f"extra={sorted(extra)}, missing={sorted(missing)}"
             )
+        producer_origin = _raw_origin(edge, location, raw_schema=raw_schema)
         source_id = _bounded_string(edge["source"], f"{location}.source")
         target_id = _bounded_string(edge["target"], f"{location}.target")
         if source_id not in node_ids or target_id not in node_ids:
@@ -615,13 +634,9 @@ def _adapt_edges(
         strength = _strength(edge["confidence"], f"{location}.confidence")
         assert strength is not None
         _validate_optional_fields(edge, location)
-        if raw_schema and ("source_file" not in edge or edge.get("source_location") is None):
-            raise GraphifyAdapterError(
-                f"{location} requires source_file and line-only source_location"
-            )
-        raw_source_location: str | None = None
-        if raw_schema:
-            _bounded_string(edge["source_file"], f"{location}.source_file")
+        if raw_schema and "source_file" not in edge:
+            raise GraphifyAdapterError(f"{location} requires a source_file")
+        if raw_schema and edge.get("source_location") is not None:
             raw_source_location = _bounded_string(
                 edge["source_location"], f"{location}.source_location"
             )
@@ -649,6 +664,7 @@ def _adapt_edges(
                 span,
                 edge_key,
                 context_identity,
+                producer_origin,
             )
         )
     return tuple(edges)

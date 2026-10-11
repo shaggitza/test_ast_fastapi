@@ -184,6 +184,8 @@ def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_
     assert snapshot.directed is False
     assert snapshot.multigraph is False
     assert snapshot.edges[0].orientation == "caller-to-callee"
+    assert snapshot.nodes[0].producer_origin == "ast"
+    assert snapshot.edges[0].producer_origin == "ast"
     assert snapshot.edges[1].orientation == "importer-to-imported"
     assert snapshot.edges[2].orientation == "subclass-to-base"
     assert snapshot.edges[3].orientation == "unknown"
@@ -197,6 +199,63 @@ def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_
     assert snapshot.edges[0].span == GraphifySourceSpan(
         Path("app.py"), 4, 4, hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
     )
+
+
+def test_source_grounded_synthetic_raw_records_allow_unknown_edge_lines(tmp_path: Path) -> None:
+    """Represent pinned constructors; this is synthetic, not a producer run."""
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    # Pinned extract.py's import/reference constructors omit source_location.
+    payload["edges"][1]["relation"] = "imports"
+    payload["edges"][1].pop("source_location")
+    payload["edges"][3].pop("source_location")
+    graph = tmp_path / "source-grounded-synthetic-raw.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    import_edge, reference_edge = snapshot.edges[1], snapshot.edges[3]
+    assert import_edge.producer_origin == "ast"
+    assert import_edge.orientation == "importer-to-imported"
+    assert import_edge.span is None
+    assert import_edge.traversable is False
+    assert reference_edge.producer_origin == "ast"
+    assert reference_edge.orientation == "unknown"
+    assert reference_edge.span is None
+    assert reference_edge.traversable is False
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value["nodes"][0].pop("_origin"), "_origin"),
+        (lambda value: value["edges"][0].update({"_origin": "semantic"}), "_origin"),
+        (lambda value: value["edges"][0].update({"source_location": "L3-L4"}), "line-only"),
+        (lambda value: value["edges"][0].update({"confidence": "HIGH"}), "confidence"),
+        (lambda value: value["edges"][0].pop("source_file"), "source_file"),
+    ],
+    ids=[
+        "missing-origin",
+        "wrong-origin",
+        "range-is-not-a-line",
+        "quality-is-not-strength",
+        "missing-source-path",
+    ],
+)
+def test_source_grounded_raw_schema_malformed_records_fail_closed(
+    tmp_path: Path, mutate: Any, message: str
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    mutate(payload)
+    graph = tmp_path / "malformed-source-grounded-raw.json"
+    _write_payload(graph, payload)
+
+    with pytest.raises(GraphifyAdapterError, match=message):
+        load_graphify_snapshot(
+            graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+        )
 
 
 def test_raw_context_only_edge_occurrences_have_stable_distinct_identities(

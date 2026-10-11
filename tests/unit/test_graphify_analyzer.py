@@ -354,6 +354,7 @@ def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> N
         "hyperedges": [],
         "nodes": [
             {
+                "_origin": "ast",
                 "id": "endpoint",
                 "label": "endpoint",
                 "file_type": "code",
@@ -361,6 +362,7 @@ def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> N
                 "source_location": "L1",
             },
             {
+                "_origin": "ast",
                 "id": "alias",
                 "label": "alias",
                 "file_type": "code",
@@ -368,6 +370,7 @@ def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> N
                 "source_location": "L1",
             },
             {
+                "_origin": "ast",
                 "id": "helper",
                 "label": "helper",
                 "file_type": "code",
@@ -377,6 +380,7 @@ def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> N
         ],
         "edges": [
             {
+                "_origin": "ast",
                 "source": "endpoint",
                 "target": "alias",
                 "relation": "calls",
@@ -386,6 +390,7 @@ def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> N
                 "context": "route invocation",
             },
             {
+                "_origin": "ast",
                 "source": "endpoint",
                 "target": "alias",
                 "relation": "calls",
@@ -395,6 +400,7 @@ def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> N
                 "context": "dependency registration",
             },
             {
+                "_origin": "ast",
                 "source": "alias",
                 "target": "helper",
                 "relation": "calls",
