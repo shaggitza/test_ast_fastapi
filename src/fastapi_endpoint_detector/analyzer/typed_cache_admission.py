@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ast
 import contextlib
-import fcntl
 import hashlib
 import json
 import math
@@ -21,6 +20,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised in a simulated Windows subprocess
+    fcntl = None  # type: ignore[assignment]
 
 TRUST_ID = "source-committed-local-mypy-cache-v1"
 MANIFEST_SCHEMA = "fastapi-mypy-cache-v1"
@@ -251,6 +255,8 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
     """Check and stage local cache bytes for one discarded diagnostic build."""
     if not policy.enabled or policy.trust_id != TRUST_ID:
         raise CacheAdmissionError("cache policy is disabled or has an unknown trust ID")
+    if fcntl is None or not hasattr(os, "memfd_create"):
+        raise CacheAdmissionError("sealed in-memory cache descriptors are unsupported")
     root = _private_root(policy.root, create=False)
     manifest, manifest_sha256 = _load_manifest(root)
     if policy.expected_manifest_sha256 != manifest_sha256:
@@ -367,8 +373,6 @@ def prepare_cache_run(  # noqa: PLR0912, PLR0915
                 "data_sha256"
             ):
                 raise CacheAdmissionError(f"local cache artifact changed for {module}")
-            if not hasattr(os, "memfd_create"):
-                raise CacheAdmissionError("sealed in-memory cache descriptors are unavailable")
             meta_fd = os.memfd_create(f"mypy-{module}-meta", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
             data_fd = os.memfd_create(f"mypy-{module}-data", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
             descriptors.extend((meta_fd, data_fd))

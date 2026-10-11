@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 import mypy.build as mypy_build_module
@@ -36,6 +40,60 @@ def _options(module_root: Path, cache_dir: Path) -> Options:
     options.export_types = True
     options.cache_dir = str(cache_dir)
     return options
+
+
+def test_analyzer_import_and_cold_fallback_without_fcntl(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "app.py").write_text("def value() -> int:\n    return 1\n")
+    script = textwrap.dedent(
+        """
+        import importlib.abc
+        import sys
+        from pathlib import Path
+
+        class BlockFcntl(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "fcntl":
+                    raise ModuleNotFoundError("No module named 'fcntl'")
+                return None
+
+        sys.meta_path.insert(0, BlockFcntl())
+
+        from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+        from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
+            LocalTypedCachePolicy,
+        )
+
+        project = Path(sys.argv[1])
+        ordinary = MypyAnalyzer(project)
+        ordinary._ensure_mypy_built()
+        assert ordinary._build_result is not None
+        assert ordinary.cache_admission_observation is None
+
+        policy = LocalTypedCachePolicy.local_user_store(project / "missing-cache")
+        opted_in = MypyAnalyzer(project, typed_cache_policy=policy)
+        opted_in._ensure_mypy_built()
+        assert opted_in._build_result is not None
+        observation = opted_in.cache_admission_observation
+        assert observation is not None
+        assert observation["disposition"] == "cold_fallback", observation
+        assert (
+            observation["reason"] == "sealed in-memory cache descriptors are unsupported"
+        ), observation
+        """
+    )
+    source_root = Path(__file__).resolve().parents[2] / "src"
+    env = {**os.environ, "PYTHONPATH": str(source_root)}
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(project)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize(
