@@ -1069,6 +1069,78 @@ class MypyAnalyzer:
             if self.no_site_packages and original_mypypath is not None:
                 os.environ["MYPYPATH"] = original_mypypath
 
+    def framework_phase_build_snapshot(self) -> tuple[Any, dict[str, bytes | None]] | None:
+        """Return the retained build and source bytes, without triggering a build."""
+        if self._build_result is None or not self._trees:
+            return None
+        return self._build_result, dict(self._analysis_source_snapshots)
+
+    def framework_phase_source_bytes(self, path: Path, *, max_bytes: int) -> bytes | None:
+        """Read one bounded, in-root source file without following symlinks."""
+        directory_flag = getattr(os, "O_DIRECTORY", 0)
+        nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+        if (
+            max_bytes < 0
+            or not directory_flag
+            or not nofollow_flag
+            or os.open not in os.supports_dir_fd
+            or not self.source_root.is_absolute()
+        ):
+            return None
+        try:
+            relative = path.relative_to(self.source_root)
+        except ValueError:
+            return None
+        if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+            return None
+        current = self.source_root
+        leaf_descriptor = -1
+        directory_descriptor = -1
+        try:
+            for part in relative.parts:
+                current = current / part
+                if current.is_symlink():
+                    return None
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(self.source_root)
+            directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
+            directory_descriptor = os.open(os.path.sep, directory_flags)
+            for part in self.source_root.parts[1:]:
+                next_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=directory_descriptor,
+                )
+                os.close(directory_descriptor)
+                directory_descriptor = next_descriptor
+            for part in relative.parts[:-1]:
+                next_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=directory_descriptor,
+                )
+                os.close(directory_descriptor)
+                directory_descriptor = next_descriptor
+            leaf_descriptor = os.open(
+                relative.parts[-1],
+                os.O_RDONLY | nofollow_flag | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory_descriptor,
+            )
+            opened = os.fstat(leaf_descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                return None
+            if opened.st_size > max_bytes:
+                return None
+            data = os.read(leaf_descriptor, max_bytes + 1)
+            return data if len(data) <= max_bytes else None
+        except (OSError, ValueError):
+            return None
+        finally:
+            if leaf_descriptor >= 0:
+                os.close(leaf_descriptor)
+            if directory_descriptor >= 0:
+                os.close(directory_descriptor)
+
     def _effective_follow_imports(self) -> str:
         """Translate inventory policy to mypy's string option vocabulary."""
         value = getattr(self.source_inventory, "follow_imports", True)
@@ -1846,7 +1918,16 @@ class MypyAnalyzer:
             if (
                 occurrence.resolution_status != DependencyResolutionStatus.ESTABLISHED
                 or occurrence.callable_kind
-                not in {DependencyCallableKind.FUNCTION, DependencyCallableKind.BOUND_METHOD}
+                not in {
+                    DependencyCallableKind.FUNCTION,
+                    DependencyCallableKind.BOUND_METHOD,
+                    # The extractor records the physical wrapped function for
+                    # partials and user callable instances. Accept those only
+                    # after the same module, file, qualname, and span checks
+                    # below; their display/type names are never used as seeds.
+                    DependencyCallableKind.PARTIAL,
+                    DependencyCallableKind.CALLABLE_INSTANCE,
+                }
                 or occurrence.module is None
                 or occurrence.qualname is None
                 or occurrence.source_span is None
@@ -1896,10 +1977,107 @@ class MypyAnalyzer:
                 seeds[canonical_fullname] = occurrence.depth
         return seeds
 
+    def _native_dependency_seeds(self, endpoint: Endpoint) -> dict[str, int]:
+        """Resolve established source-qualified secure-AST dependency declarations.
+
+        The expressions are evidence, not executable imports: only a unique
+        project-local function definition with the same qualified binding is
+        admitted to the typed closure. Dynamic expressions and callable objects
+        remain conditional evidence and are intentionally not guessed here.
+        """
+        provenance = endpoint.native_provenance
+        if provenance is None:
+            return {}
+        declarations = [
+            dependency
+            for item in provenance.object_chain
+            for dependency in item.dependency_expressions
+        ]
+        declarations.extend(
+            dependency
+            for edge in provenance.assembly_chain
+            for dependency in edge.dependency_expressions
+        )
+        declarations.extend(provenance.registration.dependency_expressions)
+        # A Starlette mount is an ownership boundary. FastAPI dependencies on
+        # the parent application/router do not become child ASGI dependencies.
+        # Keep only object declarations at or below the mounted child, and
+        # assembly declarations after the final mount. If the child's object
+        # identity cannot be aligned exactly, abstain from inheriting any
+        # object declarations rather than guessing from a short name.
+        last_mount = max(
+            (
+                index
+                for index, edge in enumerate(provenance.assembly_chain)
+                if edge.operation == "mount"
+            ),
+            default=None,
+        )
+        if last_mount is not None:
+            mount_edge = provenance.assembly_chain[last_mount]
+            child_object_index = next(
+                (
+                    index
+                    for index, item in enumerate(provenance.object_chain)
+                    if item.module == mount_edge.child_module
+                    and item.symbol == mount_edge.child_symbol
+                ),
+                None,
+            )
+            object_items = (
+                provenance.object_chain[child_object_index:]
+                if child_object_index is not None
+                else ()
+            )
+            declarations = [
+                dependency for item in object_items for dependency in item.dependency_expressions
+            ]
+            declarations.extend(
+                dependency
+                for edge in provenance.assembly_chain[last_mount + 1 :]
+                for dependency in edge.dependency_expressions
+            )
+            declarations.extend(provenance.registration.dependency_expressions)
+        seeds: dict[str, int] = {}
+        root = self.source_root.resolve()
+        for declaration in declarations:
+            if declaration.confidence != "established" or declaration.side != provenance.side:
+                continue
+            for fullname in declaration.callable_expressions:
+                resolved = self._resolve_fullname_to_file(fullname)
+                if resolved is None:
+                    continue
+                file_path, module = resolved
+                try:
+                    Path(file_path).resolve().relative_to(root)
+                except (OSError, ValueError):
+                    continue
+                qualified = (
+                    fullname[len(module) + 1 :]
+                    if fullname.startswith(f"{module}.")
+                    else fullname.rsplit(".", 1)[-1]
+                )
+                result = (
+                    self._find_func_in_tree(
+                        self._trees.get(module),
+                        qualified.rsplit(".", 1)[-1],
+                        qualified_name=qualified,
+                    )
+                    if self._trees.get(module) is not None
+                    else None
+                )
+                if result is None or result[1] != qualified:
+                    continue
+                key = f"{module}.{result[1]}"
+                seeds[key] = min(seeds.get(key, 1), 1)
+        return seeds
+
     def _python_dependency_closure(self, endpoint: Endpoint) -> dict[str, int]:
         """Expand explicit and source-attested runtime dependencies to bounded depth."""
         depths: dict[str, int] = {}
         initial = dict.fromkeys(self._python_dependency_fullnames(endpoint), 1)
+        for fullname, depth in self._native_dependency_seeds(endpoint).items():
+            initial[fullname] = min(initial.get(fullname, depth), depth)
         for fullname, depth in self._runtime_dependency_seeds(endpoint).items():
             initial[fullname] = min(initial.get(fullname, depth), depth)
         queue = list(initial.items())
@@ -1953,16 +2131,21 @@ class MypyAnalyzer:
 
     @staticmethod
     def _endpoint_key(endpoint: Endpoint) -> str:
-        """Key dependency data by route, handler, and authoritative runtime graph."""
+        """Key dependency data by route, handler, and dependency evidence."""
         handler = endpoint.handler
         graph_payload = (
             None
             if endpoint.dependency_graph is None
             else endpoint.dependency_graph.model_dump(mode="json")
         )
+        provenance = (
+            None
+            if endpoint.native_provenance is None
+            else endpoint.native_provenance.model_dump(mode="json")
+        )
         graph_hash = hashlib.sha256(
             json.dumps(
-                graph_payload,
+                [graph_payload, provenance],
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode()

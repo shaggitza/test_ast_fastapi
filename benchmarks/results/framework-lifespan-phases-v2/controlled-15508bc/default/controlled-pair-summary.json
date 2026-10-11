@@ -1,0 +1,24 @@
+{
+  "artifacts": {
+    "baseline-runtime": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-validation-20261010/controlled-artifacts/baseline-runtime.json",
+      "sha256": "sha256:5129eb92616b44d37dcbb903b3fdc5bb0707059c4742e389e56cc98c493f1e39"
+    },
+    "baseline-secure": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-validation-20261010/controlled-artifacts/baseline-secure.json",
+      "sha256": "sha256:c9466d4df6aa21e9216e2c6b993a4498521874d2b829e1ecc2427cf3a2548bad"
+    },
+    "target-runtime": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-validation-20261010/controlled-artifacts/target-runtime.json",
+      "sha256": "sha256:d3143678f2794565e83985003a9ecf0ab6b51e21e540f0788a8a3e4d9996ed80"
+    },
+    "target-secure": {
+      "path": "/tmp/test-ast-runtime-phase-15508bc-validation-20261010/controlled-artifacts/target-secure.json",
+      "sha256": "sha256:bbacf0d0fff7f52f77a9fb263c7be44cb167cfc44f7554c5e59d11f912c2c366"
+    }
+  },
+  "comparison_sha256": "sha256:ac90f0857ad14d69483a9b602c587f04180428ebd6f759ba1675a4eaff357b49",
+  "image": "test-ast-runtime-phase-15508bc@sha256:8c2d95773208aab2a4391316ba4bd6446ac6d896ba581420545053822d9f24e4",
+  "producer_revision": "15508bc8a477fb6fad170df0be0b95e0b2e3fc79",
+  "scope": "controlled synthetic local-operator signed comparison only; no external approval/canonical truth/real-world acceptance"
+}

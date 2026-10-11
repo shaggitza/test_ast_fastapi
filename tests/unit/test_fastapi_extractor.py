@@ -28,6 +28,7 @@ from fastapi_endpoint_detector.parser.fastapi_extractor import (
     FastAPIExtractor,
     FastAPIExtractorError,
 )
+from fastapi_endpoint_detector.parser.runtime_entry import select_runtime_app
 from fastapi_endpoint_detector.parser.secure_ast_extractor import SecureASTExtractor
 
 
@@ -432,8 +433,80 @@ def test_runtime_dependency_graph_missing_shape_and_overrides_are_graph_local(
     assert {item.code for item in conditional.limitations} == {"dependency_overrides_visible"}
 
 
+@pytest.mark.parametrize("parent_overridden", [False, True])
+@pytest.mark.parametrize("child_overridden", [False, True])
+def test_runtime_dependency_overrides_follow_each_routes_own_provider(
+    tmp_path: Path, parent_overridden: bool, child_overridden: bool
+) -> None:
+    handler = HandlerInfo(
+        name="endpoint", module="main", file_path=tmp_path / "main.py", line_number=4
+    )
+    parent = SimpleNamespace(dependency_overrides={object(): object()} if parent_overridden else {})
+    child = SimpleNamespace(dependency_overrides={object(): object()} if child_overridden else {})
+    extractor = FastAPIExtractor(tmp_path / "main.py")
+    extractor._app = parent
+    for provider, overridden in (
+        (parent, parent_overridden),
+        (child, child_overridden),
+        (None, False),
+    ):
+        route = SimpleNamespace(
+            dependant=SimpleNamespace(dependencies=[]), dependency_overrides_provider=provider
+        )
+        graph = extractor._extract_dependency_graph(route, handler)
+        expected = (
+            DependencyGraphStatus.CONDITIONAL if overridden else DependencyGraphStatus.ESTABLISHED
+        )
+        assert graph.status == expected
+        assert {item.code for item in graph.limitations} == (
+            {"dependency_overrides_visible"} if overridden else set()
+        )
+
+
 def _synthetic_old_dependency() -> int:
     return 1
+
+
+@pytest.mark.parametrize("parent_overridden", [False, True])
+@pytest.mark.parametrize("child_overridden", [False, True])
+@pytest.mark.parametrize("root_attribute", ["starlette_route", "original_route"])
+def test_normalized_dependency_overrides_use_the_route_that_supplied_the_graph(
+    tmp_path: Path,
+    parent_overridden: bool,
+    child_overridden: bool,
+    root_attribute: str,
+) -> None:
+    parent = FastAPI()
+    child = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+    @child.get("/child", dependencies=[Depends(_synthetic_old_dependency)])
+    def child_handler() -> None:
+        pass
+
+    if parent_overridden:
+        parent.dependency_overrides[_synthetic_old_dependency] = lambda: 3
+    if child_overridden:
+        child.dependency_overrides[_synthetic_old_dependency] = lambda: 4
+    child_route = child.routes[0]
+    extractor = FastAPIExtractor(tmp_path / "main.py")
+    extractor._app = parent
+    for wrapper_has_provider in (False, True):
+        wrapper = SimpleNamespace(**{root_attribute: child_route})
+        if wrapper_has_provider:
+            wrapper.dependency_overrides_provider = parent
+        handler = HandlerInfo(
+            name="child_handler", module="main", file_path=tmp_path / "main.py", line_number=4
+        )
+        graph = extractor._extract_dependency_graph(wrapper, handler)
+        assert graph.occurrences[0].display_name == "_synthetic_old_dependency"
+        assert graph.status == (
+            DependencyGraphStatus.CONDITIONAL
+            if child_overridden
+            else DependencyGraphStatus.ESTABLISHED
+        )
+        assert {item.code for item in graph.limitations} == (
+            {"dependency_overrides_visible"} if child_overridden else set()
+        )
 
 
 def _synthetic_effective_dependency() -> int:
@@ -1147,6 +1220,76 @@ def package_route():
     assert endpoints[0].handler.file_path == routes
     assert "runtime_package" not in sys.modules
     assert "runtime_package.routes" not in sys.modules
+
+
+def test_runtime_extractor_selects_main_in_default_nonpackage_directory(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    main = project / "main.py"
+    main.write_text(
+        """from fastapi import FastAPI
+
+service = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+@service.get("/default-directory")
+def default_directory_route():
+    return {}
+"""
+    )
+
+    endpoints = FastAPIExtractor(project, app_variable="service").extract_endpoints()
+
+    assert [endpoint.identifier for endpoint in endpoints] == ["GET /default-directory"]
+    assert endpoints[0].handler.file_path == main
+
+
+def test_runtime_extractor_rejects_ambiguous_default_directory(tmp_path: Path) -> None:
+    project = tmp_path / "ambiguous_project"
+    project.mkdir()
+    for filename in ("main.py", "alternate.py"):
+        (project / filename).write_text("from fastapi import FastAPI\napp = FastAPI()\n")
+
+    with pytest.raises(FastAPIExtractorError, match="--app-entry"):
+        FastAPIExtractor(project).extract_endpoints()
+
+
+def test_default_directory_selection_ignores_hostile_cached_module_and_restores_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "isolated_project"
+    project.mkdir()
+    (project / "main.py").write_text(
+        """from fastapi import FastAPI
+from local_helper import ROUTE_PATH
+
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+
+@app.get(ROUTE_PATH)
+def local_route():
+    return {}
+"""
+    )
+    (project / "local_helper.py").write_text('ROUTE_PATH = "/local-helper"\n')
+    hostile = ModuleType("local_helper")
+    hostile.__dict__["ROUTE_PATH"] = "/hostile-cache"
+    monkeypatch.setitem(sys.modules, "local_helper", hostile)
+    original_path = list(sys.path)
+    original_meta_path = list(sys.meta_path)
+
+    app = select_runtime_app(
+        project,
+        app_path=project,
+        app_variable="app",
+    )
+
+    assert isinstance(app, FastAPI)
+    assert [route.path for route in app.routes if hasattr(route, "path")] == ["/local-helper"]
+    assert sys.modules["local_helper"] is hostile
+    assert sys.path == original_path
+    assert sys.meta_path == original_meta_path
 
 
 def test_runtime_extractor_imports_nested_package_file_with_relative_routes(
