@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import html
 import json
-import platform
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -744,6 +743,15 @@ def audit_effect_contracts_command(
                     "typed call analysis did not produce a complete endpoint result for "
                     f"{endpoint.identifier} ({endpoint.handler.name})"
                 )
+            if (
+                dependencies.analysis_incomplete
+                or dependencies.analysis_limitations
+                or dependencies.build_failed
+            ):
+                raise RuntimeError(
+                    "typed call analysis is incomplete; complete contract coverage unavailable for "
+                    f"{endpoint.identifier} ({endpoint.handler.name})"
+                )
             rows.append((endpoint, dependencies.get_resolved_call_sites()))
         audit = audit_effect_contracts(
             loaded,
@@ -757,7 +765,6 @@ def audit_effect_contracts_command(
             verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
             verified_package_source_hashes=analyzer.verified_package_source_hashes,
             verified_package_versions=analyzer.verified_package_versions,
-            target_python_version=platform.python_version(),
         )
         data = audit.model_dump(mode="json", exclude_none=True)
         if output_format == "json":

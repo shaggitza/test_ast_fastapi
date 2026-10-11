@@ -105,7 +105,7 @@ def scope_graphify_snapshot_to_inventory(
     limitations: list[str] = []
     admitted_nodes = {}
     for node in snapshot.nodes:
-        source = inventory_by_path.get(node.source_file)
+        source = inventory_by_path.get(node.source_file) if node.source_file is not None else None
         if source is None:
             limitations.append(
                 f"Graphify node outside canonical source inventory excluded: {node.source_file}"
