@@ -408,6 +408,7 @@ class VMExecutor:
         bootstrap_entry: str | None = None,
         phase_manifest: dict[str, Any] | None = None,
         phase_manifest_source_root: Path | None = None,
+        output_config: dict[str, bool] | None = None,
     ) -> list[str]:
         seccomp_hash = self._verified_seccomp_hash()
         dependency_lock_hash = self._validated_hash(self.dependency_lock_hash, "dependency lock")
@@ -538,8 +539,29 @@ class VMExecutor:
         else:
             if app_entry is not None or bootstrap_entry is not None:
                 raise VMExecutorError("selected runtime entries require JSON worker output")
+            config_mount: list[str] = []
+            config_args: list[str] = []
+            if output_config:
+                if set(output_config) - {
+                    "show_confidence",
+                    "show_dependency_chain",
+                    "colorize",
+                    "verbose",
+                } or any(type(value) is not bool for value in output_config.values()):
+                    raise VMExecutorError("VM output configuration is malformed")
+                config_path = cidfile.with_suffix(".output-config.json")
+                config_path.write_text(
+                    json.dumps({"output": output_config}, sort_keys=True), encoding="utf-8"
+                )
+                config_path.chmod(0o444)
+                config_mount = [
+                    "--mount",
+                    self._mount(config_path, "/workspace/output-config.json"),
+                ]
+                config_args = ["--config", "/workspace/output-config.json"]
             cli = [
                 "fastapi-endpoint-detector",
+                *config_args,
                 "list",
                 "--app",
                 app_target,
@@ -551,6 +573,7 @@ class VMExecutor:
             if diff_target is not None:
                 cli = [
                     "fastapi-endpoint-detector",
+                    *config_args,
                     "analyze",
                     "--app",
                     app_target,
@@ -561,6 +584,7 @@ class VMExecutor:
                     "--app-var",
                     app_variable,
                 ]
+            command.extend(config_mount)
         command.append(self._resolve_image())
         command.append("-i")
         command.extend(f"{key}={value}" for key, value in sorted(self.CLEAN_ENV.items()))
@@ -775,6 +799,7 @@ class VMExecutor:
         bootstrap_entry: str | None = None,
         phase_manifest: dict[str, Any] | None = None,
         phase_manifest_source_root: Path | None = None,
+        output_config: dict[str, bool] | None = None,
     ) -> Any:
         """Run list/analyze with no host import and return bounded output."""
         app = Path(app_path).resolve(strict=True)
@@ -793,6 +818,7 @@ class VMExecutor:
                 bootstrap_entry,
                 phase_manifest,
                 phase_manifest_source_root,
+                output_config,
             )
             request_payload: dict[str, Any] = {}
             if phase_manifest is not None:
@@ -932,6 +958,7 @@ class VMExecutor:
         app_variable: str = "app",
         app_entry: str | None = None,
         bootstrap_entry: str | None = None,
+        output_config: dict[str, bool] | None = None,
     ) -> list[Endpoint]:
         """Deserialize runtime-list output into endpoint models when available."""
         result = self.analyze_in_vm(
@@ -940,6 +967,7 @@ class VMExecutor:
             output_format="json",
             app_entry=app_entry,
             bootstrap_entry=bootstrap_entry,
+            output_config=output_config,
         )
         if not isinstance(result, dict) or not isinstance(result.get("endpoints"), list):
             raise VMExecutorError("runtime list output does not contain an endpoints array")
