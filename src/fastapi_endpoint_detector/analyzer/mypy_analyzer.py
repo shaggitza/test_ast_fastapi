@@ -4949,6 +4949,7 @@ class MypyAnalyzer:
         try_callable_snapshots: list[
             list[dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]]
         ] = []
+        try_partial_snapshots: list[list[dict[str, _PartialCallable]]] = []
         try_assignment_target_ids: list[set[int]] = []
         try_unbound_name_load_ids: list[set[int]] = []
         try_definite_unbound_name_load_ids: list[set[int]] = []
@@ -5217,7 +5218,11 @@ class MypyAnalyzer:
             """Trace exact calls, adding bounded finite receiver edges as LOW only."""
             nonlocal string_environment
             for snapshots in try_callable_snapshots:
-                snapshots.append(dict(callable_environment))
+                if not snapshots or snapshots[-1] != callable_environment:
+                    snapshots.append(dict(callable_environment))
+            for partial_states in try_partial_snapshots:
+                if not partial_states or partial_states[-1] != partial_environment:
+                    partial_states.append(dict(partial_environment))
             call_site = self._resolved_call_site(
                 call,
                 current_file,
@@ -5374,8 +5379,7 @@ class MypyAnalyzer:
                         and (
                             any(
                                 parameter in invocation_keywords
-                                and parameter in positional_partial_parameters
-                                for parameter, _captured in partial_alias.bound_callables
+                                for parameter in positional_partial_parameters
                             )
                             or bool(stored_keyword_parameters & invocation_positional_parameters)
                         )
@@ -5850,6 +5854,9 @@ class MypyAnalyzer:
                 for snapshots in try_callable_snapshots:
                     if not snapshots or snapshots[-1] != callable_environment:
                         snapshots.append(dict(callable_environment))
+                for partial_states in try_partial_snapshots:
+                    if not partial_states or partial_states[-1] != partial_environment:
+                        partial_states.append(dict(partial_environment))
             node_line = getattr(n, "line", 0)
             if isinstance(node_line, int) and node_line > 0:
                 self._active_source_file = current_file
@@ -6491,6 +6498,7 @@ class MypyAnalyzer:
                 callable_snapshots: list[
                     dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
                 ] = []
+                partial_snapshots: list[dict[str, _PartialCallable]] = [before_partials]
                 from types import GetSetDescriptorType, MemberDescriptorType
 
                 from mypy.nodes import (
@@ -6630,6 +6638,7 @@ class MypyAnalyzer:
                     )
                 }
                 try_callable_snapshots.append(callable_snapshots)
+                try_partial_snapshots.append(partial_snapshots)
                 try_assignment_target_ids.append(assignment_target_ids)
                 try_unbound_name_load_ids.append(unbound_name_load_ids)
                 try_definite_unbound_name_load_ids.append(definite_unbound_name_load_ids)
@@ -6640,6 +6649,7 @@ class MypyAnalyzer:
                     try_unbound_name_load_ids.pop()
                     try_definite_unbound_name_load_ids.pop()
                     try_callable_snapshots.pop()
+                    try_partial_snapshots.pop()
                 body_callables = dict(callable_environment)
                 body_partials = dict(partial_environment)
                 body_lambdas = dict(lambda_environment)
@@ -6652,27 +6662,28 @@ class MypyAnalyzer:
                 handler_partials: list[dict[str, _PartialCallable]] = []
                 handler_lambdas: list[dict[str, Any]] = []
                 for handler in n.handlers:
-                    callable_environment = self._join_callable_environments(
-                        [before_callables, *callable_snapshots]
-                    )
-                    partial_environment = {
-                        key: value
-                        for key, value in before_partials.items()
-                        if key not in try_assigned_names and body_partials.get(key) == value
-                    }
-                    lambda_environment = {
-                        key: value
-                        for key, value in before_lambdas.items()
-                        if key not in try_assigned_names and body_lambdas.get(key) is value
-                    }
-                    possible_execution_depth[0] += 1
-                    try:
-                        walk_node(handler)
-                    finally:
-                        possible_execution_depth[0] -= 1
-                    handler_callables.append(dict(callable_environment))
-                    handler_partials.append(dict(partial_environment))
-                    handler_lambdas.append(dict(lambda_environment))
+                    distinct_partial_snapshots: list[dict[str, _PartialCallable]] = []
+                    for partial_snapshot in partial_snapshots:
+                        if partial_snapshot not in distinct_partial_snapshots:
+                            distinct_partial_snapshots.append(partial_snapshot)
+                    for partial_snapshot in distinct_partial_snapshots:
+                        callable_environment = self._join_callable_environments(
+                            [before_callables, *callable_snapshots]
+                        )
+                        partial_environment = dict(partial_snapshot)
+                        lambda_environment = {
+                            key: value
+                            for key, value in before_lambdas.items()
+                            if key not in try_assigned_names and body_lambdas.get(key) is value
+                        }
+                        possible_execution_depth[0] += 1
+                        try:
+                            walk_node(handler)
+                        finally:
+                            possible_execution_depth[0] -= 1
+                        handler_callables.append(dict(callable_environment))
+                        handler_partials.append(dict(partial_environment))
+                        handler_lambdas.append(dict(lambda_environment))
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:

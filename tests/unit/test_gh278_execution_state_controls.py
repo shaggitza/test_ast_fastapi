@@ -210,6 +210,64 @@ def test_partial_keyword_positional_collision_is_not_traced(tmp_path: Path) -> N
     assert mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints == []
 
 
+def test_partial_positional_noncallable_keyword_collision_is_not_traced(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def run(path): return path_effect()\ndef path_effect(): return 1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from functools import partial\nfrom fastapi import FastAPI\n"
+        "from helpers import run\napp=FastAPI()\n"
+        "@app.get('/invalid-positional')\ndef handler():\n"
+        "    bound = partial(run, '/old')\n    return bound(path='/new')\n",
+        encoding="utf-8",
+    )
+    mapper = _mapper(tmp_path)
+
+    endpoint_dependencies = mapper.mypy_analyzer.analyze_endpoints(
+        mapper.registry.get_all(), use_cache=False
+    )
+    endpoint_deps = next(iter(endpoint_dependencies.values()))
+    assert any(
+        item.cap == "INVALID_PARTIAL_ARGUMENTS" for item in endpoint_deps.analysis_limitations
+    )
+    assert mapper.analyze_diff(_diff("helpers.py", 2)).candidate_endpoints == []
+
+
+def test_try_partial_binding_keeps_each_exception_point_snapshot(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def first() -> int: return 1\n"
+        "def second() -> int: return 2\n"
+        "def run(callback): return callback()\n"
+        "def risky() -> None: raise RuntimeError\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from functools import partial\nfrom fastapi import FastAPI\n"
+        "from helpers import first, second, run, risky\napp=FastAPI()\n"
+        "@app.get('/try-partial')\ndef handler():\n"
+        "    bound = partial(run, callback=first)\n"
+        "    try:\n        risky()\n"
+        "        bound = partial(run, callback=second)\n"
+        "        risky()\n    except Exception:\n        bound()\n"
+        "    return 0\n",
+        encoding="utf-8",
+    )
+    mapper = _mapper(tmp_path)
+
+    first_change = mapper.analyze_diff(_diff("helpers.py", 1))
+    second_change = mapper.analyze_diff(_diff("helpers.py", 2))
+
+    assert {item.endpoint.identifier for item in first_change.candidate_endpoints} == {
+        "GET /try-partial"
+    }
+    assert {item.endpoint.identifier for item in second_change.candidate_endpoints} == {
+        "GET /try-partial"
+    }
+
+
 def test_literal_true_loop_break_uses_mandatory_assignment(tmp_path: Path) -> None:
     (tmp_path / "helpers.py").write_text(
         "def first(): return 1\ndef second(): return 2\n", encoding="utf-8"
