@@ -1031,6 +1031,8 @@ class MypyAnalyzer:
             conflicting_mypy_source_paths: set[str] = set()
             conflicting_package_source_paths: set[str] = set()
             analyzed_source_hashes: dict[str, str] = {}
+            typed_source_snapshots: dict[str, bytes | None] = {}
+            typed_source_snapshot_bytes = 0
             scanned_metadata_roots: set[Path] = set()
             authenticated_metadata_hashes: dict[str, str] = {}
             parsed_top_levels_by_root: dict[Path, set[str]] = {}
@@ -1082,6 +1084,21 @@ class MypyAnalyzer:
                             # The module remains useful for type resolution, but
                             # unreadable bytes cannot authenticate package evidence.
                             vendor_bytes = None
+                        try:
+                            source_file.relative_to(self.source_root)
+                        except ValueError:
+                            pass
+                        else:
+                            typed_source_snapshots[state_path] = None
+                            if (
+                                vendor_bytes is not None
+                                and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
+                                and len(vendor_bytes) <= self.MAX_LAMBDA_SOURCE_FILE_BYTES
+                                and typed_source_snapshot_bytes + len(vendor_bytes)
+                                <= self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+                            ):
+                                typed_source_snapshots[state_path] = vendor_bytes
+                                typed_source_snapshot_bytes += len(vendor_bytes)
                         if vendor_bytes is not None:
                             parts = module_name.split(".")
                             package_root = source_file.parent
@@ -1291,6 +1308,22 @@ class MypyAnalyzer:
                     or retained_bytes + len(snapshot) > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
                     or self._decode_analysis_source(snapshot) is None
                 ):
+                    self._analysis_source_snapshots[canonical] = None
+                    continue
+                self._analysis_source_snapshots[canonical] = snapshot
+                retained_bytes += len(snapshot)
+            # Imported project stubs are not part of the .py source inventory,
+            # but mypy still parsed them. Preserve their bytes only when the
+            # captured bytes match mypy's parsed digest. This keeps later source
+            # guards tied to the build even if package applicability is
+            # invalidated by a subsequent metadata snapshot.
+            for canonical, snapshot in typed_source_snapshots.items():
+                if canonical in self._analysis_source_snapshots:
+                    continue
+                if snapshot is None:
+                    self._analysis_source_snapshots[canonical] = None
+                    continue
+                if retained_bytes + len(snapshot) > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES:
                     self._analysis_source_snapshots[canonical] = None
                     continue
                 self._analysis_source_snapshots[canonical] = snapshot
