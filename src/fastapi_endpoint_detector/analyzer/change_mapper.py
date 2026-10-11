@@ -785,6 +785,12 @@ class ChangeMapper:
             bootstrap_entry=self.bootstrap_entry,
             app_variable=self.app_variable,
             app_entry=self.app_entry,
+            source_paths=(
+                self.baseline_source_inventory.paths
+                if self.baseline_app_path is not None
+                and app_path.resolve() == self.baseline_app_path
+                else self.source_inventory.paths
+            ),
         ).extract_inventory()
         return merge_surface_inventory(native, custom)
 
@@ -1771,6 +1777,25 @@ class ChangeMapper:
         if removed_lines and self.baseline_app_path is not None and self._baseline_failure is None:
             source_path = diff_file.source_path or diff_file.path
             baseline_file = diff_file.model_copy(update={"path": source_path})
+            # Direct-handler evidence is file-local: source line numbers only
+            # identify a handler when the changed path is that handler's file.
+            # Dependency tracing below remains cross-file and therefore still
+            # visits every baseline endpoint.
+            for endpoint in self.baseline_mypy_registry.get_by_file(source_path):
+                direct = self._check_direct_handler_change(
+                    endpoint, baseline_file, [], removed_lines
+                )
+                if direct is not None:
+                    direct = direct.model_copy(
+                        update={"endpoint": self._target_equivalent_endpoint(endpoint)}
+                    )
+                    _merge_affected(affected, direct)
+                    handler = endpoint.handler
+                    handler_end = handler.end_line_number or handler.line_number + 50
+                    processed_removed_lines.update(
+                        line for line in removed_lines if handler.line_number <= line <= handler_end
+                    )
+
             for endpoint in self.baseline_mypy_registry:
                 result = self._check_mypy_dependency(
                     endpoint, baseline_file, [], removed_lines, self.baseline_mypy_analyzer
@@ -1802,7 +1827,10 @@ class ChangeMapper:
         """Map target additions and baseline removals through separate SCIP indexes."""
         has_removed = any(
             (diff_file.source_path or diff_file.path).suffix == ".py"
-            and bool(DiffParser.get_changed_line_numbers(diff_file)[1])
+            and (
+                bool(DiffParser.get_changed_line_numbers(diff_file)[1])
+                or (diff_file.source_path is not None and diff_file.source_path != diff_file.path)
+            )
             for diff_file in python_files
         )
         if has_removed and self.baseline_app_path is None:
@@ -1982,6 +2010,49 @@ class ChangeMapper:
                 )
             added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
             processed_added: set[int] = set()
+            if not added_lines and not removed_lines and diff_file.is_python_file:
+                for registry, changed_path, side in (
+                    (self.registry, diff_file.path, "target"),
+                    (
+                        self.baseline_registry if self.baseline_app_path is not None else None,
+                        diff_file.source_path or diff_file.path,
+                        "baseline",
+                    ),
+                ):
+                    if registry is None or changed_path.suffix != ".py":
+                        continue
+                    for endpoint in registry.get_by_file(changed_path):
+                        reported_endpoint = (
+                            target_equivalent(endpoint) if side == "baseline" else endpoint
+                        )
+                        _merge_affected(
+                            affected,
+                            AffectedEndpoint(
+                                endpoint=reported_endpoint,
+                                confidence=ConfidenceLevel.HIGH,
+                                reason=f"Line-less {side} file change affects endpoint source",
+                                dependency_chain=[str(changed_path), endpoint.handler.name],
+                                changed_files=[str(changed_path)],
+                                effect_evidence=[
+                                    EffectEvidence(
+                                        producer=EvidenceProducer.DIRECT,
+                                        status=EvidenceStatus.ESTABLISHED,
+                                        effect=ChangeEffectKind.UNKNOWN,
+                                        channel=ImpactChannel.UNKNOWN,
+                                        disposition=EffectDisposition.INTERNAL_EFFECT,
+                                        summary=(
+                                            f"Git reported a {side} file change without line "
+                                            "hunks; the endpoint handler is defined by that file."
+                                        ),
+                                        changed_location=CodeReference(
+                                            file_path=str(changed_path),
+                                            line_number=endpoint.handler.line_number,
+                                            symbol=endpoint.handler.name,
+                                        ),
+                                    )
+                                ],
+                            ),
+                        )
             if diff_file.path.suffix == ".py" and added_lines:
                 processed_added.update(
                     analyze_structural_side(
@@ -2060,6 +2131,13 @@ class ChangeMapper:
                 raise ChangeMapperError(
                     "effect contract audit requires complete typed endpoint analysis"
                 )
+            if (
+                dependencies.analysis_incomplete
+                or dependencies.analysis_limitations
+                or dependencies.build_failed
+            ):
+                # A truncated call corpus cannot establish complete contract coverage.
+                return None
             rows.append((endpoint, dependencies.get_resolved_call_sites()))
         effective_depth = (
             self.config.parser.max_depth if self.config.analysis.track_transitive else 1
@@ -2074,6 +2152,9 @@ class ChangeMapper:
             max_depth=effective_depth,
             cache_enabled=self.use_cache,
             resolver_versions=(f"mypy@{self.mypy_analyzer.resolver_version}",),
+            verified_mypy_source_hashes=self.mypy_analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=self.mypy_analyzer.verified_package_source_hashes,
+            verified_package_versions=self.mypy_analyzer.verified_package_versions,
         )
 
     def _attach_contract_evidence(
@@ -2127,6 +2208,7 @@ class ChangeMapper:
                         resolver=occurrence.resolver,
                         resolver_version=occurrence.resolver_version,
                         matcher=audit.provenance.matcher,
+                        package_applicability=audit.scope.package_applicability,
                         resource_identity_status=resource_identity.status,
                         resource_identity=resource_identity,
                         limitations=(

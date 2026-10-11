@@ -63,6 +63,26 @@ class MarkdownFormatter(BaseFormatter):
                     f"`{limitation.source_path}:{limitation.source_line}` — {limitation.reason}"
                 )
         lines.append(f"- **Analysis Completeness:** {report.analysis_completeness}")
+        if report.endpoint_lifecycle:
+            lines.append("- **Endpoint Lifecycle:**")
+            for record in report.endpoint_lifecycle:
+                identity = record.identity.replace("`", "\\`").replace("\n", " ")
+                lines.append(f"  - {record.lifecycle.value}: `{identity}`")
+                for side, endpoint in (
+                    ("baseline", record.baseline_endpoint),
+                    ("target", record.target_endpoint),
+                ):
+                    if endpoint is not None:
+                        handler = endpoint.handler
+                        details = (
+                            (
+                                f"{handler.module}.{handler.name} "
+                                f"at {handler.file_path}:{handler.line_number}"
+                            )
+                            .replace("`", "\\`")
+                            .replace("\n", " ")
+                        )
+                        lines.append(f"    - {side}: `{details}`")
         lines.append(f"- **Total Endpoints:** {report.total_endpoints}")
         lines.append(
             f"- **Files Changed:** {report.total_files_changed} ({report.python_files_changed} Python)"

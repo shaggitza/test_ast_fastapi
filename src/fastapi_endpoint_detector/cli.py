@@ -44,14 +44,6 @@ if TYPE_CHECKING:
 console = Console()
 
 
-def _reject_unsupported_vm_output_options(config: Config) -> None:
-    """Reject configured formatter options the isolated runtime cannot receive."""
-    defaults = type(config.output)()
-    for name, value in config.output.model_dump().items():
-        if value != getattr(defaults, name):
-            raise click.ClickException(f"Output option '{name}' cannot be applied with --vm")
-
-
 def _format_runtime_endpoint_list(
     formatter: BaseFormatter,
     output_format: str,
@@ -256,9 +248,6 @@ def analyze(
         formatter = get_formatter(output_format, output_config=config.output)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    if vm:
-        _reject_unsupported_vm_output_options(config)
-
     # Validate mutually exclusive options
     has_surface_contracts = any((config.analysis.surface_contracts, config.analysis.surface_preset))
     has_effect_contracts = any((config.analysis.effect_contracts, config.analysis.effect_preset))
@@ -292,6 +281,13 @@ def analyze(
     if vm and config.analysis.route_observations.enabled:
         console.print("[red]Error:[/red] analysis.route_observations is unavailable with --vm")
         raise click.Abort()
+    if (
+        config.analysis.route_observations.enabled
+        and config.analysis.route_observations.trusted_server_origins
+        and not secure_ast
+    ):
+        console.print("[red]Error:[/red] trusted route observation origins require --secure-ast")
+        raise click.Abort()
 
     if verbose:
         console.print(f"[blue]Analyzing FastAPI application at:[/blue] {app}")
@@ -324,6 +320,7 @@ def analyze(
                 diff_path=diff,
                 app_variable=app_var,
                 output_format=output_format,
+                output_config=config.output.model_dump(),
             )
 
             # Output results
@@ -688,6 +685,15 @@ def audit_effect_contracts_command(
                     "typed call analysis did not produce a complete endpoint result for "
                     f"{endpoint.identifier} ({endpoint.handler.name})"
                 )
+            if (
+                dependencies.analysis_incomplete
+                or dependencies.analysis_limitations
+                or dependencies.build_failed
+            ):
+                raise RuntimeError(
+                    "typed call analysis is incomplete; complete contract coverage unavailable for "
+                    f"{endpoint.identifier} ({endpoint.handler.name})"
+                )
             rows.append((endpoint, dependencies.get_resolved_call_sites()))
         audit = audit_effect_contracts(
             loaded,
@@ -698,6 +704,9 @@ def audit_effect_contracts_command(
             max_depth=effective_depth,
             cache_enabled=not no_cache,
             resolver_versions=(f"mypy@{analyzer.resolver_version}",),
+            verified_mypy_source_hashes=analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=analyzer.verified_package_source_hashes,
+            verified_package_versions=analyzer.verified_package_versions,
         )
         data = audit.model_dump(mode="json", exclude_none=True)
         if output_format == "json":
@@ -721,7 +730,7 @@ def audit_effect_contracts_command(
                 f"{summary.unresolved_calls} unresolved)",
                 f"Config hash: {audit.provenance.config_hash}",
                 f"Corpus hash: {audit.provenance.occurrence_corpus_hash}",
-                "Package applicability: not evaluated",
+                f"Package applicability: {audit.scope.package_applicability.replace('_', ' ')}",
                 "Matches do not alter endpoint candidates or confidence.",
             ]
             for occurrence in audit.occurrences:
@@ -820,9 +829,6 @@ def list_endpoints(
         formatter = get_formatter(output_format, output_config=config.output)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    if vm:
-        _reject_unsupported_vm_output_options(config)
-
     # Validate mutually exclusive options
     if config.analysis.surface_contracts is not None and not secure_ast:
         console.print("[red]Error:[/red] custom surface contracts require --secure-ast")
@@ -849,6 +855,7 @@ def list_endpoints(
                 app_path=app,
                 app_variable=app_var,
                 output_format=output_format,
+                output_config=config.output.model_dump(),
             )
 
             # Output results
