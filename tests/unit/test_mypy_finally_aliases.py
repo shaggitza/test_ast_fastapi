@@ -636,3 +636,66 @@ def test_finally_parameter_replacement_requires_release_proof(tmp_path: Path) ->
         if Path(site.file_path).resolve() == main.resolve()
     )
     assert any(item.cap == "UNKNOWN_FINALLY_EXIT_BINDING" for item in deps.analysis_limitations)
+
+
+@pytest.mark.parametrize(
+    "construction",
+    ("partial(invoke, callback)", "partial(invoke, callback=callback)"),
+    ids=("positional", "keyword"),
+)
+def test_partial_capture_preserves_function_alias_before_any_finally(
+    tmp_path: Path, construction: str
+) -> None:
+    main, deps = _analyze(
+        tmp_path,
+        f"callback = first\nbound = {construction}\ncallback()",
+    )
+    direct = [
+        site
+        for site in _site_by_spelling(deps.resolved_call_sites, "callback")
+        if Path(site.file_path).resolve() == main.resolve()
+    ]
+    assert len(direct) == 1
+    assert direct[0].status == CallResolutionStatus.EXACT
+    assert direct[0].canonical_symbol == "helpers.first"
+    assert not _helper_callback_sites(deps, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "prelude,construction",
+    (
+        (
+            "partial = invoke",
+            "partial(callback)",
+        ),
+        (
+            "",
+            "partial(invoke, *[callback])",
+        ),
+        (
+            "",
+            "partial(invoke, **{'callback': callback})",
+        ),
+    ),
+    ids=("shadowed-constructor", "positional-star", "keyword-star"),
+)
+def test_unproven_partial_capture_still_invalidates_function_alias(
+    tmp_path: Path, prelude: str, construction: str
+) -> None:
+    main, deps = _analyze(
+        tmp_path,
+        "callback = first\n"
+        + (prelude + "\n" if prelude else "")
+        + f"bound = {construction}\n"
+        + "callback()",
+    )
+    direct = [
+        site
+        for site in _site_by_spelling(deps.resolved_call_sites, "callback")
+        if Path(site.file_path).resolve() == main.resolve()
+    ]
+    assert direct
+    assert not any(
+        site.status == CallResolutionStatus.EXACT and site.canonical_symbol == "helpers.first"
+        for site in direct
+    )
