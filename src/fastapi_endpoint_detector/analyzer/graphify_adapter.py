@@ -46,6 +46,7 @@ GraphifyRelationOrientation = Literal[
     "exporter-to-exported",
     "container-to-contained",
     "symmetric",
+    "unknown",
 ]
 
 _RELATION_ORIENTATIONS: dict[str, GraphifyRelationOrientation] = {
@@ -131,7 +132,11 @@ class GraphifyEdge:
     @property
     def traversable(self) -> bool:
         """Whether this source-backed relation may support future traversal."""
-        return self.relation in _TRAVERSABLE_RELATIONS and self.span is not None
+        return (
+            self.orientation != "unknown"
+            and self.relation in _TRAVERSABLE_RELATIONS
+            and self.span is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -578,7 +583,6 @@ def _adapt_edges(
     raw_schema: bool = False,
 ) -> tuple[GraphifyEdge, ...]:
     edges: list[GraphifyEdge] = []
-    seen_raw_edges: set[tuple[str, str, str, str, str, str | None]] = set()
     for index, raw_edge in enumerate(raw_edges):
         location = f"links[{index}]"
         if not isinstance(raw_edge, dict):
@@ -597,10 +601,17 @@ def _adapt_edges(
             raise GraphifyAdapterError(f"{location} references an unknown node")
         relation = _bounded_string(edge["relation"], f"{location}.relation")
         orientation = _RELATION_ORIENTATIONS.get(relation)
-        if orientation is None:
+        if raw_schema:
+            # The pinned raw producer exposes endpoint order but no directed
+            # graph contract. Only these source-confirmed call/import/inherit
+            # records have a supported semantic direction in v2.
+            if relation not in {"calls", "imports", "imports_from", "inherits"}:
+                orientation = "unknown"
+        elif orientation is None:
             raise GraphifyAdapterError(
                 f"{location}.relation has no attested source-to-target orientation: {relation!r}"
             )
+        assert orientation is not None
         strength = _strength(edge["confidence"], f"{location}.confidence")
         assert strength is not None
         _validate_optional_fields(edge, location)
@@ -608,10 +619,9 @@ def _adapt_edges(
             raise GraphifyAdapterError(
                 f"{location} requires source_file and line-only source_location"
             )
-        raw_source_file: str | None = None
         raw_source_location: str | None = None
         if raw_schema:
-            raw_source_file = _bounded_string(edge["source_file"], f"{location}.source_file")
+            _bounded_string(edge["source_file"], f"{location}.source_file")
             raw_source_location = _bounded_string(
                 edge["source_location"], f"{location}.source_location"
             )
@@ -619,19 +629,6 @@ def _adapt_edges(
                 raise GraphifyAdapterError(
                     f"{location}.source_location must be a line-only Graphify marker"
                 )
-            raw_edge_key = (
-                source_id,
-                target_id,
-                relation,
-                raw_source_file,
-                raw_source_location,
-                cast("str | None", edge.get("context")),
-            )
-            if raw_edge_key in seen_raw_edges:
-                raise GraphifyAdapterError(
-                    f"{location} duplicates an identical raw edge occurrence"
-                )
-            seen_raw_edges.add(raw_edge_key)
         span = _optional_edge_span(registry, edge, location)
         edge_key = edge.get("key")
         if isinstance(edge_key, bool) or not isinstance(edge_key, (int, str, type(None))):
@@ -701,7 +698,7 @@ def load_graphify_snapshot(
         expected_graphify_version=GRAPHIFY_PACKAGE_VERSION,
         expected_graphify_command=GRAPHIFY_COMMAND_NAME,
         expected_version_output=GRAPHIFY_EXPECTED_VERSION_OUTPUT,
-        directed=True,
+        directed=(schema == GRAPHIFY_NODE_LINK_SCHEMA),
         multigraph=(schema == GRAPHIFY_NODE_LINK_SCHEMA),
         built_at_commit=built_at_commit,
         nodes=nodes,

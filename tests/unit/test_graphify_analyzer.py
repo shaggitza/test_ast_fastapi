@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from fastapi_endpoint_detector.analyzer.graphify_adapter import (
-    GraphifyAdapterError,
     GraphifyEdge,
     GraphifySourceSpan,
     GraphSide,
@@ -430,13 +429,13 @@ def test_raw_context_identity_survives_adapter_and_analyzer(tmp_path: Path) -> N
     duplicate_payload["edges"] = [*payload["edges"], dict(payload["edges"][0])]
     duplicate_graph = tmp_path / "raw-identical-context.json"
     duplicate_graph.write_text(json.dumps(duplicate_payload), encoding="utf-8")
-    with pytest.raises(GraphifyAdapterError, match="duplicates an identical raw edge occurrence"):
-        load_graphify_snapshot(
-            duplicate_graph,
-            project_root=root,
-            side="target",
-            schema="graphify-raw-0.9.30-v1",
-        )
+    duplicate_snapshot = load_graphify_snapshot(
+        duplicate_graph,
+        project_root=root,
+        side="target",
+        schema="graphify-raw-0.9.30-v1",
+    )
+    assert len(duplicate_snapshot.edges) == len(duplicate_payload["edges"])
 
 
 def test_shared_handler_node_retains_each_secure_endpoint_seed(tmp_path: Path) -> None:

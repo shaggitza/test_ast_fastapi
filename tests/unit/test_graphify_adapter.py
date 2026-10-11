@@ -181,12 +181,13 @@ def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_
     )
     assert snapshot.graph_schema_version == 2
     assert snapshot.graph_sha256 == hashlib.sha256(RAW_FIXTURE.read_bytes()).hexdigest()
-    assert snapshot.directed is True
+    assert snapshot.directed is False
     assert snapshot.multigraph is False
     assert snapshot.edges[0].orientation == "caller-to-callee"
     assert snapshot.edges[1].orientation == "importer-to-imported"
     assert snapshot.edges[2].orientation == "subclass-to-base"
-    assert snapshot.edges[3].orientation == "referencer-to-referenced"
+    assert snapshot.edges[3].orientation == "unknown"
+    assert snapshot.edges[3].traversable is False
     assert [edge.extractor_strength for edge in snapshot.edges] == [
         "EXTRACTED",
         "INFERRED",
@@ -223,6 +224,40 @@ def test_raw_context_only_edge_occurrences_have_stable_distinct_identities(
     assert [edge.edge_key for edge in snapshot.edges] == [None, None]
 
 
+def test_raw_schema_retains_unknown_direction_and_duplicate_physical_edges(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    unknown = dict(payload["edges"][0], relation="contains", confidence="EXTRACTED")
+    payload["edges"] = [unknown, dict(unknown)]
+    graph = tmp_path / "raw-unknown-duplicates.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+
+    assert len(snapshot.edges) == 2
+    assert snapshot.edges[0] == snapshot.edges[1]
+    assert snapshot.edges[0].orientation == "unknown"
+    assert snapshot.edges[0].extractor_strength == "EXTRACTED"
+    assert snapshot.edges[0].traversable is False
+
+
+def test_raw_references_are_retained_without_direction_promotion(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    payload["edges"] = [dict(payload["edges"][0], relation="references")]
+    graph = tmp_path / "raw-reference.json"
+    _write_payload(graph, payload)
+
+    edge = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    ).edges[0]
+    assert edge.relation == "references"
+    assert edge.orientation == "unknown"
+    assert edge.traversable is False
+
+
 def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
     tmp_path: Path,
 ) -> None:
@@ -244,10 +279,6 @@ def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
         (lambda value: value["edges"][0].update({"context": ["invalid"]}), "context"),
         (lambda value: value["edges"][0].update({"source_file": "../app.py"}), "confined"),
         (lambda value: value["edges"][0].update({"target": "not-present"}), "unknown node"),
-        (
-            lambda value: value["edges"].append(dict(value["edges"][0])),
-            "identical raw edge occurrence",
-        ),
     ],
     ids=[
         "negative-token-counter",
@@ -258,7 +289,6 @@ def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
         "malformed-context",
         "path-traversal",
         "missing-target",
-        "duplicate-edge",
     ],
 )
 def test_raw_schema_negative_controls(tmp_path: Path, mutate: Any, message: str) -> None:
