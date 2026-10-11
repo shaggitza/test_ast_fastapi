@@ -248,3 +248,143 @@ contracts:
     http_method: OPTIONS
     behavior: *aiohttp_async
     package: *aiohttp
+
+  # Module helpers are audited against these exact wheel releases. Their
+  # aliases and source metadata are pinned independently from client methods.
+  - id: httpx-api-get
+    symbol: httpx._api.get
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: GET
+    package:
+      distribution: httpx
+      version: "==0.28.1"
+      source_hashes:
+        httpx/_api.py: "sha256:aff660b388c8a5c3c92ea2b975b6d26b2aa8fe254c2856b164277ea0e1f12c4b"
+        httpx/__init__.py: "sha256:0ac6997bac998f4ac783adf6d8058a587193315afdb718047c3e4fdff46bcfad"
+        httpx-0.28.1.dist-info/METADATA: "sha256:febb9b0f8f3e80d57c8199c304f35c4336e8581d1d18d7983c92766b82793b25"
+  - id: httpx-api-post
+    symbol: httpx._api.post
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: POST
+    package: &httpx_api_0281
+      distribution: httpx
+      version: "==0.28.1"
+      source_hashes:
+        httpx/_api.py: "sha256:aff660b388c8a5c3c92ea2b975b6d26b2aa8fe254c2856b164277ea0e1f12c4b"
+        httpx/__init__.py: "sha256:0ac6997bac998f4ac783adf6d8058a587193315afdb718047c3e4fdff46bcfad"
+        httpx-0.28.1.dist-info/METADATA: "sha256:febb9b0f8f3e80d57c8199c304f35c4336e8581d1d18d7983c92766b82793b25"
+  - id: httpx-api-put
+    symbol: httpx._api.put
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    package: *httpx_api_0281
+  - id: httpx-api-patch
+    symbol: httpx._api.patch
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    package: *httpx_api_0281
+  - id: httpx-api-delete
+    symbol: httpx._api.delete
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    package: *httpx_api_0281
+  - id: httpx-api-head
+    symbol: httpx._api.head
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    package: *httpx_api_0281
+  - id: httpx-api-options
+    symbol: httpx._api.options
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    package: *httpx_api_0281
+
+  - id: requests-api-get
+    symbol: requests.api.get
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: GET
+    package:
+      distribution: requests
+      version: "==2.32.3"
+      source_hashes:
+        requests/api.py: "sha256:fd96fd39aeedcd5222cd32b016b3e30c463d7a3b66fce9d2444467003c46b10b"
+        requests/__init__.py: "sha256:e3168011198f0c804fb1ad8fb23a54f6bd3aca8a0afb69992874d90215915adb"
+        requests-2.32.3.dist-info/METADATA: "sha256:658ee8454c1e2e76fb8c2127116f61156b3b22941b3559c00389dca70038581a"
+  - id: requests-api-post
+    symbol: requests.api.post
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: POST
+    package: &requests_api_2323
+      distribution: requests
+      version: "==2.32.3"
+      source_hashes:
+        requests/api.py: "sha256:fd96fd39aeedcd5222cd32b016b3e30c463d7a3b66fce9d2444467003c46b10b"
+        requests/__init__.py: "sha256:e3168011198f0c804fb1ad8fb23a54f6bd3aca8a0afb69992874d90215915adb"
+        requests-2.32.3.dist-info/METADATA: "sha256:658ee8454c1e2e76fb8c2127116f61156b3b22941b3559c00389dca70038581a"
+  - id: requests-api-put
+    symbol: requests.api.put
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PUT
+    package: *requests_api_2323
+  - id: requests-api-patch
+    symbol: requests.api.patch
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: PATCH
+    package: *requests_api_2323
+  - id: requests-api-delete
+    symbol: requests.api.delete
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: DELETE
+    package: *requests_api_2323
+  - id: requests-api-head
+    symbol: requests.api.head
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: HEAD
+    package: *requests_api_2323
+  - id: requests-api-options
+    symbol: requests.api.options
+    invocation: function
+    operation: request
+    channel: outbound_http
+    resource: {kind: argument, index: 0}
+    http_method: OPTIONS
+    package: *requests_api_2323
