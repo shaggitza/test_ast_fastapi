@@ -14,13 +14,21 @@ values fail closed. This is validated input metadata, not authentication that
 the file was actually emitted by Graphify. The node-link v1 field allowlists
 remain unchanged.
 
-Every node and edge must identify a project-confined regular `source_file`;
-the adapter retains bounded exact-byte reads, SHA-256 hashes, mutation checks,
-and the exclusive receipt writer. A producer edge may omit `source_location`.
+Project-backed nodes and edges must identify a project-confined regular
+`source_file`; the adapter retains bounded exact-byte reads, SHA-256 hashes,
+mutation checks, and the exclusive receipt writer. A producer edge may omit `source_location`.
 When the location is absent or null, its source file is still checked and
 hashed, but its span is unknown and the edge cannot be traversed. A supplied
 raw marker must be one line (`L<number>`) and fit the exact source bytes. Raw
 line markers are never widened into byte or column ranges.
+
+The narrowly recognized external-import stub is source-less: its pinned
+constructor ID, label, package specifier, and AST import edge from a checked
+project file must agree. Its normalized source path, hash, and span are absent;
+the raw package spelling is retained only as `unverified_source_file` diagnostic
+metadata. Neither the stub nor its spanless import edge supplies traversal or
+endpoint-binding evidence. Unknown or malformed stub identities still undergo
+ordinary project-path validation and fail closed.
 
 Raw `source` and `target` values are retained as producer endpoint order. That
 does not establish a directed graph: the pinned producer's raw form is not the
