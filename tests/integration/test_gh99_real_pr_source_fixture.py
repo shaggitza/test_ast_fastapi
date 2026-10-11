@@ -15,8 +15,15 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "sql_transactions" / "logstot
 
 def test_fixture_snapshot_hashes_and_frozen_call_spans_match() -> None:
     provenance = json.loads((FIXTURE / "provenance.json").read_text())
+    provenance_bytes = (FIXTURE / "provenance.json").read_bytes()
     labels_path = FIXTURE / "expected-static-labels-before-prediction.json"
     labels_bytes = labels_path.read_bytes()
+    assert hashlib.sha256(provenance_bytes).hexdigest() == (
+        "35780a865030890264f9fb2609dd8c3058be392a63ecd5476dd4d4f7d736f306"
+    )
+    assert hashlib.sha256(labels_bytes).hexdigest() == (
+        "9dcd1bbe3462e57d66e316f5862f017c95a9b7d6dfc6929aeebdc3216b50b68b"
+    )
     assert (
         hashlib.sha256(labels_bytes).hexdigest()
         == provenance["selection"]["preprediction_label_sha256"]
@@ -55,6 +62,22 @@ def test_fixture_snapshot_hashes_and_frozen_call_spans_match() -> None:
     assert labels["typed_applicability_expected_before_prediction"][
         "expected_typed_result"
     ].startswith("No typed SQLAlchemy")
+
+    adjudication = json.loads((FIXTURE / "independent-source-adjudication-r7.json").read_text())
+    assert adjudication["schema"] == "gh99-real-pr-independent-source-adjudication-v1"
+    assert adjudication["reviewed_inputs"]["fixture_provenance_sha256"] == (
+        hashlib.sha256(provenance_bytes).hexdigest()
+    )
+    assert adjudication["reviewed_inputs"]["preprediction_labels_sha256"] == (
+        hashlib.sha256(labels_bytes).hexdigest()
+    )
+    assert adjudication["reviewed_inputs"]["physical_call_span_count"] == 18
+    assert adjudication["reviewed_candidate"]["commit"] == (
+        "6f16089942581d0bd39e8aa3d3b1d283881e882d"
+    )
+    assert adjudication["limitations"]["typed_sqlalchemy_positive"] is False
+    assert adjudication["limitations"]["durability"] is False
+    assert adjudication["collection_protocol"]["strict_per_attempt_cap_compliant"] is False
 
     encoded_patch = (FIXTURE / "github-pr.patch.base64").read_bytes()
     assert hashlib.sha256(encoded_patch).hexdigest() == provenance["patch"]["encoded_sha256"]
