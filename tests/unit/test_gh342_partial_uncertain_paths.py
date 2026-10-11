@@ -101,3 +101,40 @@ def test_keyword_only_forwarding_preserves_partial_capture(tmp_path: Path) -> No
     report = mapper.analyze_diff(_diff(2))
     assert {item.endpoint.identifier for item in report.candidate_endpoints} == {"GET /keyword"}
     assert mapper.analyze_diff(_diff(5)).candidate_endpoints == []
+
+
+def test_variadic_forwarding_reports_lost_partial_capture(tmp_path: Path) -> None:
+    mapper = _mapper(
+        tmp_path,
+        "def forward(*args):\n    return invoke(*args)\n"
+        "@app.get('/variadic')\ndef variadic():\n"
+        "    bound = partial(run, callback=first)\n"
+        "    return forward(bound)\n",
+    )
+    report = mapper.analyze_diff(_diff(2))
+    assert report.candidate_endpoints == []
+    assert report.analysis_completeness == "partial"
+    assert any(
+        item.cap == "UNRESOLVED_PARTIAL_ARGUMENTS"
+        and item.file_path == str(tmp_path / "main.py")
+        and item.call_line == 10
+        for item in report.analysis_limitations
+    )
+
+
+def test_inline_partial_into_variadic_signature_reports_capture_limit(tmp_path: Path) -> None:
+    mapper = _mapper(
+        tmp_path,
+        "def forward(*args):\n    return invoke(*args)\n"
+        "@app.get('/inline-variadic')\ndef inline_variadic():\n"
+        "    return forward(partial(first))\n",
+    )
+    report = mapper.analyze_diff(_diff(2))
+    assert report.candidate_endpoints == []
+    assert report.analysis_completeness == "partial"
+    assert any(
+        item.cap == "INLINE_PARTIAL_ARGUMENT_UNSUPPORTED"
+        and item.file_path == str(tmp_path / "main.py")
+        and item.call_line == 9
+        for item in report.analysis_limitations
+    )

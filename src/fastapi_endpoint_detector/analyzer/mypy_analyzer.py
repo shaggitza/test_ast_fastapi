@@ -4024,17 +4024,50 @@ class MypyAnalyzer:
         skip_implicit_receiver: bool = False,
     ) -> dict[str, _PartialValue] | None:
         """Forward partial objects only through a strict, finite argument binding."""
-        from mypy.nodes import ARG_NAMED, ARG_NAMED_OPT, ARG_OPT, ARG_POS, NameExpr
+        from mypy.nodes import (
+            ARG_NAMED,
+            ARG_NAMED_OPT,
+            ARG_OPT,
+            ARG_POS,
+            ARG_STAR,
+            ARG_STAR2,
+            NameExpr,
+        )
 
+        inline_partial = any(
+            self._is_explicit_partial_call(expression, caller_imports or {})
+            for expression in call.args
+        )
+        tracked_partial = any(
+            isinstance(expression, NameExpr) and expression.name in caller_environment
+            for expression in call.args
+        )
+        hidden_partial = bool(caller_environment) and any(
+            kind in (ARG_STAR, ARG_STAR2) for kind in call.arg_kinds
+        )
+
+        def unresolved_binding() -> None:
+            if inline_partial:
+                self._record_analysis_limitation("INLINE_PARTIAL_ARGUMENT_UNSUPPORTED")
+            elif tracked_partial or hidden_partial:
+                self._record_analysis_limitation("UNRESOLVED_PARTIAL_ARGUMENTS")
+
+        # Detect inline captures before unsupported formal signatures can
+        # discard them; the raw constructor AST is not a captured partial.
+        if inline_partial:
+            unresolved_binding()
+            return None
         arguments = list(getattr(self._actual_function(function), "arguments", ()))
         if skip_implicit_receiver:
             if not arguments:
+                unresolved_binding()
                 return None
             arguments = arguments[1:]
         if any(
             argument.kind not in (ARG_POS, ARG_OPT, ARG_NAMED, ARG_NAMED_OPT)
             for argument in arguments
         ):
+            unresolved_binding()
             return None
         positional_arguments = [
             argument for argument in arguments if argument.kind in (ARG_POS, ARG_OPT)
@@ -4048,19 +4081,19 @@ class MypyAnalyzer:
         for expression, kind, name in zip(call.args, call.arg_kinds, call.arg_names, strict=True):
             if kind == ARG_POS and name is None:
                 if positional >= len(positional_arguments):
+                    unresolved_binding()
                     return None
                 parameter = positional_arguments[positional].variable.name
                 positional += 1
             elif kind == ARG_NAMED and name in by_name:
                 parameter = name
             else:
+                unresolved_binding()
                 return None
             if parameter in assigned:
+                unresolved_binding()
                 return None
             assigned.add(parameter)
-            if self._is_explicit_partial_call(expression, caller_imports or {}):
-                self._record_analysis_limitation("INLINE_PARTIAL_ARGUMENT_UNSUPPORTED")
-                return None
             if isinstance(expression, NameExpr):
                 value = caller_environment.get(expression.name)
                 if value is not None:
@@ -4071,6 +4104,7 @@ class MypyAnalyzer:
             if argument.kind in (ARG_POS, ARG_NAMED)
         }
         if required - assigned:
+            unresolved_binding()
             return None
         return environment
 
