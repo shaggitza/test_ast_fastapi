@@ -44,7 +44,7 @@ dependencies = [
     "pyyaml>=6.0",
     "tomli>=2.0; python_version < '3.11'",
     "unidiff>=1.0.0",
-    "packaging==26.0",
+    "packaging==26.3",
     "mypy==1.19.1",
 ]
 
