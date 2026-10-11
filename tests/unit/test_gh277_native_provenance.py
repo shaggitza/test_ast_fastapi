@@ -1451,6 +1451,8 @@ def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
 ) -> None:
     baseline = tmp_path / "baseline"
     target = tmp_path / "target"
+    app_entry: str | None = None
+    bootstrap_entry: str | None = None
     if selection == "factory_return":
         before = (
             "from fastapi import FastAPI\n"
@@ -1467,7 +1469,7 @@ def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
             "    return selected\n"
         )
         after = before.replace("return selected", "return alternate")
-        options = {"app_entry": "main:create_app"}
+        app_entry = "main:create_app"
         expected = {"GET /first", "GET /second"}
     elif selection == "bootstrap_registration":
         before = (
@@ -1482,7 +1484,7 @@ def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
             "    register(unused, '/unrelated')\n"
         )
         after = before.replace("'/old'", "'/new'")
-        options = {"bootstrap_entry": "main:run"}
+        bootstrap_entry = "main:run"
         expected = {"GET /old", "GET /new"}
     else:
         before = (
@@ -1499,7 +1501,7 @@ def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
             "    unrelated(unused)\n"
         )
         after = before.replace("path='/old'", "path='/new'")
-        options = {"bootstrap_entry": "main:run"}
+        bootstrap_entry = "main:run"
         expected = {"GET /old", "GET /new"}
     for root, source in ((baseline, before), (target, after)):
         root.mkdir()
@@ -1517,9 +1519,10 @@ def test_public_two_snapshot_selected_factory_and_bootstrap_owner_changes(
         target / "main.py",
         config=Config(parser=ParserConfig(follow_imports=False)),
         baseline_app_path=baseline / "main.py",
+        app_entry=app_entry,
+        bootstrap_entry=bootstrap_entry,
         secure_ast=True,
         use_cache=False,
-        **options,
     ).analyze_diff(diff)
     assert {item.endpoint.identifier for item in report.candidate_endpoints} == expected
     assert all(item.endpoint.identifier != "GET /unrelated" for item in report.candidate_endpoints)
