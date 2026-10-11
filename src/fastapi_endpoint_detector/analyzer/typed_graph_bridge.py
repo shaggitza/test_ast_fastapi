@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import stat
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -25,7 +23,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
-    from fastapi_endpoint_detector.analyzer.source_inventory import SourceInventory
     from fastapi_endpoint_detector.models.endpoint import Endpoint
 
 
@@ -33,77 +30,54 @@ class TypedGraphBridgeError(RuntimeError):
     """The retained mypy result cannot be authenticated as this inventory."""
 
 
-def _read_current_source(path: Path, max_bytes: int) -> bytes:
-    """Read one regular source file without following a final symlink."""
-    before = path.lstat()
-    if not stat.S_ISREG(before.st_mode) or path.is_symlink() or before.st_size > max_bytes:
-        raise TypedGraphBridgeError("source is not a bounded regular file")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(path, flags)
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-            or opened.st_size > max_bytes
-        ):
-            raise TypedGraphBridgeError("source identity changed during bounded open")
-        with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            data = stream.read(max_bytes + 1)
-        after = path.lstat()
-        if (
-            len(data) > max_bytes
-            or (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino)
-            or path.is_symlink()
-        ):
-            raise TypedGraphBridgeError("source identity changed during bounded read")
-        return data
-    finally:
-        os.close(descriptor)
-
-
-def retained_typed_build(
+def retained_typed_build(  # noqa: PLR0912, PLR0915
     analyzer: MypyAnalyzer,
-    inventory: SourceInventory,
+    inventory: Any,
 ) -> tuple[TypedBuild, dict[str, bytes], str]:
     """Wrap the exact retained ordinary build after bounded source verification."""
-    if inventory.limitations or inventory.unresolved_imports or inventory.module_collisions:
+    if (
+        getattr(inventory, "limitations", ())
+        or inventory.unresolved_imports
+        or getattr(inventory, "module_collisions", ())
+    ):
         raise TypedGraphBridgeError("source inventory is limited or ambiguous")
     if len(inventory.files) > 4096:
         raise TypedGraphBridgeError("source inventory exceeds the file budget")
-    result = analyzer._build_result
-    if result is None:
+    retained = analyzer.framework_phase_build_snapshot()
+    if retained is None:
         raise TypedGraphBridgeError("mypy build is not retained")
-    if (
-        analyzer._built_source_fingerprint is not None
-        and analyzer._built_source_fingerprint != analyzer._cache_fingerprint()[0]
-    ):
-        raise TypedGraphBridgeError("retained build no longer matches analyzer inputs")
+    result, retained_map = retained
 
     retained_sources: dict[str, bytes] = {}
     module_paths: dict[str, str] = {}
     total_bytes = 0
     source_digests: list[tuple[str, str]] = []
     for record in sorted(inventory.files, key=lambda item: item.module):
+        if record.module in module_paths:
+            raise TypedGraphBridgeError("source inventory contains duplicate module identities")
         path = Path(record.path)
         if path.is_symlink() or not path.is_file():
             raise TypedGraphBridgeError(f"symlink or unavailable source: {record.module}")
         resolved = path.resolve(strict=True)
+        if str(resolved) in module_paths.values():
+            raise TypedGraphBridgeError("source inventory aliases one file under multiple modules")
         if not resolved.is_relative_to(Path(inventory.root).resolve(strict=True)):
             raise TypedGraphBridgeError(f"source escapes inventory root: {record.module}")
-        retained = analyzer._analysis_source_snapshots.get(str(resolved))
-        if retained is None or len(retained) > analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES:
+        source = retained_map.get(str(resolved))
+        if source is None or len(source) > analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES:
             raise TypedGraphBridgeError(f"retained source bytes unavailable: {record.module}")
-        total_bytes += len(retained)
+        total_bytes += len(source)
         if total_bytes > analyzer.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES:
             raise TypedGraphBridgeError("retained source snapshot exceeds byte budget")
-        digest = hashlib.sha256(retained).hexdigest()
-        current = _read_current_source(path, analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES)
+        digest = hashlib.sha256(source).hexdigest()
+        current = analyzer.framework_phase_source_bytes(
+            resolved, max_bytes=analyzer.MAX_LAMBDA_SOURCE_FILE_BYTES
+        )
         state = result.graph.get(record.module)
         if (
             digest != record.sha256
-            or current != retained
-            or hashlib.sha1(retained).hexdigest() != getattr(state, "source_hash", None)
+            or current != source
+            or hashlib.sha1(source).hexdigest() != getattr(state, "source_hash", None)
             or state is None
             or state.tree is None
             or state.tree.fullname != record.module
@@ -111,7 +85,7 @@ def retained_typed_build(
             or Path(state.path).resolve() != resolved
         ):
             raise TypedGraphBridgeError(f"retained typed source differs: {record.module}")
-        retained_sources[record.module] = retained
+        retained_sources[record.module] = source
         module_paths[record.module] = str(resolved)
         source_digests.append((record.module, digest))
 
@@ -123,7 +97,9 @@ def retained_typed_build(
     }
     if not option_fields:
         raise TypedGraphBridgeError("effective mypy options are unavailable")
-    effective_options = {key: repr(getattr(options, key)) for key in sorted(option_fields)}
+    effective_options = tuple((key, repr(getattr(options, key))) for key in sorted(option_fields))
+    if analyzer.framework_phase_build_options() != effective_options:
+        raise TypedGraphBridgeError("retained mypy options changed after the build")
     config_fingerprint = hashlib.sha256(
         json.dumps(
             {
@@ -173,12 +149,13 @@ def retained_typed_build(
 
 def exact_handler_bindings(
     typed: TypedBuild,
-    inventory: SourceInventory,
+    inventory: Any,
     endpoints: Iterable[Endpoint],
 ) -> tuple[EndpointOccurrenceBinding, ...]:
     """Bind only handlers with exact module/name/path/line identity."""
     records = {record.module: record for record in inventory.files}
     bindings: list[EndpointOccurrenceBinding] = []
+    occurrence_ids: set[str] = set()
     for endpoint in endpoints:
         handler = endpoint.handler
         record = records.get(handler.module)
@@ -209,9 +186,24 @@ def exact_handler_bindings(
             int(node.end_column),
         )
         conditional = endpoint.discovery_status.value == "conditional"
+        provenance = endpoint.native_provenance
+        if provenance is not None:
+            registration = provenance.registration
+            occurrence_id = (
+                f"{endpoint.identifier}@{registration.source_span.file_path.resolve()}"
+                f":{registration.source_span.start_line}:{registration.source_span.start_column}"
+                f"#{registration.occurrence_order}"
+            )
+        else:
+            occurrence_id = (
+                f"{endpoint.identifier}@{Path(handler.file_path).resolve()}:{handler.line_number}"
+            )
+        if occurrence_id in occurrence_ids:
+            raise TypedGraphBridgeError("duplicate physical route occurrence identity")
+        occurrence_ids.add(occurrence_id)
         bindings.append(
             EndpointOccurrenceBinding(
-                occurrence_id=endpoint.identifier,
+                occurrence_id=occurrence_id,
                 endpoint_id=endpoint.identifier,
                 symbol=expected_fullname,
                 span=span,
@@ -224,7 +216,7 @@ def exact_handler_bindings(
 
 def build_shadow_graph(
     analyzer: MypyAnalyzer,
-    inventory: SourceInventory,
+    inventory: Any,
     endpoints: Iterable[Endpoint],
 ) -> TypedReverseGraph:
     """Build a diagnostic graph from one authenticated retained ordinary build."""
@@ -241,7 +233,7 @@ def build_shadow_graph(
 
 def query_changed_lines(
     graph: TypedReverseGraph,
-    inventory: SourceInventory,
+    inventory: Any,
     changed_lines: Iterable[tuple[str, int]],
     *,
     side: GraphSide,
@@ -257,4 +249,16 @@ def query_changed_lines(
             span = symbol.span
             if span is not None and span.path == path and span.start_line <= line <= span.end_line:
                 seeds.add(ChangedSeed(side, symbol.fullname, span))
-    return graph.query(tuple(sorted(seeds)), side=side)
+    ordered_seeds = tuple(
+        sorted(
+            seeds,
+            key=lambda seed: (
+                seed.side,
+                seed.symbol,
+                seed.span.path if seed.span is not None else "",
+                seed.span.start_line if seed.span is not None else 0,
+                seed.span.start_column if seed.span is not None else 0,
+            ),
+        )
+    )
+    return graph.query(ordered_seeds, side=side)

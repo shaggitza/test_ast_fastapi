@@ -2569,15 +2569,22 @@ class ChangeMapper:
             for item in diff_files
             for line in DiffParser.get_changed_line_numbers(item)[0]
         ]
-        if target_changes:
+        if target_changes and not (
+            self.source_inventory.limitations
+            or self.source_inventory.unresolved_imports
+            or self.source_inventory.module_collisions
+        ):
             try:
                 graph = build_shadow_graph(
                     self.mypy_analyzer,
-                    cast("Any", self.source_inventory),
+                    _mypy_inventory(self.source_inventory)[0],
                     self.registry.get_all(),
                 )
                 result = query_changed_lines(
-                    graph, cast("Any", self.source_inventory), target_changes, side="target"
+                    graph,
+                    _mypy_inventory(self.source_inventory)[0],
+                    target_changes,
+                    side="target",
                 )
                 shadow.append(("target", graph, result))
             except (OSError, RuntimeError, TypeError, ValueError):
@@ -2588,16 +2595,20 @@ class ChangeMapper:
                 for item in diff_files
                 for line in DiffParser.get_changed_line_numbers(item)[1]
             ]
-            if baseline_changes:
+            if baseline_changes and not (
+                self.baseline_source_inventory.limitations
+                or self.baseline_source_inventory.unresolved_imports
+                or self.baseline_source_inventory.module_collisions
+            ):
                 try:
                     graph = build_shadow_graph(
                         self.baseline_mypy_analyzer,
-                        cast("Any", self.baseline_source_inventory),
+                        _mypy_inventory(self.baseline_source_inventory)[0],
                         self.baseline_mypy_registry.get_all(),
                     )
                     result = query_changed_lines(
                         graph,
-                        cast("Any", self.baseline_source_inventory),
+                        _mypy_inventory(self.baseline_source_inventory)[0],
                         baseline_changes,
                         side="baseline",
                     )

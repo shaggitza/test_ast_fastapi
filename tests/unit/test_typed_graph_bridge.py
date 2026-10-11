@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.source_inventory import (
     SourceInventory,
@@ -77,3 +78,45 @@ def test_source_mutation_after_mypy_build_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(TypedGraphBridgeError):
         retained_typed_build(analyzer, inventory)
+
+
+def test_mypy_options_changed_after_build_are_rejected(tmp_path: Path) -> None:
+    _app, inventory, analyzer = _source(tmp_path)
+    options = analyzer._build_result.manager.options
+    original = options.follow_imports
+    options.follow_imports = "skip" if original != "skip" else "normal"
+
+    with pytest.raises(TypedGraphBridgeError):
+        retained_typed_build(analyzer, inventory)
+
+
+def test_public_mapper_invokes_snapshot_graph_without_replacing_legacy_report(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def helper() -> int: return 1\n"
+        "@app.get('/')\n"
+        "def handler() -> int: return helper()\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(app, secure_ast=True, use_cache=False)
+    diff = (
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -3,1 +3,1 @@\n"
+        "-def helper() -> int: return 0\n"
+        "+def helper() -> int: return 1\n"
+    )
+
+    report = mapper.analyze_diff(diff)
+
+    assert len(mapper._typed_graph_shadow) == 1
+    side, graph, query = mapper._typed_graph_shadow[0]
+    assert side == "target"
+    assert any(edge.caller == "app.handler" and edge.callee == "app.helper" for edge in graph.edges)
+    assert any(item.occurrence.symbol == "app.handler" for item in query.evidence)
+    assert report.candidate_endpoints == report.affected_endpoints
