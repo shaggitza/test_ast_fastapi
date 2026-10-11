@@ -5,10 +5,10 @@
     "max_depth": 1,
     "track_transitive": false
   },
-  "analyzer_revision": "c610ed795bc05cc5fe3ad9db13e4d50f8052dd19",
+  "analyzer_revision": "92d55a50be4e06251ea52b7c1bff7a2ec1f33643",
   "analyzer_source_hashes": {
     "src/fastapi_endpoint_detector/analyzer/effect_contract_auditor.py": "sha256:21f84cc5e12ebc654ce4933dad972d49c136621d0aef2f75398e6e4cd1217aa0",
-    "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:774dbd76e2a0c39431ca2dd745e9efcfdbfb1d3397aeadd58ec5afe2d4273480",
+    "src/fastapi_endpoint_detector/analyzer/mypy_analyzer.py": "sha256:d8e0678c719b47159904108c34327cb5118b1db861be7c6b05a3f225e4bcefc6",
     "src/fastapi_endpoint_detector/models/effect_contract.py": "sha256:eeb0cad6e84dfff7ee8fb030aeb58e4071396990e545808faa17add0b6ceb1b0",
     "src/fastapi_endpoint_detector/models/endpoint.py": "sha256:2690e956c8022b3967cf53ab2600e89b1e887b9994c108d5bcf71f19e102c25c"
   },

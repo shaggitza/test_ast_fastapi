@@ -14,6 +14,7 @@ import heapq
 import itertools
 import json
 import os
+import platform
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -2063,6 +2064,10 @@ class ChangeMapper:
             max_depth=effective_depth,
             cache_enabled=self.use_cache,
             resolver_versions=(f"mypy@{self.mypy_analyzer.resolver_version}",),
+            verified_mypy_source_hashes=self.mypy_analyzer.verified_mypy_source_hashes,
+            verified_package_source_hashes=self.mypy_analyzer.verified_package_source_hashes,
+            verified_package_versions=self.mypy_analyzer.verified_package_versions,
+            target_python_version=platform.python_version(),
         )
 
     def _attach_contract_evidence(
@@ -2116,6 +2121,7 @@ class ChangeMapper:
                         resolver=occurrence.resolver,
                         resolver_version=occurrence.resolver_version,
                         matcher=audit.provenance.matcher,
+                        package_applicability=audit.scope.package_applicability,
                         resource_identity_status=resource_identity.status,
                         resource_identity=resource_identity,
                         limitations=(

@@ -32,6 +32,466 @@ from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, 
 class TestMypyAnalyzerBasic:
     """Basic tests for MypyAnalyzer."""
 
+    def test_adjacent_metadata_is_scanned_once_per_package_root(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "multi_pkg"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("from . import api\n", encoding="utf-8")
+        (package / "api.pyi").write_text("def call() -> None: ...\n", encoding="utf-8")
+        dist_info = tmp_path / "multi-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text("Name: multi-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from multi_pkg import api\ndef handler() -> None:\n    api.call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/single-metadata-scan",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_read_bytes = Path.read_bytes
+        metadata_reads = 0
+
+        def counted_read_bytes(path: Path) -> bytes:
+            nonlocal metadata_reads
+            if path.name == "METADATA" and path.parent == dist_info:
+                metadata_reads += 1
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        # One read authenticates the package during the build and one fingerprints
+        # the typed environment; per-module rescans would multiply this count.
+        assert metadata_reads == 2
+        assert analyzer.verified_package_versions["multi-pkg"] == "1.0"
+
+    @pytest.mark.parametrize("remote_root_name", ["site-packages", "typed-vendor"])
+    def test_metadata_in_unrelated_parsed_root_cannot_authenticate_local_package(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        remote_root_name: str,
+    ) -> None:
+        local = tmp_path / "local"
+        motor = local / "motor"
+        motor.mkdir(parents=True)
+        (motor / "__init__.pyi").write_text("from .motor_asyncio import Client\n")
+        (motor / "motor_asyncio.pyi").write_text("class Client: ...\n")
+        remote = tmp_path / remote_root_name
+        pymongo = remote / "pymongo"
+        pymongo.mkdir(parents=True)
+        (pymongo / "__init__.pyi").write_text("class MongoClient: ...\n")
+        metadata = remote / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n")
+        # Even a contradictory alias hint from the unrelated distribution
+        # cannot overrule the conventional Motor import resolved locally.
+        (metadata / "top_level.txt").write_text("pymongo\n")
+        app = local / "app.py"
+        app.write_text(
+            "from motor.motor_asyncio import Client\n"
+            "from pymongo import MongoClient\n"
+            "mongo: MongoClient\n"
+            "def handler() -> Client:\n    return Client()\n"
+        )
+        monkeypatch.setenv("MYPYPATH", str(remote))
+        endpoint = Endpoint(
+            path="/unbound-motor",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=4),
+        )
+        cache = tmp_path / "cache.json"
+        cold = MypyAnalyzer(local, module_root=local)
+        cold.set_cache_path(cache)
+        cold.analyze_endpoints([endpoint])
+        assert (
+            Path(cold._build_result.graph["pymongo"].path)
+            .resolve()
+            .is_relative_to(remote.resolve())
+        )
+        assert "motor/__init__.pyi" in cold.verified_mypy_source_hashes
+        assert "motor/motor_asyncio.pyi" in cold.verified_mypy_source_hashes
+        assert "motor" not in cold.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in cold.verified_package_source_hashes
+
+        warm = MypyAnalyzer(local, module_root=local)
+        warm.set_cache_path(cache)
+        warm.analyze_endpoints([endpoint])
+        assert "motor" not in warm.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in warm.verified_package_source_hashes
+
+    def test_split_package_declarations_cannot_be_bound_to_one_root_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        local = tmp_path / "local"
+        motor = local / "motor"
+        motor.mkdir(parents=True)
+        (motor / "__init__.pyi").write_text("from .core import AgnosticCollection\n")
+        (motor / "core.pyi").write_text("class AgnosticCollection: ...\n")
+        remote = tmp_path / "typed-vendor"
+        remote_motor = remote / "motor"
+        remote_motor.mkdir(parents=True)
+        (remote_motor / "motor_asyncio.pyi").write_text("class AsyncIOMotorClient: ...\n")
+        metadata = remote / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n")
+        app = local / "app.py"
+        app.write_text(
+            "from motor.core import AgnosticCollection\n"
+            "from motor.motor_asyncio import AsyncIOMotorClient\n"
+            "def handler() -> AgnosticCollection:\n    return AgnosticCollection()\n"
+        )
+        monkeypatch.setenv("MYPYPATH", str(remote))
+        endpoint = Endpoint(
+            path="/split-motor",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=3),
+        )
+        cache = tmp_path / "split-motor-cache.json"
+
+        cold = MypyAnalyzer(local, module_root=local)
+        cold.set_cache_path(cache)
+        cold.analyze_endpoints([endpoint])
+        graph = cold._build_result.graph
+        assert Path(graph["motor.core"].path).resolve().is_relative_to(local.resolve())
+        assert Path(graph["motor.motor_asyncio"].path).resolve().is_relative_to(remote.resolve())
+        assert "motor" not in cold.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in cold.verified_package_source_hashes
+
+        warm = MypyAnalyzer(local, module_root=local)
+        warm.set_cache_path(cache)
+        warm.analyze_endpoints([endpoint])
+        assert "motor" not in warm.verified_package_versions
+        assert "motor-3.6.0.dist-info/METADATA" not in warm.verified_package_source_hashes
+
+    def test_unparsed_top_level_alias_does_not_block_coherent_metadata_cold_and_warm(
+        self, tmp_path: Path
+    ) -> None:
+        package = tmp_path / "foo"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("class Client: ...\n", encoding="utf-8")
+        metadata = tmp_path / "motor-3.6.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: motor\nVersion: 3.6.0\n", encoding="utf-8")
+        (metadata / "top_level.txt").write_text("foo\nfoo_cli\n", encoding="utf-8")
+        app = tmp_path / "app.py"
+        app.write_text("from foo import Client\ndef handler() -> Client:\n    return Client()\n")
+        endpoint = Endpoint(
+            path="/coherent-alias",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=2),
+        )
+        cache = tmp_path / "coherent-alias-cache.json"
+
+        for analyzer in (MypyAnalyzer(tmp_path), MypyAnalyzer(tmp_path)):
+            analyzer.set_cache_path(cache)
+            analyzer.analyze_endpoints([endpoint])
+            assert analyzer.verified_package_versions["motor"] == "3.6.0"
+
+    def test_invalid_top_level_metadata_fails_closed_without_aborting_other_analysis(
+        self, tmp_path: Path
+    ) -> None:
+        good = tmp_path / "good_pkg"
+        good.mkdir()
+        (good / "__init__.pyi").write_text("class Good: ...\n", encoding="utf-8")
+        good_metadata = tmp_path / "good-pkg-1.0.dist-info"
+        good_metadata.mkdir()
+        (good_metadata / "METADATA").write_text("Name: good-pkg\nVersion: 1.0\n", encoding="utf-8")
+
+        bad = tmp_path / "odd_import"
+        bad.mkdir()
+        (bad / "__init__.pyi").write_text("class Bad: ...\n", encoding="utf-8")
+        bad_metadata = tmp_path / "unrelated-name-9.0.dist-info"
+        bad_metadata.mkdir()
+        (bad_metadata / "METADATA").write_text(
+            "Name: unrelated-name\nVersion: 9.0\n", encoding="utf-8"
+        )
+        (bad_metadata / "top_level.txt").write_bytes(b"odd_import\ninvalid:\xff\n")
+
+        app = tmp_path / "app.py"
+        app.write_text(
+            "from good_pkg import Good\nfrom odd_import import Bad\n"
+            "def handler() -> tuple[Good, Bad]:\n    return Good(), Bad()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/malformed-alias",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=3),
+        )
+        cache = tmp_path / "malformed-alias-cache.json"
+
+        for analyzer in (MypyAnalyzer(tmp_path), MypyAnalyzer(tmp_path)):
+            analyzer.set_cache_path(cache)
+            analyzer.analyze_endpoints([endpoint])
+            assert analyzer.verified_package_versions["good-pkg"] == "1.0"
+            assert "unrelated-name" not in analyzer.verified_package_versions
+            assert "unrelated-name-9.0.dist-info/METADATA" not in (
+                analyzer.verified_package_source_hashes
+            )
+
+    def test_unreadable_package_source_leaves_source_pin_unverified(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "unreadable_pkg"
+        package.mkdir()
+        typed_source = package / "__init__.pyi"
+        typed_source.write_text("def call() -> None: ...\n", encoding="utf-8")
+        dist_info = tmp_path / "unreadable-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text(
+            "Name: unreadable-pkg\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from unreadable_pkg import call\ndef handler() -> None:\n    call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/unreadable-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_read_bytes = Path.read_bytes
+
+        def denied(path: Path) -> bytes:
+            if path == typed_source:
+                raise PermissionError("synthetic read denial")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", denied)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert "unreadable_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
+        # Mypy parsed this file, but we could not bind those parsed bytes to
+        # the disk snapshot; package metadata cannot stand in for that proof.
+        assert "unreadable-pkg" not in analyzer.verified_package_versions
+        assert "unreadable-pkg-1.0.dist-info/METADATA" not in (
+            analyzer.verified_package_source_hashes
+        )
+
+    def test_source_changed_after_mypy_parse_cannot_authenticate_source_pin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        package = tmp_path / "racing_pkg"
+        package.mkdir()
+        typed_source = package / "__init__.pyi"
+        original = b"def call() -> None: ...\n"
+        typed_source.write_bytes(original)
+        dist_info = tmp_path / "racing-pkg-1.0.dist-info"
+        dist_info.mkdir()
+        (dist_info / "METADATA").write_text("Name: racing-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from racing_pkg import call\ndef handler() -> None:\n    call()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/changed-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        original_build = mypy.build.build
+
+        def mutate_after_parse(*args: Any, **kwargs: Any) -> Any:
+            result = original_build(*args, **kwargs)
+            typed_source.write_bytes(b"def call() -> int: ...\n")
+            return result
+
+        monkeypatch.setattr(mypy.build, "build", mutate_after_parse)
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        assert "racing_pkg/__init__.pyi" not in analyzer.verified_mypy_source_hashes
+        # The final source snapshot detected a parse/read race, so all package
+        # pins from that build are cleared together with the stale source pin.
+        assert "racing-pkg" not in analyzer.verified_package_versions
+        assert "racing-pkg-1.0.dist-info/METADATA" not in (analyzer.verified_package_source_hashes)
+
+    def test_cached_call_sites_are_recomputed_when_dependency_typing_changes(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / "typing_dep.pyi").write_text(
+            "class Store:\n    def put(self, value: str) -> None: ...\n", encoding="utf-8"
+        )
+        dist_info = tmp_path / "typing-dep-1.0.dist-info"
+        dist_info.mkdir()
+        metadata = dist_info / "METADATA"
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from typing_dep import Store\ndef handler() -> None:\n    Store().put('value')\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/cache-typing",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        cache_path = tmp_path / "typed-cache.json"
+
+        cold = MypyAnalyzer(tmp_path)
+        cold.set_cache_path(cache_path)
+        first = next(iter(cold.analyze_endpoints([endpoint]).values()))
+        first_site = next(site for site in first.resolved_call_sites if site.line == 3)
+        assert first_site.status.value == "exact"
+        assert first_site.canonical_symbol == "typing_dep.Store.put"
+
+        (tmp_path / "typing_dep.pyi").write_text("class Store:\n    pass\n", encoding="utf-8")
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+        )
+        warm = MypyAnalyzer(tmp_path)
+        warm.set_cache_path(cache_path)
+        second = next(iter(warm.analyze_endpoints([endpoint]).values()))
+        second_site = next(site for site in second.resolved_call_sites if site.line == 3)
+        assert second_site.status.value != "exact"
+        assert warm.verified_package_versions["typing-dep"] == "1.1"
+
+    @pytest.mark.parametrize("change", ["stub", "removed-stub", "metadata"])
+    def test_partial_cache_is_invalidated_when_typed_environment_changes(
+        self, tmp_path: Path, change: str
+    ) -> None:
+        stub = tmp_path / "typing_dep.pyi"
+        stub.write_text(
+            "class Store:\n    def put(self, value: str) -> None: ...\n", encoding="utf-8"
+        )
+        dist_info = tmp_path / "typing-dep-1.0.dist-info"
+        dist_info.mkdir()
+        metadata = dist_info / "METADATA"
+        metadata.write_text(
+            "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.0\n", encoding="utf-8"
+        )
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from typing_dep import Store\n"
+            "def handler_a() -> None:\n    Store().put('value')\n"
+            "def handler_b() -> None:\n    Store().put('other')\n",
+            encoding="utf-8",
+        )
+        endpoint_a = Endpoint(
+            path="/cache-partial-a",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler_a", module="app", file_path=app_path, line_number=2),
+        )
+        endpoint_b = Endpoint(
+            path="/cache-partial-b",
+            methods=[EndpointMethod.POST],
+            handler=HandlerInfo(name="handler_b", module="app", file_path=app_path, line_number=4),
+        )
+        cache_path = tmp_path / "partial-typed-cache.json"
+        cold = MypyAnalyzer(tmp_path)
+        cold.set_cache_path(cache_path)
+        first = next(iter(cold.analyze_endpoints([endpoint_a]).values()))
+        assert any(
+            site.canonical_symbol == "typing_dep.Store.put" for site in first.resolved_call_sites
+        )
+
+        if change == "stub":
+            stub.write_text("class Store:\n    pass\n", encoding="utf-8")
+        elif change == "removed-stub":
+            stub.unlink()
+            metadata.write_text(
+                "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+            )
+        else:
+            metadata.write_text(
+                "Metadata-Version: 2.1\nName: typing-dep\nVersion: 1.1\n", encoding="utf-8"
+            )
+
+        warm = MypyAnalyzer(tmp_path)
+        warm.set_cache_path(cache_path)
+        analyzed: list[str] = []
+        original_analyze = warm.analyze_endpoint
+
+        def record_analyze(endpoint: Endpoint) -> EndpointDependencies:
+            analyzed.append(endpoint.path)
+            return original_analyze(endpoint)
+
+        warm.analyze_endpoint = record_analyze  # type: ignore[method-assign]
+        results = warm.analyze_endpoints([endpoint_a, endpoint_b])
+
+        assert analyzed == [endpoint_a.path, endpoint_b.path]
+        if change == "stub":
+            assert all(
+                site.canonical_symbol != "typing_dep.Store.put"
+                for site in results[warm._endpoint_key(endpoint_a)].resolved_call_sites
+            )
+        elif change == "removed-stub":
+            assert warm.verified_mypy_source_hashes.get("typing_dep.pyi") is None
+        else:
+            assert warm.verified_package_versions["typing-dep"] == "1.1"
+
+    @pytest.mark.parametrize(
+        "declared_name", ["beautifulsoup4", "ZoPe.Interface", "zope__..interface"]
+    )
+    def test_distribution_metadata_uses_declared_name_not_import_name(
+        self, tmp_path: Path, declared_name: str
+    ) -> None:
+        package = tmp_path / "bs4"
+        package.mkdir()
+        (package / "__init__.pyi").write_text("class Soup: ...\n", encoding="utf-8")
+        metadata = tmp_path / "beautifulsoup4-1.2.3.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text(
+            f"Metadata-Version: 2.1\nName: {declared_name}\nVersion: 1.2.3\n",
+            encoding="utf-8",
+        )
+        (metadata / "top_level.txt").write_text("bs4\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from bs4 import Soup\ndef handler() -> Soup:\n    return Soup()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/distribution-name",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+
+        expected_name = "beautifulsoup4" if declared_name == "beautifulsoup4" else "zope-interface"
+        assert analyzer.verified_package_versions[expected_name] == "1.2.3"
+        assert analyzer.verified_package_source_hashes[
+            "beautifulsoup4-1.2.3.dist-info/METADATA"
+        ].startswith("sha256:")
+
+    def test_empty_package_initializer_retains_verified_source_hash(self, tmp_path: Path) -> None:
+        package = tmp_path / "empty_pkg"
+        package.mkdir()
+        (package / "__init__.pyi").write_bytes(b"")
+        (package / "api.pyi").write_text("def emit() -> None: ...\n", encoding="utf-8")
+        metadata = tmp_path / "empty_pkg-1.0.dist-info"
+        metadata.mkdir()
+        (metadata / "METADATA").write_text("Name: empty-pkg\nVersion: 1.0\n", encoding="utf-8")
+        app_path = tmp_path / "app.py"
+        app_path.write_text(
+            "from empty_pkg.api import emit\ndef handler() -> None:\n    emit()\n",
+            encoding="utf-8",
+        )
+        endpoint = Endpoint(
+            path="/empty-source",
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
+        )
+        analyzer = MypyAnalyzer(tmp_path)
+        analyzer.analyze_endpoints([endpoint], use_cache=False)
+        assert analyzer.verified_mypy_source_hashes["empty_pkg/__init__.pyi"] == (
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        )
+        assert "empty_pkg.py" not in analyzer.verified_mypy_source_hashes
+        assert analyzer.verified_package_versions["empty-pkg"] == "1.0"
+
     def test_expression_branches_preserve_possible_and_dead_lambda_execution(
         self, tmp_path: Path
     ) -> None:
