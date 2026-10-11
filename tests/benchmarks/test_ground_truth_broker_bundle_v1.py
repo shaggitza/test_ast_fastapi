@@ -26,7 +26,7 @@ def make_bundle(tmp_path: Path) -> bundle_v1.Bundle:
         tmp_path / "sealed",
         ("broker/__init__.py", "broker/worker.py"),
         profile_sha256=digest(b"profile-v2"),
-        toolchain_sha256=digest(b"python-3.12-lock"),
+        toolchain_sha256=bundle_v1.compute_toolchain_sha256(()),
         entrypoint="broker/__init__.py",
     )
 
@@ -86,13 +86,24 @@ def test_closure_rejects_dynamic_transitive_imports(tmp_path: Path) -> None:
         bundle_v1.derive_source_closure(source, "pkg/__init__.py")
 
 
+def test_only_literal_process_libc_loader_is_trusted(tmp_path: Path) -> None:
+    source = tmp_path / "checkout"
+    source.mkdir()
+    entry = source / "entry.py"
+    entry.write_text("import ctypes\nctypes.CDLL(None, use_errno=True)\n")
+    assert bundle_v1.derive_source_closure(source, "entry.py") == ("entry.py",)
+    entry.write_text("import ctypes\nctypes.CDLL('libother.so', use_errno=True)\n")
+    with pytest.raises(bundle_v1.BundleError, match="toolchain allowlist"):
+        bundle_v1.derive_source_closure(source, "entry.py")
+
+
 def test_sealed_zip_launcher_executes_only_descriptor_snapshot(tmp_path: Path) -> None:
     source = tmp_path / "checkout"
     source.mkdir()
     entry = source / "entry.py"
     entry.write_text("print('sealed-entrypoint')\n")
     profile_sha = digest(b"profile")
-    toolchain_sha = digest(b"python-toolchain")
+    toolchain_sha = bundle_v1.compute_toolchain_sha256(())
     bundle = bundle_v1.materialize_bundle(
         source, tmp_path / "sealed", ("entry.py",),
         profile_sha256=profile_sha, toolchain_sha256=toolchain_sha,
@@ -250,8 +261,9 @@ def test_acquire_launch_lease_reads_receipt_and_retains_lock_through_finalize(
         "schema_version": 2,
         "protocol": bundle_v1.LAUNCH_PROFILE_PROTOCOL,
         "production_profile_sha256": digest(b"production-v1-root"),
-        "toolchain_sha256": digest(b"python-3.12-lock"),
+        "toolchain_sha256": bundle_v1.compute_toolchain_sha256(()),
         "entrypoint": "broker/__init__.py",
+        "external_imports": [],
     }
     profile.write_bytes(bundle_v1._canonical(profile_value))
     receipt_value = {

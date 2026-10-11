@@ -19,6 +19,7 @@ import re
 import stat
 import subprocess
 import sys
+import sysconfig
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -55,6 +56,13 @@ def derive_source_closure(source_root: Path, entrypoint: str) -> tuple[str, ...]
         except (SyntaxError, ValueError) as exc:
             raise BundleError("source closure contains invalid Python") from exc
         package = name.rsplit("/", 1)[0].replace("/", ".") if "/" in name else ""
+        ctypes_aliases = {
+            alias.asname or alias.name
+            for node in tree.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "ctypes"
+        }
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 modules = [alias.name for alias in node.names]
@@ -69,16 +77,29 @@ def derive_source_closure(source_root: Path, entrypoint: str) -> tuple[str, ...]
                     base = ".".join(parts[: len(parts) - node.level + 1] + ([base] if base else []))
                 modules = [base] if base else []
                 modules.extend(f"{base}.{alias.name}" for alias in node.names if base)
-            elif isinstance(node, ast.Call) and (
-                (isinstance(node.func, ast.Name) and node.func.id in {"__import__", "exec", "eval"})
-                or (
+            elif isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in {
+                    "__import__",
+                    "exec",
+                    "eval",
+                }:
+                    raise BundleError(
+                        "dynamic import or code loading prevents source closure proof"
+                    )
+                if (
                     isinstance(node.func, ast.Attribute)
                     and node.func.attr
                     in {"import_module", "find_spec", "load_module", "CDLL", "PyDLL"}
-                )
-            ):
-                raise BundleError("dynamic import or code loading prevents source closure proof")
+                    and not _trusted_process_libc_call(node, ctypes_aliases)
+
+                ):
+                    raise BundleError(
+                        "dynamic import/native loading is outside the trusted "
+                        "toolchain allowlist"
+                    )
             else:
+                continue
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
             for module in modules:
                 candidate = module.replace(".", "/") + ".py"
@@ -88,6 +109,100 @@ def derive_source_closure(source_root: Path, entrypoint: str) -> tuple[str, ...]
                         candidate if (source_root / candidate).is_file() else package_init
                     )
     return tuple(sorted(seen))
+
+
+def derive_external_imports(source_root: Path, closure: tuple[str, ...]) -> tuple[str, ...]:
+    """List non-stdlib top-level imports not included in the source closure."""
+    external: set[str] = set()
+    for relative in closure:
+        tree = ast.parse(_read_regular(source_root / relative), filename=relative)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name.split(".", 1)[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules = [node.module.split(".", 1)[0]]
+            else:
+                continue
+            for module in modules:
+                if module in sys.stdlib_module_names:
+                    continue
+                if (source_root / f"{module}.py").is_file() or (source_root / module).is_dir():
+                    continue
+                external.add(module)
+    return tuple(sorted(external))
+
+
+def compute_toolchain_sha256(external_imports: tuple[str, ...]) -> str:
+    """Hash the interpreter and registered external import package bytes.
+
+    This identity is rechecked at lease boundaries. It is not a defense against
+    a hostile same-UID process racing an import; deployment must run from a
+    controlled, receipt-bound toolchain.
+    """
+    executable = Path(sys.executable).resolve(strict=True)
+    identity: dict[str, Any] = {
+        "protocol": "ground-truth-python-toolchain-identity-v1",
+        "executable_sha256": _sha(_read_regular(executable)),
+        "version": sys.version,
+        "implementation": sys.implementation.name,
+        "cache_tag": sys.implementation.cache_tag,
+        "soabi": sysconfig.get_config_var("SOABI"),
+        "external": {},
+    }
+    external: dict[str, Any] = {}
+    expanded_imports = set(external_imports)
+    if "pydantic" in expanded_imports:
+        # These are pydantic 2's source/toolchain dependencies; all package
+        # bytes are included below, so a different dependency tree changes ID.
+        expanded_imports.update({"pydantic_core", "annotated_types", "typing_extensions"})
+    for name in sorted(expanded_imports):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise BundleError("external import name is invalid")
+        # Resolve only under the interpreter's registered site-package roots;
+        # do not execute import finders or accept caller-selected package paths.
+        search_roots = {
+            Path(sysconfig.get_paths()[key]).resolve(strict=True)
+            for key in ("purelib", "platlib")
+            if sysconfig.get_paths().get(key)
+        }
+        candidates: list[Path] = []
+        for directory in sorted(search_roots):
+            package_dir = directory / name
+            module_file = directory / f"{name}.py"
+            if package_dir.is_dir() and not package_dir.is_symlink():
+                candidates.extend(
+                    item
+                    for item in package_dir.rglob("*")
+                    if item.is_file() and item.suffix in {".py", ".so", ".pyd"}
+                )
+            if module_file.is_file() and not module_file.is_symlink():
+                candidates.append(module_file)
+        files: dict[str, str] = {}
+        for candidate in sorted(set(candidates)):
+            if candidate.is_file():
+                files[str(candidate.resolve())] = _sha(_read_regular(candidate.resolve()))
+        if not files:
+            raise BundleError("registered external import has no verifiable files")
+        external[name] = files
+    identity["external"] = external
+    return _sha(_canonical(identity))
+
+
+def _trusted_process_libc_call(node: ast.Call, ctypes_aliases: set[str]) -> bool:
+    """Allow only the audited ctypes handle for the current process libc."""
+    return (
+        isinstance(node.func, ast.Attribute)
+        and node.func.attr == "CDLL"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id in ctypes_aliases
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Constant)
+        and node.args[0].value is None
+        and len(node.keywords) == 1
+        and node.keywords[0].arg == "use_errno"
+        and isinstance(node.keywords[0].value, ast.Constant)
+        and node.keywords[0].value.value is True
+    )
 
 
 class BundleError(RuntimeError):
@@ -198,6 +313,7 @@ def materialize_bundle(
     profile_sha256: str,
     toolchain_sha256: str,
     entrypoint: str | None = None,
+    trusted_external_imports: tuple[str, ...] = (),
 ) -> Bundle:
     """Copy an explicit, finite transitive Python source closure into a new directory.
 
@@ -216,6 +332,9 @@ def materialize_bundle(
         closure = derive_source_closure(source_root, entrypoint)
         if tuple(selected) != closure:
             raise BundleError("source files differ from statically derived import closure")
+    external_imports = derive_external_imports(source_root, tuple(selected))
+    if tuple(sorted(set(trusted_external_imports))) != external_imports:
+        raise BundleError("external imports differ from committed toolchain allowlist")
     sources = {item: source_root / item for item in selected}
     captured = {item: _read_regular(path) for item, path in sources.items()}
     file_hashes = {item: _sha(raw) for item, raw in captured.items()}
@@ -227,6 +346,7 @@ def materialize_bundle(
         "files": file_hashes,
         "entrypoint": entrypoint,
         "closure_sha256": _sha(_canonical(list(selected))),
+        "external_imports": list(external_imports),
     }
     raw_manifest = _canonical(manifest)
     try:
@@ -270,9 +390,17 @@ def verify_bundle(bundle: Bundle) -> None:
         "files": bundle.files,
         "entrypoint": manifest.get("entrypoint"),
         "closure_sha256": _sha(_canonical(sorted(bundle.files))),
+        "external_imports": manifest.get("external_imports"),
     }
     if manifest != expected or set(bundle.files) != set(bundle.sources):
         raise BundleError("bundle manifest identity mismatch")
+    external_imports = manifest.get("external_imports")
+    if (
+        not isinstance(external_imports, list)
+        or any(not isinstance(item, str) for item in external_imports)
+        or compute_toolchain_sha256(tuple(external_imports)) != bundle.toolchain_sha256
+    ):
+        raise BundleError("registered Python toolchain identity changed")
     for relative, expected_hash in bundle.files.items():
         source_raw = _read_regular(bundle.sources[relative])
         sealed_path = bundle.root / relative
@@ -540,8 +668,9 @@ def acquire_launch_lease(
         raise BundleError("bundle manifest digest differs from expected bundle identity")
     manifest = _json(raw_manifest)
     if (not isinstance(manifest, dict)
-            or set(manifest) != {"schema_version", "protocol", "profile_sha256",
-                                 "toolchain_sha256", "files", "entrypoint", "closure_sha256"}
+                or set(manifest) != {"schema_version", "protocol", "profile_sha256",
+                                     "toolchain_sha256", "files", "entrypoint", "closure_sha256",
+                                     "external_imports"}
             or manifest.get("schema_version") != 1
             or manifest.get("protocol") != PROTOCOL
             or not isinstance(manifest.get("files"), dict)):
@@ -565,14 +694,15 @@ def acquire_launch_lease(
     profile_value = _json(_read_regular(launch_profile_path))
     if (not isinstance(profile_value, dict)
             or set(profile_value) != {"schema_version", "protocol", "production_profile_sha256",
-                                     "toolchain_sha256", "entrypoint"}
+                                     "toolchain_sha256", "entrypoint", "external_imports"}
             or profile_value.get("schema_version") != 2
             or profile_value.get("protocol") != LAUNCH_PROFILE_PROTOCOL
             or profile_value.get("toolchain_sha256") != toolchain_sha256
             or profile_value.get("production_profile_sha256") != bundle.profile_sha256
             or profile_value.get("entrypoint") not in bundle.files
             or manifest.get("entrypoint") != profile_value.get("entrypoint")
-            or manifest.get("closure_sha256") != _sha(_canonical(sorted(bundle.files)))):
+            or manifest.get("closure_sha256") != _sha(_canonical(sorted(bundle.files)))
+            or manifest.get("external_imports") != profile_value.get("external_imports")):
         raise BundleError("launch profile is not the exact new versioned bundle profile")
     if receipt.runtime_attestation_sha256 != runtime_attestation_sha256:
         raise BundleError("runtime attestation differs from receipt")
@@ -653,6 +783,8 @@ def launch_with_escrow_lease(
         f"runpy.run_module({module!r},run_name='__main__')"
     )
     child_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    child_env["GT_BUNDLE_FD"] = str(sealed_fd)
+    child_env["GT_BROKER_FREEZE_FD"] = str(lease.lease.fd)
     if env:
         child_env.update(env)
     try:
@@ -669,3 +801,52 @@ def launch_with_escrow_lease(
     finally:
         os.close(sealed_fd)
     return process
+
+
+def adopt_inherited_launch_lease(
+    *,
+    freeze_fd: int,
+    bundle_root: Path,
+    source_root: Path,
+    receipt_path: Path,
+    receipt_sha256: str,
+) -> LaunchLeaseHandle:
+    """Adopt the broker-inherited lease descriptor without reacquiring its flock."""
+    value, _ = _read_receipt_file(receipt_path, receipt_sha256)
+    receipt = FreezeReceipt.parse(value)
+    manifest_path = bundle_root / _MANIFEST
+    manifest_raw = _read_regular(manifest_path)
+    manifest = _json(manifest_raw)
+    if not isinstance(manifest, dict) or _sha(manifest_raw) != receipt.bundle_sha256:
+        raise BundleError("inherited lease bundle identity is invalid")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not all(
+        isinstance(path, str) and isinstance(digest, str) and _DIGEST.fullmatch(digest)
+        for path, digest in files.items()
+    ):
+        raise BundleError("inherited lease source inventory is invalid")
+    bundle = Bundle(
+        bundle_root,
+        receipt.bundle_sha256,
+        manifest["profile_sha256"],
+        manifest["toolchain_sha256"],
+        files,
+        {path: source_root / _relative(path) for path in files},
+    )
+    lease = FreezeLease.__new__(FreezeLease)
+    lease.path = Path(receipt.lease_path)
+    lease.bundle = bundle
+    lease.receipt = receipt
+    lease.receipt_path = receipt_path
+    lease.receipt_sha256 = receipt_sha256
+    lease.fd = freeze_fd
+    status = os.fstat(freeze_fd)
+    lease._identity = (status.st_dev, status.st_ino)
+    handle = LaunchLeaseHandle(lease)
+    lease.check(
+        runtime_attestation_sha256=receipt.runtime_attestation_sha256,
+        binding_sha256=receipt.binding_sha256,
+        launch_profile_sha256=receipt.launch_profile_sha256,
+        toolchain_sha256=receipt.toolchain_sha256,
+    )
+    return handle

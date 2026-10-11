@@ -4,13 +4,14 @@
   "title": "Explicit launch profile for the immutable Python broker bundle",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "protocol", "production_profile_sha256", "toolchain_sha256", "entrypoint"],
+  "required": ["schema_version", "protocol", "production_profile_sha256", "toolchain_sha256", "entrypoint", "external_imports"],
   "properties": {
     "schema_version": {"const": 2},
     "protocol": {"const": "ground-truth-python-broker-launch-profile-v2"},
     "production_profile_sha256": {"$ref": "#/$defs/sha256"},
     "toolchain_sha256": {"$ref": "#/$defs/sha256"},
-    "entrypoint": {"type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.py$"}
+    "entrypoint": {"type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.py$"},
+    "external_imports": {"type": "array", "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"}, "uniqueItems": true}
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}

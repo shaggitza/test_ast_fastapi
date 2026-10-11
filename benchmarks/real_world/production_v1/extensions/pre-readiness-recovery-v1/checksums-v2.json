@@ -1,0 +1,20 @@
+{
+  "schema_version": 2,
+  "profile_id": "ground-truth-review-canary-pre-readiness-recovery-v2",
+  "files": {
+    "benchmarks/real_world/ground_truth_pre_readiness_recovery_official_v2.py": "sha256:d7f4397b4e2aea959b4ffe26776d94ba8f5827772b7f2df2ba6b3654a287eff0",
+    "benchmarks/real_world/ground_truth_pre_readiness_recovery_v1.py": "sha256:a956f1940a7d6d3a0302febbd2c9f13c585d9f4f5dc71308034eedf9aed21acf",
+    "benchmarks/real_world/production_v1/checksums-v1.json": "sha256:7248217e4f24675007b0e6994d65b64901ff9fab4c09798125893efce600812f",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/README.md": "sha256:41d86bb34752dbf31dea5b8739c4f99758c94a897f45279289657c93f75ad4da",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/grant-schema-v1.json": "sha256:b71b10d202e37beed693e918d9678da46d1b7dfd009cc59ab723c97e6b58d26b",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/policy-v1.json": "sha256:4cb4c04fb8c6bc2b8d7e2d1fad44f1a90a78c17e0babaf2dbec6a2d9a3db1835",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/retry-run-schema-v1.json": "sha256:8027d9a093990d9818c7ded47c11de9f28a1e4e97fe4e5593494e1871562eb04",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/retry-state-schema-v1.json": "sha256:97fd7866c5015a480af4c0728060932f3783ad1a52bcd615569ded7bb5486478",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/broker-source-profile-v2.json": "sha256:d2383a73000e64a6285065d1c092043b26129a922dd414b0351beffc4589b702",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/ground_truth_retry_broker_v2.py": "sha256:651f11b501958eda6aa6bcf18f013883616b8a84aa3d9cd2ed84d2e81c145877",
+    "benchmarks/real_world/ground_truth_submit_retry_v2.py": "sha256:7ea86eef7cbdab09aa1d2d5c9422ea429bfcda10669f3140d25439005e2adf91",
+    "benchmarks/real_world/ground_truth_broker_bundle_v1.py": "sha256:693fdfde454ba3760320134250e6d62728e7e14451d9775fd3efb73dd6db90b6",
+    "benchmarks/real_world/production_v2/broker-launch-profile-schema-v2.json": "sha256:8948943dbe47d7dd1896ed6ba62e4b631a560b436c07d0e8d59ffa5fd231d28c",
+    "benchmarks/real_world/production_v2/broker-freeze-receipt-schema-v1.json": "sha256:3e15dbcb8ab90c657ee3b546ec0bc8d6a5f12adc53997dd4dbc078d4cb4cdfc1"
+  }
+}
