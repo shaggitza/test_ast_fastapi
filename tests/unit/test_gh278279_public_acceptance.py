@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 
 
@@ -177,3 +179,70 @@ def test_public_mapper_prunes_post_terminal_nested_and_deferred_lambda_changes(
     assert [item.endpoint.identifier for item in invoked_lambda.candidate_endpoints] == [
         "GET /items"
     ]
+
+
+@pytest.mark.parametrize(
+    ("class_source", "expression"),
+    [
+        (
+            "class Meta(type):\n"
+            "    def __call__(cls): return Proxy()\n"
+            "class Concrete(metaclass=Meta):\n"
+            "    def __call__(self): return intended()\n",
+            "Concrete()()",
+        ),
+        (
+            "class Concrete:\n"
+            "    def __new__(cls): return Proxy()\n"
+            "    def __call__(self): return intended()\n",
+            "Concrete()()",
+        ),
+        (
+            "class Concrete:\n"
+            "    def __init__(self, value): pass\n"
+            "    def __call__(self): return intended()\n",
+            "Concrete(1)()",
+        ),
+        (
+            "class Concrete:\n"
+            "    def __init__(self, value): pass\n"
+            "    def __call__(self): return intended()\n",
+            "Concrete(value=1)()",
+        ),
+        (
+            "class HookBase:\n"
+            "    def __init_subclass__(cls): pass\n"
+            "class Concrete(HookBase):\n"
+            "    def __call__(self): return intended()\n",
+            "Concrete()()",
+        ),
+    ],
+)
+def test_public_mapper_abstains_when_construction_is_unproven(
+    tmp_path: Path, class_source: str, expression: str
+) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def intended():\n"
+        "    return 1\n\n"
+        "class Proxy:\n"
+        "    def __call__(self): return 0\n\n" + class_source,
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\n"
+        "from helpers import Concrete\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def handler():\n"
+        f"    return {expression}\n",
+        encoding="utf-8",
+    )
+    report = ChangeMapper(tmp_path, secure_ast=True, use_cache=False).analyze_diff(
+        _diff("helpers.py", 2, "    return 2")
+    )
+    assert report.candidate_endpoints == []
+    assert report.analysis_completeness == "partial"
+    assert any(
+        "UNPROVEN_CALLABLE_CONSTRUCTION" in warning and "main.py:6" in warning
+        for warning in report.warnings
+    )

@@ -14,7 +14,6 @@ import heapq
 import itertools
 import json
 import os
-import platform
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -2011,7 +2010,7 @@ class ChangeMapper:
                 )
             added_lines, removed_lines = DiffParser.get_changed_line_numbers(diff_file)
             processed_added: set[int] = set()
-            if not added_lines and not removed_lines and diff_file.path.suffix == ".py":
+            if not added_lines and not removed_lines and diff_file.is_python_file:
                 for registry, changed_path, side in (
                     (self.registry, diff_file.path, "target"),
                     (
@@ -2020,7 +2019,7 @@ class ChangeMapper:
                         "baseline",
                     ),
                 ):
-                    if registry is None:
+                    if registry is None or changed_path.suffix != ".py":
                         continue
                     for endpoint in registry.get_by_file(changed_path):
                         reported_endpoint = (
@@ -2132,6 +2131,13 @@ class ChangeMapper:
                 raise ChangeMapperError(
                     "effect contract audit requires complete typed endpoint analysis"
                 )
+            if (
+                dependencies.analysis_incomplete
+                or dependencies.analysis_limitations
+                or dependencies.build_failed
+            ):
+                # A truncated call corpus cannot establish complete contract coverage.
+                return None
             rows.append((endpoint, dependencies.get_resolved_call_sites()))
         effective_depth = (
             self.config.parser.max_depth if self.config.analysis.track_transitive else 1
@@ -2149,7 +2155,6 @@ class ChangeMapper:
             verified_mypy_source_hashes=self.mypy_analyzer.verified_mypy_source_hashes,
             verified_package_source_hashes=self.mypy_analyzer.verified_package_source_hashes,
             verified_package_versions=self.mypy_analyzer.verified_package_versions,
-            target_python_version=platform.python_version(),
         )
 
     def _attach_contract_evidence(
