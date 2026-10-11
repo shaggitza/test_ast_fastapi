@@ -1,0 +1,55 @@
+{
+  "adjudicated_source_finding": {
+    "classification": "source-level conditional static stage-placement candidate",
+    "current_independent_status": "the physical spans and lexical placement were independently checked against complete frozen source files",
+    "independent_status_at_freeze": "pending; the frozen label file records its contemporaneous preprediction state",
+    "scope": "The recorded db.add calls move from before db.begin_nested() in baseline source to within its lexical context body on target, followed by db.flush() in each selected helper."
+  },
+  "collection_protocol": {
+    "original_attempt_log_sha256": "d5cebb939e490c472a8bd2378efd4cc5dd15f75391bb57fd29ab908e7dda3d7b",
+    "recorded_breach": "Attempt 5 recursive-tree metadata response was 2,097,153 bytes, one byte above 2 MiB; it was not saved or parsed.",
+    "strict_per_attempt_cap_compliant": false
+  },
+  "limitations": {
+    "canonical_truth": false,
+    "commit_reachability": false,
+    "complete_project_snapshot": false,
+    "durability": false,
+    "mapper_result": "unresolved; full-app probe exceeded 120 seconds without a result and reduced probe failed closed for missing established endpoint inventory",
+    "runtime_sql_execution": false,
+    "successful_insert_or_context_exit": false,
+    "typed_reason": "The selected helper db parameters are unannotated; caller annotation does not establish helper parameter type; SQLAlchemy is absent from the locked interpreter.",
+    "typed_sqlalchemy_positive": false,
+    "upstream_tests_executed": false
+  },
+  "review_report": {
+    "path": "/tmp/gh99-real-pr-stage-independent-review-r7-20261011.md",
+    "sha256": "75a55bbe040771d5428e4033326678c6415d9db415337778a998600182e81796"
+  },
+  "review_round": "R7",
+  "review_status": "independently_reviewed_source_spans_and_lexical_placement",
+  "reviewed_candidate": {
+    "approved_base": "d1ae12af6825066a28da1ef736b6712370e0a06e",
+    "commit": "6f16089942581d0bd39e8aa3d3b1d283881e882d"
+  },
+  "reviewed_inputs": {
+    "fixture_provenance_path": "provenance.json",
+    "fixture_provenance_sha256": "35780a865030890264f9fb2609dd8c3058be392a63ecd5476dd4d4f7d736f306",
+    "functions": [
+      "ensure_watch_async",
+      "record_events_async",
+      "record_events_sync"
+    ],
+    "physical_call_span_count": 18,
+    "preprediction_labels_path": "expected-static-labels-before-prediction.json",
+    "preprediction_labels_sha256": "9dcd1bbe3462e57d66e316f5862f017c95a9b7d6dfc6929aeebdc3216b50b68b"
+  },
+  "schema": "gh99-real-pr-independent-source-adjudication-v1",
+  "selected_source_case": {
+    "baseline_source_snapshot": "296f36f2950ddce3aa15f9efbf0c2b4b18785038",
+    "merge_commit": "27900274b8caf6ffb6911a4e78339212340ed17c",
+    "pull_request": 7,
+    "repository": "wagga40/LogsTotal",
+    "target_source_snapshot": "27900274b8caf6ffb6911a4e78339212340ed17c"
+  }
+}

@@ -1,0 +1,456 @@
+{
+  "boundary_and_promotion_limits": [
+    "The exact file documents caller-owned transaction and contains no db.commit() call in the three selected functions.",
+    "The changed tests include downstream commits in test code, but tests are source evidence only and are not executed; those commits are not attributed to the helper endpoint.",
+    "The analyzer must not treat the Savepoint context exit as a selected successful release/rollback, must not infer runtime session identity or operation success, and must retain pending/not-established rather than durable.",
+    "Two annotated route call sites are present in app/routers/jobs.py and database.py defines AsyncSession, but the modified helper parameters themselves remain untyped.",
+    "This frozen source label set does not establish a complete project snapshot, all routes, all callers, runtime application behavior, or an independently adjudicated label."
+  ],
+  "classification_scope": "Source-level, conditional, static; independent adjudication remains pending. No runtime execution, test execution against upstream, successful SQL operation, runtime transaction identity, or database durability inferred.",
+  "expected_source_observations": [
+    {
+      "async": true,
+      "baseline": {
+        "calls": [
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 91,
+            "method": "add",
+            "object": "watch",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 93,
+            "method": "begin_nested",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 94,
+            "method": "flush",
+            "receiver": "db"
+          }
+        ],
+        "path": "app/job_watch.py"
+      },
+      "expected_static_label": "stage call db.add moves from before a nested-transaction context to within its lexical body, followed by db.flush; the exact source calls are present. The source does not contain an outer commit call. This is a syntactic stage-to-savepoint/flush candidate only.",
+      "function": "ensure_watch_async",
+      "target": {
+        "calls": [
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 95,
+            "method": "begin_nested",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 96,
+            "method": "add",
+            "object": "watch",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 97,
+            "method": "flush",
+            "receiver": "db"
+          }
+        ],
+        "path": "app/job_watch.py"
+      }
+    },
+    {
+      "async": true,
+      "baseline": {
+        "calls": [
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 177,
+            "method": "add",
+            "object": "event",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 182,
+            "method": "begin_nested",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 183,
+            "method": "flush",
+            "receiver": "db"
+          }
+        ],
+        "path": "app/job_watch.py"
+      },
+      "expected_static_label": "stage call db.add moves inside a nested-transaction context and is followed by db.flush. IntegrityError is caught inside the per-row loop; a broad outer Exception catch returns an empty list. No outer commit call exists. This is syntactic stage-to-savepoint/flush only.",
+      "function": "record_events_async",
+      "target": {
+        "calls": [
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 185,
+            "method": "begin_nested",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 186,
+            "method": "add",
+            "object": "event",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 187,
+            "method": "flush",
+            "receiver": "db"
+          }
+        ],
+        "path": "app/job_watch.py"
+      }
+    },
+    {
+      "async": false,
+      "baseline": {
+        "calls": [
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 218,
+            "method": "add",
+            "object": "event",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 220,
+            "method": "begin_nested",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "cfeb88d76772e616ea101f56194ce5a917ffc8a5",
+            "line": 221,
+            "method": "flush",
+            "receiver": "db"
+          }
+        ],
+        "path": "app/job_watch.py"
+      },
+      "expected_static_label": "stage call db.add moves inside a nested-transaction context and is followed by db.flush. IntegrityError is caught per row; a broad outer Exception catch returns an empty list. No outer commit call exists. This is syntactic stage-to-savepoint/flush only.",
+      "function": "record_events_sync",
+      "target": {
+        "calls": [
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 223,
+            "method": "begin_nested",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 224,
+            "method": "add",
+            "object": "event",
+            "receiver": "db"
+          },
+          {
+            "git_blob_sha": "aae1d493d0afb0236024a13bb4a75b4e5f2bcba4",
+            "line": 225,
+            "method": "flush",
+            "receiver": "db"
+          }
+        ],
+        "path": "app/job_watch.py"
+      }
+    }
+  ],
+  "labeling_basis": "Full baseline and target source files plus the changed source tests and static route/database context; labels are handwritten from exact source spans before running this analyzer.",
+  "physical_call_spans": [
+    {
+      "call_text": "db.add(watch)",
+      "column": 4,
+      "end_column": 17,
+      "end_line": 91,
+      "function": "ensure_watch_async",
+      "line": 91,
+      "method": "add",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.begin_nested()",
+      "column": 19,
+      "end_column": 36,
+      "end_line": 93,
+      "function": "ensure_watch_async",
+      "line": 93,
+      "method": "begin_nested",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.add(event)",
+      "column": 12,
+      "end_column": 25,
+      "end_line": 177,
+      "function": "record_events_async",
+      "line": 177,
+      "method": "add",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.add(event)",
+      "column": 12,
+      "end_column": 25,
+      "end_line": 218,
+      "function": "record_events_sync",
+      "line": 218,
+      "method": "add",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.flush()",
+      "column": 18,
+      "end_column": 28,
+      "end_line": 94,
+      "function": "ensure_watch_async",
+      "line": 94,
+      "method": "flush",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.begin_nested()",
+      "column": 27,
+      "end_column": 44,
+      "end_line": 182,
+      "function": "record_events_async",
+      "line": 182,
+      "method": "begin_nested",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.begin_nested()",
+      "column": 21,
+      "end_column": 38,
+      "end_line": 220,
+      "function": "record_events_sync",
+      "line": 220,
+      "method": "begin_nested",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.flush()",
+      "column": 20,
+      "end_column": 30,
+      "end_line": 221,
+      "function": "record_events_sync",
+      "line": 221,
+      "method": "flush",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.flush()",
+      "column": 26,
+      "end_column": 36,
+      "end_line": 183,
+      "function": "record_events_async",
+      "line": 183,
+      "method": "flush",
+      "receiver": "db",
+      "side": "base",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    {
+      "call_text": "db.begin_nested()",
+      "column": 19,
+      "end_column": 36,
+      "end_line": 95,
+      "function": "ensure_watch_async",
+      "line": 95,
+      "method": "begin_nested",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.add(watch)",
+      "column": 12,
+      "end_column": 25,
+      "end_line": 96,
+      "function": "ensure_watch_async",
+      "line": 96,
+      "method": "add",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.flush()",
+      "column": 18,
+      "end_column": 28,
+      "end_line": 97,
+      "function": "ensure_watch_async",
+      "line": 97,
+      "method": "flush",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.begin_nested()",
+      "column": 27,
+      "end_column": 44,
+      "end_line": 185,
+      "function": "record_events_async",
+      "line": 185,
+      "method": "begin_nested",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.add(event)",
+      "column": 20,
+      "end_column": 33,
+      "end_line": 186,
+      "function": "record_events_async",
+      "line": 186,
+      "method": "add",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.begin_nested()",
+      "column": 21,
+      "end_column": 38,
+      "end_line": 223,
+      "function": "record_events_sync",
+      "line": 223,
+      "method": "begin_nested",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.add(event)",
+      "column": 20,
+      "end_column": 33,
+      "end_line": 224,
+      "function": "record_events_sync",
+      "line": 224,
+      "method": "add",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.flush()",
+      "column": 20,
+      "end_column": 30,
+      "end_line": 225,
+      "function": "record_events_sync",
+      "line": 225,
+      "method": "flush",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    {
+      "call_text": "db.flush()",
+      "column": 26,
+      "end_column": 36,
+      "end_line": 187,
+      "function": "record_events_async",
+      "line": 187,
+      "method": "flush",
+      "receiver": "db",
+      "side": "head",
+      "source_path": "app/job_watch.py",
+      "source_sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    }
+  ],
+  "recorded_before_analyzer_output": true,
+  "schema": "gh99-real-pr-static-labels-v1",
+  "selected_identity": {
+    "merge_commit": "27900274b8caf6ffb6911a4e78339212340ed17c",
+    "pull_request": 7,
+    "repository": "wagga40/LogsTotal"
+  },
+  "selection_shortlist_sha256": "dfce62e2a5f8e9cf3d08dd273c52016effab208a31ff70883847a0eb7859c109",
+  "source_hashes": {
+    "base-app/job_watch.py": {
+      "bytes": 16585,
+      "sha256": "ca86b6a7d76ee33593ab82391e18fda4dedd9304a20bfc3ccd8c42e17e8fa0da"
+    },
+    "base-tests/test_job_watch.py": {
+      "bytes": 28990,
+      "sha256": "5322865ca690d2c267da61a5e5397478d698e2ee3d11157674c13306a304f8c4"
+    },
+    "head-app/job_watch.py": {
+      "bytes": 16968,
+      "sha256": "f2503a3fbdf0b4d3eeba78e999eb9a9fb2f7a532dc5bc851d01b59219f41edca"
+    },
+    "head-tests/test_job_watch.py": {
+      "bytes": 34872,
+      "sha256": "82bf19678ec7017fffaee112d4d8135872953c6c36c35738bdd8a00ff356b7e7"
+    },
+    "target-app/activity.py": {
+      "bytes": 17779,
+      "sha256": "a8b2c044802782ce3047651ffc5bd73a8ba5300afb9278cbb8423e603c2dfad1"
+    },
+    "target-app/database.py": {
+      "bytes": 11948,
+      "sha256": "9c08ff447961a9322cd27b59a7b012fa71df22f776fb1bf43b51a3c3bbaee6c6"
+    },
+    "target-app/main.py": {
+      "bytes": 20906,
+      "sha256": "84a02afafef4e8af7f67f11aacdaae050424ff206e32581f669ff444c5cf1c6e"
+    },
+    "target-app/routers/jobs.py": {
+      "bytes": 91798,
+      "sha256": "50d33635629a70c2e43b45f55bd54204a9d2bf470d5a0684e4c9ae4c7957717e"
+    }
+  },
+  "typed_applicability_expected_before_prediction": {
+    "callers": "The complete target app/routers/jobs.py declares db: AsyncSession in job_watch_toggle and calls ensure_watch_async; source file app/job_watch.py documents a separate synchronous Huey call path. This demonstrates caller typing but does not type the callee parameter under local MyPy analysis.",
+    "expected_typed_result": "No typed SQLAlchemy stage or boundary call should be claimed from these unannotated db calls without resolved call-site evidence. If the public mapper reports unresolved/empty typed SQL evidence, that is the expected abstention. A source-only lexical pairing is not a typed positive.",
+    "job_watch_db_parameters": "All relevant db parameters are unannotated in complete target app/job_watch.py; neither AsyncSession nor Session appears in the helper signatures.",
+    "sqlalchemy_environment": "SQLAlchemy is listed in exact project pyproject.toml, but the locked analysis interpreter has no installed SQLAlchemy package; no installation will be performed."
+  }
+}

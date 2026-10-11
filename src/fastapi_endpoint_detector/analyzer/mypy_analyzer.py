@@ -22,6 +22,7 @@ import sys
 import tempfile
 import tokenize
 from collections.abc import Callable, Iterable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import compat32
@@ -33,6 +34,14 @@ from typing import Any, ClassVar, Literal, Protocol, cast
 
 from packaging.utils import canonicalize_name
 
+from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
+    CONSUMER_PROFILE,
+    CacheAdmissionError,
+    LocalTypedCachePolicy,
+    external_snapshots_unchanged,
+    prepare_cache_run,
+    remove_run,
+)
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
@@ -621,6 +630,7 @@ class MypyAnalyzer:
         source_inventory: SourceInventory | None = None,
         no_site_packages: bool = False,
         target_platform: str | None = None,
+        typed_cache_policy: LocalTypedCachePolicy | None = None,
     ) -> None:
         """Initialize the mypy analyzer."""
         inventory_root = (
@@ -643,6 +653,8 @@ class MypyAnalyzer:
         # Ordinary analysis keeps mypy's historical environment discovery.
         self.no_site_packages = no_site_packages
         self.target_platform = target_platform
+        self.typed_cache_policy = typed_cache_policy or LocalTypedCachePolicy.disabled()
+        self.cache_admission_observation: dict[str, object] | None = None
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._active_endpoint_dependencies: EndpointDependencies | None = None
         self._active_source_file = str(self.source_root)
@@ -661,6 +673,7 @@ class MypyAnalyzer:
 
         # Mypy build results - stored to prevent GC
         self._build_result: Any = None
+        self._retained_build_options: tuple[tuple[str, str], ...] | None = None
         self._trees: dict[str, Any] = {}  # module_name -> MypyFile
         self._module_to_path: dict[str, str] = {}
         self._types_map: dict[Any, Any] = {}  # AST node -> Type
@@ -896,6 +909,7 @@ class MypyAnalyzer:
         from mypy.fscache import FileSystemCache
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
+        from mypy.util import decode_python_encoding
 
         blocked_local_modules = self._unselected_local_modules()
         if self.source_inventory is not None:
@@ -919,8 +933,26 @@ class MypyAnalyzer:
             if self._expected_source_fingerprint is not None
             else self._source_records()
         )
+        cache_plan = None
+        external_source_bytes: dict[str, bytes] = {}
+        source_texts: dict[str, str] = {}
+        project_paths: dict[str, str] = {}
+        source_hashes: dict[str, str] = {}
+        if self.typed_cache_policy.enabled:
+            try:
+                project_paths = {module: str(path.resolve()) for path, module, _ in source_records}
+                source_hashes = {module: digest for _path, module, digest in source_records}
+                for path, _module, digest in source_records:
+                    snapshot = self._source_record_snapshots.get(str(path.resolve()))
+                    if snapshot is None or hashlib.sha256(snapshot).hexdigest() != digest:
+                        raise CacheAdmissionError("project source snapshot is unavailable or stale")
+                    source_texts[str(path.resolve())] = decode_python_encoding(snapshot)
+            except (CacheAdmissionError, OSError, ValueError):
+                source_texts.clear()
+
         for py_file, module_name, _digest in source_records:
-            sources.append(BuildSource(path=str(py_file), module=module_name))
+            source_text = source_texts.get(str(py_file.resolve()))
+            sources.append(BuildSource(path=str(py_file), module=module_name, text=source_text))
             self._module_to_path[module_name] = str(py_file)
 
         # Configure mypy for full analysis with AST retention
@@ -937,8 +969,8 @@ class MypyAnalyzer:
         blocked_local_paths: set[str] | None = None
         if self.source_inventory is not None:
             blocked_local_paths = set()
-            for module_name, covers_children, path, is_stub in blocked_local_modules:
-                blocked_local_paths.add(path)
+            for module_name, covers_children, blocked_path, is_stub in blocked_local_modules:
+                blocked_local_paths.add(blocked_path)
                 # Preserve normal typed imports for installed dependencies,
                 # while preventing mypy from traversing local files rejected
                 # by inventory include, exclude, or depth policy.
@@ -955,6 +987,30 @@ class MypyAnalyzer:
         options.incremental = False
         options.check_untyped_defs = True
         options.export_types = True  # Critical for type information!
+        # Preserve inventory and hermetic policy before diagnostic mutations.
+        original_options = deepcopy(options)
+        if self.typed_cache_policy.enabled and source_texts:
+            try:
+                cache_plan, external_source_bytes = prepare_cache_run(
+                    self.typed_cache_policy,
+                    project_root=self.source_root,
+                    module_root=self.module_root,
+                    project_sources=project_paths,
+                    source_hashes=source_hashes,
+                    options=options,
+                    mypy_version=self._resolver_version,
+                    source_texts=source_texts,
+                )
+            except (CacheAdmissionError, OSError, ValueError) as exc:
+                cache_plan = None
+                self.cache_admission_observation = {
+                    "disposition": "cold_fallback",
+                    "reason": str(exc),
+                }
+        if cache_plan is not None:
+            options.incremental = True
+            options.cache_map = cache_plan.cache_map
+            options.cache_dir = str(cache_plan.run_root / "output")
 
         original_path = sys.path.copy()
         original_mypypath = os.environ.pop("MYPYPATH", None) if self.no_site_packages else None
@@ -963,6 +1019,7 @@ class MypyAnalyzer:
 
         try:
             fscache: FileSystemCache
+            cold_fscache: FileSystemCache
             if self.no_site_packages and sys.platform != "win32":
                 # mypy 1.19.1 unconditionally adds /usr/local/lib/mypy to its
                 # typeshed search paths on POSIX. Hide that one ambient fallback
@@ -1012,16 +1069,136 @@ class MypyAnalyzer:
                             raise FileNotFoundError(path)
                         return super().hash_digest(path)
 
+                # Keep a separate empty cache for any full cold fallback.
+                cold_fscache = HermeticFileSystemCache()
                 fscache = HermeticFileSystemCache()
             else:
+                cold_fscache = FileSystemCache()
                 fscache = FileSystemCache()
-            self._build_result = mypy_build(
-                sources=sources,
-                options=options,
-                fscache=fscache,
-                # mypy otherwise adds the process cwd even with no-site-packages.
-                alt_lib_path=str(self.module_root) if self.no_site_packages else None,
-            )
+            if cache_plan is not None and external_source_bytes:
+                base_fscache = fscache
+
+                class SnapshotFileSystemCache(FileSystemCache):
+                    def read(self, path: str) -> bytes:
+                        snapshot = external_source_bytes.get(str(Path(path).resolve()))
+                        return snapshot if snapshot is not None else base_fscache.read(path)
+
+                    def hash_digest(self, path: str) -> str:
+                        snapshot = external_source_bytes.get(str(Path(path).resolve()))
+                        if snapshot is not None:
+                            return hashlib.sha1(snapshot).hexdigest()
+                        return base_fscache.hash_digest(path)
+
+                    def stat_or_none(self, path: str) -> os.stat_result | None:
+                        return base_fscache.stat_or_none(path)
+
+                    def listdir(self, path: str) -> list[str]:
+                        return base_fscache.listdir(path)
+
+                fscache = SnapshotFileSystemCache()
+            warm_fallback = False
+            proof_failed = False
+            try:
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=options,
+                    fscache=fscache,
+                    # mypy otherwise adds the process cwd even with no-site-packages.
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                if cache_plan is not None:
+                    hit_modules = {
+                        module
+                        for module in cache_plan.admitted_modules
+                        if module in self._build_result.graph
+                        and getattr(self._build_result.graph[module], "tree", None) is not None
+                        and module not in self._build_result.manager.rechecked_modules
+                    }
+                    graph_source_hashes_match = hit_modules == set(
+                        cache_plan.admitted_modules
+                    ) and all(
+                        isinstance(cache_plan.expected_graph.get(module), str)
+                        and getattr(self._build_result.graph[module], "meta_source_hash", None)
+                        == cache_plan.expected_graph[module]
+                        for module in cache_plan.admitted_modules
+                    )
+                    roots_fresh = set(self._module_to_path) <= set(
+                        self._build_result.manager.rechecked_modules
+                    )
+                    cache_inputs_intact = all(
+                        hashlib.sha256(Path(cache_path).read_bytes()).hexdigest() == digest
+                        for cache_path, digest in (cache_plan.artifact_hashes or {}).items()
+                    )
+                    external_sources_unchanged = external_snapshots_unchanged(external_source_bytes)
+                    self.cache_admission_observation = {
+                        "scope": "local_synthetic_diagnostic_only",
+                        "consumer_profile": CONSUMER_PROFILE,
+                        "cache_hit_modules": sorted(hit_modules),
+                        "graph_source_hashes_match": graph_source_hashes_match,
+                        "graph_source_hashes": {
+                            module: getattr(
+                                self._build_result.graph[module], "meta_source_hash", None
+                            )
+                            for module in hit_modules
+                        },
+                        "manifest_source_hashes": {
+                            module: cache_plan.expected_graph.get(module) for module in hit_modules
+                        },
+                        "cache_artifact_sha256": sorted(
+                            (cache_plan.artifact_hashes or {}).values()
+                        ),
+                        "roots_fresh": roots_fresh,
+                        "cache_inputs_intact": cache_inputs_intact,
+                        "external_sources_unchanged": external_sources_unchanged,
+                        "warm_rechecked_modules": sorted(
+                            self._build_result.manager.rechecked_modules
+                        ),
+                        "trust_id": cache_plan.trust_id,
+                        "manifest_sha256": cache_plan.manifest_sha256,
+                    }
+                    proof_failed = (
+                        not hit_modules
+                        or not graph_source_hashes_match
+                        or not roots_fresh
+                        or not cache_inputs_intact
+                        or not external_sources_unchanged
+                    )
+            except Exception as warm_error:
+                # The boundary covers both mypy_build and every warm proof read
+                # and validation. BaseException cancellation propagates through
+                # the outer finally, which closes the staged descriptors.
+                if cache_plan is None:
+                    raise
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=original_options,
+                    fscache=cold_fscache,
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                warm_fallback = True
+                self.cache_admission_observation = {
+                    "scope": "local_synthetic_diagnostic_only",
+                    "consumer_profile": CONSUMER_PROFILE,
+                    "disposition": "cold_fallback",
+                    "reason": "warm_build_or_proof_exception",
+                    "exception_type": type(warm_error).__name__,
+                }
+            if cache_plan is not None and not warm_fallback:
+                # The paired v2 identity/report/runtime protocol is not enabled
+                # in this tranche. Keep the successful read as a private
+                # diagnostic and expose only the legacy full-cold result.
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=original_options,
+                    fscache=cold_fscache,
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                assert self.cache_admission_observation is not None
+                self.cache_admission_observation["fallback"] = (
+                    "cache_proof_failed"
+                    if proof_failed
+                    else "v2_identity_report_runtime_protocol_not_enabled"
+                )
             self._verified_mypy_source_hashes = {}
             self._verified_package_source_hashes = {}
             self._verified_package_versions = {}
@@ -1030,6 +1207,15 @@ class MypyAnalyzer:
             conflicting_package_metadata_roots: set[str] = set()
             conflicting_mypy_source_paths: set[str] = set()
             conflicting_package_source_paths: set[str] = set()
+            built_options = self._build_result.manager.options
+            option_fields = {
+                field
+                for cls in type(built_options).__mro__
+                for field in getattr(cls, "__mypyc_attrs__", ())
+            }
+            self._retained_build_options = tuple(
+                (key, repr(getattr(built_options, key))) for key in sorted(option_fields)
+            )
             analyzed_source_hashes: dict[str, str] = {}
             typed_source_snapshots: dict[str, bytes | None] = {}
             typed_source_snapshot_bytes = 0
@@ -1350,6 +1536,7 @@ class MypyAnalyzer:
             self._built_source_fingerprint = self._expected_source_fingerprint
 
         finally:
+            remove_run(cache_plan)
             sys.path = original_path
             if self.no_site_packages and original_mypypath is not None:
                 os.environ["MYPYPATH"] = original_mypypath
@@ -1359,6 +1546,10 @@ class MypyAnalyzer:
         if self._build_result is None or not self._trees:
             return None
         return self._build_result, dict(self._analysis_source_snapshots)
+
+    def framework_phase_build_options(self) -> tuple[tuple[str, str], ...] | None:
+        """Return effective mypy options captured when the retained build completed."""
+        return self._retained_build_options
 
     def framework_phase_source_bytes(self, path: Path, *, max_bytes: int) -> bytes | None:
         """Read one bounded, in-root source file without following symlinks."""
@@ -1549,6 +1740,7 @@ class MypyAnalyzer:
     ) -> None:
         """Discard one stale typed snapshot before an explicit bulk rebuild."""
         self._build_result = None
+        self._retained_build_options = None
         self._trees.clear()
         self._module_to_path.clear()
         self._types_map.clear()
@@ -2341,8 +2533,19 @@ class MypyAnalyzer:
                 qualified = (
                     fullname[len(module) + 1 :]
                     if fullname.startswith(f"{module}.")
+                    else fullname[len(module.rsplit(".", 1)[-1]) + 1 :]
+                    if fullname.startswith(f"{module.rsplit('.', 1)[-1]}.")
                     else fullname.rsplit(".", 1)[-1]
                 )
+                if qualified.endswith(".__call__"):
+                    # Mypy may expose an inherited method as if it were a
+                    # member of the provider class. Resolve the implementation
+                    # from the bounded source AST instead, so the typed seed is
+                    # attached to its actual declaring class and source body.
+                    effective_method = self._effective_dependency_call_method(file_path, qualified)
+                    if effective_method is None:
+                        continue
+                    qualified = effective_method
                 result = (
                     self._find_func_in_tree(
                         self._trees.get(module),
@@ -2357,6 +2560,56 @@ class MypyAnalyzer:
                 key = f"{module}.{result[1]}"
                 seeds[key] = min(seeds.get(key, 1), 1)
         return seeds
+
+    def _effective_dependency_call_method(self, file_path: str, qualified: str) -> str | None:
+        """Resolve one source-attested local single-inheritance callable method."""
+        class_path, separator, method_name = qualified.rpartition(".")
+        if not separator or method_name != "__call__" or "." in class_path:
+            return None
+        canonical = str(Path(file_path).resolve())
+        if canonical not in self._python_ast_cache:
+            try:
+                with Path(canonical).open("rb") as source_file:
+                    source = source_file.read(self.MAX_LAMBDA_SOURCE_FILE_BYTES + 1)
+                self._python_ast_cache[canonical] = (
+                    ast.parse(source, filename=canonical)
+                    if len(source) <= self.MAX_LAMBDA_SOURCE_FILE_BYTES
+                    else None
+                )
+            except (OSError, SyntaxError, UnicodeError, ValueError):
+                self._python_ast_cache[canonical] = None
+        tree = self._python_ast_cache[canonical]
+        if tree is None:
+            return None
+        class_name = class_path.rsplit(".", 1)[-1]
+        seen: set[str] = set()
+
+        def resolve(owner: str) -> str | None:
+            if owner in seen or len(seen) >= 16:
+                return None
+            seen.add(owner)
+            definitions = [
+                node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == owner
+            ]
+            if len(definitions) != 1:
+                return None
+            definition = definitions[0]
+            methods = [
+                node
+                for node in definition.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "__call__"
+            ]
+            if methods:
+                if len(methods) != 1 or methods[0].decorator_list:
+                    return None
+                return f"{owner}.__call__"
+            if len(definition.bases) != 1 or not isinstance(definition.bases[0], ast.Name):
+                return None
+            return resolve(definition.bases[0].id)
+
+        effective = resolve(class_name)
+        return effective
 
     def _python_dependency_closure(self, endpoint: Endpoint) -> dict[str, int]:
         """Expand explicit and source-attested runtime dependencies to bounded depth."""
