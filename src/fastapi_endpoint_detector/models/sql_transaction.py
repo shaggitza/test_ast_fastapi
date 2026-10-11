@@ -42,6 +42,14 @@ class SQLTransactionOutcome(str, Enum):
     OUTCOME_UNRESOLVED = "outcome_unresolved"
 
 
+class SQLTransactionTargetScope(str, Enum):
+    """Transaction object targeted by one boundary when source proves it."""
+
+    UNKNOWN = "unknown"
+    TRANSACTION = "transaction"
+    SAVEPOINT = "savepoint"
+
+
 class SQLTransactionBeginScopeEvidence(_StrictModel):
     """Declared transaction/savepoint scope for one exact reachable begin occurrence."""
 
@@ -237,9 +245,9 @@ class SQLTransactionPathError(ValueError):
 
 
 class SQLTransactionOrderedPath(_StrictModel):
-    """One same-scope, same-receiver straight-line stage-to-boundary relation."""
+    """One direct-scope straight-line stage-to-boundary source relation."""
 
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     id: Digest
     endpoint_id: Digest
     file_path: str = Field(min_length=1)
@@ -247,6 +255,8 @@ class SQLTransactionOrderedPath(_StrictModel):
     receiver_hash: Digest
     begin_occurrence_id: Digest | None = None
     begin_scope: TransactionScope | None = None
+    receiver_relation: Literal["same_receiver", "returned_transaction"] = "same_receiver"
+    boundary_target_scope: SQLTransactionTargetScope = SQLTransactionTargetScope.UNKNOWN
     stage_occurrence_id: Digest
     boundary_occurrence_id: Digest
     boundary: Literal["flush", "commit", "rollback"]
@@ -273,6 +283,19 @@ class SQLTransactionOrderedPath(_StrictModel):
             raise ValueError("ordered transaction path occurrence roles must be disjoint")
         if (self.begin_occurrence_id is None) != (self.begin_scope is None):
             raise ValueError("ordered begin occurrence and scope must be provided together")
+        if self.receiver_relation == "returned_transaction" and (
+            self.boundary == "flush"
+            or self.begin_occurrence_id is None
+            or self.boundary_target_scope == SQLTransactionTargetScope.UNKNOWN
+            or self.begin_scope is None
+            or self.begin_scope.value != self.boundary_target_scope.value
+        ):
+            raise ValueError("returned transaction paths require matching exact begin and target")
+        if (
+            self.receiver_relation == "same_receiver"
+            and self.boundary_target_scope != SQLTransactionTargetScope.UNKNOWN
+        ):
+            raise ValueError("same-receiver paths cannot claim a returned transaction target")
         if not self.file_path.strip() or not self.function_name.strip():
             raise ValueError("ordered transaction source identity must not be blank")
         if any(not item.strip() for item in self.limitations):
@@ -403,7 +426,7 @@ class SQLTransactionPathSummary(_StrictModel):
 class SQLTransactionPathReport(_StrictModel):
     """Content-addressed bounded straight-line and context-exit evidence."""
 
-    schema_version: Literal[5] = 5
+    schema_version: Literal[6] = 6
     status: Literal["diagnostic_only"] = "diagnostic_only"
     effect_audit_hash: Digest
     transaction_report_hash: Digest
@@ -480,6 +503,8 @@ def build_sql_transaction_ordered_path(
     boundary: Literal["flush", "commit", "rollback"],
     begin_occurrence_id: str | None = None,
     begin_scope: TransactionScope | None = None,
+    receiver_relation: Literal["same_receiver", "returned_transaction"] = "same_receiver",
+    boundary_target_scope: SQLTransactionTargetScope = SQLTransactionTargetScope.UNKNOWN,
     limitations: tuple[str, ...],
 ) -> SQLTransactionOrderedPath:
     """Construct one content-addressed ordered-path record."""
@@ -491,6 +516,8 @@ def build_sql_transaction_ordered_path(
         receiver_hash=receiver_hash,
         begin_occurrence_id=begin_occurrence_id,
         begin_scope=begin_scope,
+        receiver_relation=receiver_relation,
+        boundary_target_scope=boundary_target_scope,
         stage_occurrence_id=stage_occurrence_id,
         boundary_occurrence_id=boundary_occurrence_id,
         boundary=boundary,
@@ -504,6 +531,8 @@ def build_sql_transaction_ordered_path(
         receiver_hash=receiver_hash,
         begin_occurrence_id=begin_occurrence_id,
         begin_scope=begin_scope,
+        receiver_relation=receiver_relation,
+        boundary_target_scope=boundary_target_scope,
         stage_occurrence_id=stage_occurrence_id,
         boundary_occurrence_id=boundary_occurrence_id,
         boundary=boundary,
