@@ -906,12 +906,19 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         ),
         encoding="utf-8",
     )
+    module = ast.parse((root / "main.py").read_text(encoding="utf-8"))
+    session = next(
+        node for node in module.body if isinstance(node, ast.ClassDef) and node.name == "Session"
+    )
+    add = next(
+        node for node in session.body if isinstance(node, ast.FunctionDef) and node.name == "add"
+    )
     diff = root / "ordered.diff"
     diff.write_text(
         "diff --git a/main.py b/main.py\n"
         "--- a/main.py\n"
         "+++ b/main.py\n"
-        "@@ -8,1 +8,1 @@\n"
+        f"@@ -{add.lineno},1 +{add.lineno},1 @@\n"
         "-    def add(self, value: str) -> None: pass\n"
         "+    def add(self, value: str) -> None: return None\n",
         encoding="utf-8",
