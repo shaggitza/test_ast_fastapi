@@ -124,19 +124,21 @@ def test_analyzer_import_and_cold_fallback_without_fcntl(tmp_path: Path) -> None
 def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # noqa: PLR0911, PLR0912, PLR0915
     tmp_path: Path, case: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    main = tmp_path / "main.py"
-    helper = tmp_path / "helper.py"
+    project = tmp_path / "project"
+    project.mkdir()
+    external_root = tmp_path / "external"
+    external_root.mkdir()
+    main = project / "main.py"
+    helper = external_root / "helper.py"
     extra_consumer = "startup()\n" if case == "unknown" else ""
     main.write_text(
         "from typing import Any\nfrom helper import startup\n"
         "app: Any\napp.add_event_handler('startup', startup)\n" + extra_consumer
     )
     helper.write_text("def startup() -> None:\n    return None\n")
-    inventory = build_source_inventory(
-        tmp_path,
-        exclude_patterns=("helper.py",),
-        follow_imports=True,
-    )
+    inventory = build_source_inventory(project, follow_imports=True)
+    assert {record.relative_path for record in inventory.files} == {"main.py"}
+    assert not helper.resolve().is_relative_to(project.resolve())
     store = tmp_path / "private-store"
     store.mkdir(mode=0o700)
     store.chmod(0o700)
@@ -144,8 +146,8 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
 
     seed_cache = tmp_path / "seed-cache"
     seed_cache.mkdir()
-    seed_options = _options(tmp_path, seed_cache)
-    manifest_options = _options(tmp_path, seed_cache)
+    seed_options = _options(external_root, seed_cache)
+    manifest_options = _options(external_root, seed_cache)
     seed = build(
         [BuildSource(str(main), "main", text=main.read_text())],
         seed_options,
@@ -187,8 +189,8 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
     manifest_digest = write_seed_manifest(
         seed_policy,
         _cache_dir=seed_cache,
-        project_root=tmp_path,
-        module_root=tmp_path,
+        project_root=project,
+        module_root=external_root,
         project_sources={"main": str(main.resolve())},
         source_hashes={"main": hashlib.sha256(main.read_bytes()).hexdigest()},
         options=manifest_options,
@@ -293,7 +295,7 @@ def test_analyzer_consumes_admitted_dependency_cache_with_fresh_text_roots(  # n
 
     analyzer = MypyAnalyzer(
         main,
-        module_root=tmp_path,
+        module_root=external_root,
         source_inventory=inventory,
         typed_cache_policy=(LocalTypedCachePolicy.disabled() if case == "disabled" else policy),
     )
