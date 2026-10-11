@@ -649,6 +649,34 @@ def test_conflicting_resolution_for_one_physical_call_fails_closed(tmp_path: Pat
         _audit(tmp_path, [(first, [exact]), (second, [conflicting])])
 
 
+def test_conflicting_arguments_for_one_endpoint_context_fail_closed(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    site = _site(tmp_path, column=2)
+    first = CallArgumentEvidence(
+        source_index=0,
+        positional_index=0,
+        status=FiniteValueStatus.EXACT,
+        value_hashes=(f"sha256:{'1' * 64}",),
+    )
+    second = first.model_copy(update={"value_hashes": (f"sha256:{'2' * 64}",)})
+
+    with pytest.raises(
+        EffectContractAuditError, match="conflicting resolver records for physical call context"
+    ):
+        _audit(
+            tmp_path,
+            [
+                (
+                    endpoint,
+                    [
+                        site.model_copy(update={"arguments": (first,)}),
+                        site.model_copy(update={"arguments": (second,)}),
+                    ],
+                )
+            ],
+        )
+
+
 def test_incomplete_endpoint_corpus_and_escaping_paths_fail_closed(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path, "handler")
     loaded = _loaded(tmp_path / "effects.yaml")
@@ -1016,10 +1044,7 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
     dependencies = analyzer.analyze_endpoint(endpoint)
     sites = [site for site in dependencies.resolved_call_sites if site.line == 3]
     assert len(sites) == 1
-    if mutation == "source_removed":
-        assert sites[0].canonical_symbol is None
-    else:
-        assert sites[0].canonical_symbol == "race_pkg.emit"
+    assert sites[0].canonical_symbol == "race_pkg.emit"
     audit = audit_effect_contracts(
         load_effect_contracts(contracts),
         source_root=tmp_path,
@@ -1038,11 +1063,6 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
         assert reads == 2
         assert occurrence.audit_status == AuditCallStatus.MATCHED
         assert analyzer.verified_package_versions["race-pkg"] == "1.0"
-    elif mutation == "source_removed":
-        assert occurrence.audit_status == AuditCallStatus.AMBIGUOUS
-        assert occurrence.reason_code == "mutated_imported_callable"
-        assert analyzer.verified_package_versions == {}
-        assert analyzer.verified_package_source_hashes == {}
     else:
         assert occurrence.audit_status == AuditCallStatus.UNMATCHED
         assert occurrence.reason_code == "package_applicability_unverified"

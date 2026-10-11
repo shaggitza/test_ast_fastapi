@@ -751,11 +751,29 @@ class AnalysisReport(BaseModel):
             )
             if not producer_linked or not consumer_linked:
                 raise ValueError("resource coupling edge endpoint is absent from audit occurrence")
+            producer_context = next(
+                (
+                    item
+                    for item in producer.invocation_contexts
+                    if item.endpoint_id == edge.producer_endpoint_id
+                ),
+                None,
+            )
+            consumer_context = next(
+                (
+                    item
+                    for item in consumer.invocation_contexts
+                    if item.endpoint_id == edge.consumer_endpoint_id
+                ),
+                None,
+            )
             if (
-                producer.resource_identity is None
-                or consumer.resource_identity is None
-                or edge.resource_value_hash not in producer.resource_identity.value_hashes
-                or edge.resource_value_hash not in consumer.resource_identity.value_hashes
+                producer_context is None
+                or consumer_context is None
+                or producer_context.resource_identity is None
+                or consumer_context.resource_identity is None
+                or edge.resource_value_hash not in producer_context.resource_identity.value_hashes
+                or edge.resource_value_hash not in consumer_context.resource_identity.value_hashes
             ):
                 raise ValueError("resource coupling edge has no exact finite resource overlap")
         evidence_keys: set[tuple[str, str]] = set()
