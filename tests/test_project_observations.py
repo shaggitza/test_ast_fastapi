@@ -104,7 +104,11 @@ def test_project_adapter_never_infers_origin_or_trust(tmp_path: Path) -> None:
     snapshot = scan_project_observations(tmp_path)
 
     assert not snapshot.surface_matches
-    assert [item.reason for item in snapshot.client_uncertainties] == ["dynamic_or_nonliteral_url"]
+    assert snapshot.client_uncertainties == ()
+    assert [(item.route_path, item.origin) for item in snapshot.client_observations] == [
+        ("/items", "https://api.example.test"),
+        ("/dynamic", None),
+    ]
     assert snapshot.deployment_observations[0].certainty == "uncertain"
     assert snapshot.to_dict()["scope"] == "bounded_source_observations_only"
     with pytest.raises(ValueError, match="not established"):
