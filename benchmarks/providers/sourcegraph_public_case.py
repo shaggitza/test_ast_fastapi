@@ -57,6 +57,12 @@ def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
     response = value["response_raw"]
     if response is not None and not isinstance(response, str):
         raise PublicCaseProtocolError("raw response must be text or null")
+    try:
+        response_size = 0 if response is None else len(response.encode("utf-8"))
+    except UnicodeEncodeError as error:
+        raise PublicCaseProtocolError("raw response must be valid UTF-8 text") from error
+    if response_size > 2 * 1024 * 1024:
+        raise PublicCaseProtocolError("raw response exceeds the byte limit")
     transport = value["transport"]
     if not isinstance(transport, dict) or set(transport) != {
         "http_status",
@@ -78,6 +84,7 @@ def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
         or not 0 <= elapsed <= 12
         or type(size) is not int
         or not 0 <= size <= 2 * 1024 * 1024
+        or size != response_size
         or type(redirects) is not int
         or not 0 <= redirects <= 2
         or transport["truncated"] is not False
@@ -88,13 +95,24 @@ def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
         envelope = value["provider_evidence"]
         if (
             not isinstance(envelope, dict)
-            or not {"kind", "binding", "evidence", "receipt", "validation"}.issubset(envelope)
-            or envelope.get("validation")
-            != {
-                "status": "schema_validated_supplied_evidence",
-                "provider_authenticated": False,
-                "scorable": False,
+            or not isinstance(envelope.get("kind"), str)
+            or envelope["kind"]
+            not in {
+                "changed_symbol",
+                "reverse_reference",
+                "call_chain",
+                "cross_repo_consumer",
             }
+            or not isinstance(envelope.get("binding"), dict)
+            or not isinstance(envelope.get("evidence"), list)
+            or not isinstance(envelope.get("receipt"), dict)
+            or not isinstance(envelope.get("validation"), dict)
+            or set(envelope["validation"]) != {"status", "provider_authenticated", "scorable"}
+            or envelope["validation"].get("status") != "schema_validated_supplied_evidence"
+            or type(envelope["validation"].get("provider_authenticated")) is not bool
+            or envelope["validation"]["provider_authenticated"] is not False
+            or type(envelope["validation"].get("scorable")) is not bool
+            or envelope["validation"]["scorable"] is not False
             or response is None
             or value["error"] is not None
         ):

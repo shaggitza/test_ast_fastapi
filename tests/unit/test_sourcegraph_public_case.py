@@ -13,6 +13,7 @@ from benchmarks.providers.sourcegraph_public_case import (
 )
 
 CASE = FROZEN_CASE_PROFILE
+RAW_RESPONSE = '{"errors":[{"message":"not authenticated"}],"data":{"repository":null}}'
 
 
 def result(**overrides: object) -> dict[str, object]:
@@ -24,13 +25,13 @@ def result(**overrides: object) -> dict[str, object]:
         "transport": {
             "http_status": 200,
             "elapsed_seconds": 0.527802,
-            "response_bytes": 112,
+            "response_bytes": len(RAW_RESPONSE.encode("utf-8")),
             "truncated": False,
             "redirects": 0,
         },
         "endpoint": "https://sourcegraph.com/.api/graphql",
         "request": '{"query":"frozen exact query"}',
-        "response_raw": '{"errors":[{"message":"not authenticated"}],"data":{"repository":null}}',
+        "response_raw": RAW_RESPONSE,
         "error": "not_authenticated",
         "provider_evidence": None,
     }
@@ -90,6 +91,95 @@ def test_available_requires_the_existing_provider_evidence_envelope() -> None:
         result(status="available", error=None, provider_evidence=evidence),
     )
     assert validated["provider_evidence"] == evidence
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("kind", []),
+        ("kind", "unsupported"),
+        ("binding", []),
+        ("evidence", {}),
+        ("receipt", []),
+        ("validation", []),
+        (
+            "validation",
+            {
+                "status": "schema_validated_supplied_evidence",
+                "provider_authenticated": 0,
+                "scorable": False,
+            },
+        ),
+        (
+            "validation",
+            {
+                "status": "schema_validated_supplied_evidence",
+                "provider_authenticated": False,
+                "scorable": 0,
+            },
+        ),
+        (
+            "validation",
+            {
+                "status": "schema_validated_supplied_evidence",
+                "provider_authenticated": False,
+                "scorable": False,
+                "extra": True,
+            },
+        ),
+    ],
+)
+def test_available_evidence_envelope_matches_schema_types_and_exact_validation(
+    field: str, invalid: object
+) -> None:
+    evidence = {
+        "kind": "reverse_reference",
+        "binding": {},
+        "evidence": [],
+        "receipt": {},
+        "validation": {
+            "status": "schema_validated_supplied_evidence",
+            "provider_authenticated": False,
+            "scorable": False,
+        },
+    }
+    evidence[field] = invalid
+    with pytest.raises(PublicCaseProtocolError, match="available results require"):
+        validate_result(result(status="available", error=None, provider_evidence=evidence))
+
+
+def test_raw_response_size_matches_strict_utf8_bytes() -> None:
+    with pytest.raises(PublicCaseProtocolError, match="transport limits"):
+        validate_result(result(transport={**result()["transport"], "response_bytes": 112}))
+    validate_result(
+        result(
+            response_raw="é",
+            transport={**result()["transport"], "response_bytes": 2},
+        )
+    )
+
+
+def test_raw_response_byte_limit_and_invalid_unicode_fail_closed() -> None:
+    with pytest.raises(PublicCaseProtocolError, match="raw response exceeds"):
+        validate_result(result(response_raw="x" * (2 * 1024 * 1024 + 1)))
+    with pytest.raises(PublicCaseProtocolError, match="valid UTF-8"):
+        validate_result(
+            result(
+                response_raw="\ud800",
+                transport={**result()["transport"], "response_bytes": 0},
+            )
+        )
+
+
+def test_null_raw_response_requires_zero_response_bytes() -> None:
+    value = result(status="unavailable", response_raw=None)
+    transport = value["transport"]
+    assert isinstance(transport, dict)
+    transport["response_bytes"] = 0
+    assert validate_result(value)["response_raw"] is None
+    with pytest.raises(PublicCaseProtocolError, match="transport limits"):
+        transport["response_bytes"] = 1
+        validate_result(value)
 
 
 def test_protocol_rejects_case_drift_and_budget_overrun() -> None:
