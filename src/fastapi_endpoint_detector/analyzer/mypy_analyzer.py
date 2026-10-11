@@ -5001,7 +5001,7 @@ class MypyAnalyzer:
         lexical_scope: str | None = None,
     ) -> ResolvedCallSite | None:
         """Resolve one physical project-source call for the analyzer-wide cache."""
-        from mypy.nodes import MemberExpr, NameExpr, SuperExpr, TypeInfo, Var
+        from mypy.nodes import CallExpr, MemberExpr, NameExpr, SuperExpr, TypeInfo, Var
 
         try:
             Path(current_file).resolve().relative_to(self.source_root.resolve())
@@ -5062,6 +5062,26 @@ class MypyAnalyzer:
                 receiver_candidates,
                 reason_code,
             ) = self._member_call_resolution(callee, import_map)
+        elif isinstance(callee, CallExpr):
+            # ``Concrete()()`` is an invocation of the constructed object's
+            # effective __call__. Resolve only an explicitly named project
+            # constructor; type-only dispatch (including Protocol parameters)
+            # is deliberately insufficient evidence here.
+            constructed = self._project_constructor_info(callee.callee, import_map)
+            if constructed is not None and not getattr(constructed, "is_protocol", False):
+                member = constructed.get("__call__")
+                declaration = (
+                    self._callable_declaration(member.node) if member is not None else None
+                )
+                if declaration is not None and self._resolve_fullname_to_file(declaration[0]):
+                    status = CallResolutionStatus.EXACT
+                    canonical_symbol, invocation = declaration
+                    receiver_candidates = (constructed.fullname,)
+                    reason_code = None
+                else:
+                    reason_code = "unresolved_concrete_callable"
+            else:
+                reason_code = "dynamic_callable"
         elif isinstance(callee, SuperExpr) and callee.info is not None:
             declarations = []
             for info in callee.info.mro[1:]:
