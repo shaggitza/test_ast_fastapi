@@ -34,6 +34,14 @@ from typing import Any, ClassVar, Literal, Protocol, cast
 
 from packaging.utils import canonicalize_name
 
+from fastapi_endpoint_detector.analyzer.callback_provider_origin import (
+    CallbackProviderSnapshot,
+    callback_provider_fingerprint_inputs,
+    callback_provider_kind,
+    callback_provider_snapshot_current,
+    callback_provider_symbols,
+    capture_callback_provider,
+)
 from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
     CONSUMER_PROFILE,
     CacheAdmissionError,
@@ -628,7 +636,16 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 10
+    EXECUTION_SUMMARY_VERSION = 11
+    CALLBACK_PROVIDER_MODULES: ClassVar[frozenset[str]] = frozenset(
+        {
+            "asyncio.threads",
+            "anyio.to_thread",
+            "starlette.concurrency",
+            "starlette.background",
+            "fastapi.background",
+        }
+    )
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -718,6 +735,9 @@ class MypyAnalyzer:
         self._verified_mypy_source_hashes: dict[str, str] = {}
         self._verified_package_source_hashes: dict[str, str] = {}
         self._verified_package_versions: dict[str, str] = {}
+        self._callback_provider_snapshots: dict[str, CallbackProviderSnapshot] = {}
+        self._callback_provider_cycle_checked = False
+        self._callback_provider_kind_cache: dict[str, str | None] = {}
         self._local_module_census_depth = 0
         self._local_module_census: tuple[tuple[str, bool, str, bool], ...] | None = None
         self._analysis_source_snapshots: dict[str, bytes | None] = {}
@@ -924,7 +944,9 @@ class MypyAnalyzer:
     def _ensure_mypy_built(self) -> None:
         """Ensure mypy has analyzed the project and we have the typed ASTs."""
         if self._trees:
-            return
+            if self._callback_provider_snapshots_current():
+                return
+            self._reset_build_state()
 
         if not self._mypy_available:
             raise MypyAnalyzerError("mypy is not installed")
@@ -1228,6 +1250,7 @@ class MypyAnalyzer:
             self._verified_mypy_source_hashes = {}
             self._verified_package_source_hashes = {}
             self._verified_package_versions = {}
+            self._callback_provider_snapshots.clear()
             conflicting_package_versions: set[str] = set()
             package_metadata_roots: dict[str, Path] = {}
             conflicting_package_metadata_roots: set[str] = set()
@@ -1522,6 +1545,29 @@ class MypyAnalyzer:
                 path: tuple(sorted(module_names)) for path, module_names in modules_by_path.items()
             }
             self._shared_path_index = None
+            # Origin records are private current-build evidence. Their bytes,
+            # paths and metadata are never restored from caller-editable JSON.
+            for module_name in sorted(self.CALLBACK_PROVIDER_MODULES):
+                state = self._build_result.graph.get(module_name)
+                if (
+                    state is None
+                    or module_name not in self._trees
+                    or not state.path
+                    or not isinstance(getattr(state, "source_hash", None), str)
+                    or self._callback_provider_shadowed(module_name)
+                ):
+                    continue
+                provider_snapshot = capture_callback_provider(
+                    module_name,
+                    Path(state.path),
+                    state.source_hash,
+                    source_root=self.source_root,
+                    module_root=self.module_root,
+                    authenticated_metadata_hashes=authenticated_metadata_hashes,
+                    parsed_roots_by_top_level=parsed_roots_by_top_level,
+                )
+                if provider_snapshot is not None:
+                    self._callback_provider_snapshots[module_name] = provider_snapshot
             self._typed_environment_fingerprint = self._fingerprint_typed_environment(
                 authenticated_metadata_hashes=authenticated_metadata_hashes,
                 authenticated_metadata_roots=scanned_metadata_roots,
@@ -1631,6 +1677,8 @@ class MypyAnalyzer:
         """Discover local exclusions once before a bulk-analysis snapshot."""
         if self._local_module_census_depth == 0:
             self._local_module_census = self._discover_unselected_local_modules()
+            self._callback_provider_cycle_checked = False
+            self._callback_provider_kind_cache.clear()
             self._analysis_build_failed = False
         self._local_module_census_depth += 1
 
@@ -1762,6 +1810,9 @@ class MypyAnalyzer:
         self._fullname_resolution_cache.clear()
         self._canonical_project_fullname_cache.clear()
         self._function_lookup_cache.clear()
+        self._callback_provider_snapshots.clear()
+        self._callback_provider_kind_cache.clear()
+        self._callback_provider_cycle_checked = False
         self._built_source_fingerprint = None
         if clear_endpoint_dependencies:
             self._endpoint_deps.clear()
@@ -2718,6 +2769,7 @@ class MypyAnalyzer:
     def analyze_endpoint(self, endpoint: Endpoint) -> EndpointDependencies:
         """Analyze a single endpoint using mypy's typed AST."""
         if self._local_module_census_depth == 0:
+            self._callback_provider_kind_cache.clear()
             self._analysis_build_failed = False
         try:
             self._ensure_mypy_built()
@@ -3501,6 +3553,81 @@ class MypyAnalyzer:
         if imported in self.EXECUTOR_SUMMARIES or imported in self.BACKGROUND_CALLBACK_SUMMARIES:
             return imported
         return None
+
+    def _callback_provider_shadowed(self, module_name: str) -> bool:
+        """Reject local module, stub, namespace and excluded-prefix shadows."""
+        top_level = module_name.partition(".")[0]
+        local_modules = {module for _path, module, _digest in self._last_source_records}
+        if self.source_inventory is not None:
+            local_modules.update(record.module for record in self.source_inventory.files)
+            local_modules.update(
+                module for module, _paths in getattr(self.source_inventory, "module_collisions", ())
+            )
+        local_modules.update(
+            module for module, _children, _path, _stub in self._unselected_local_modules()
+        )
+        if any(
+            module == top_level or module.startswith(top_level + ".") for module in local_modules
+        ):
+            return True
+        # A rejected directory or broken link can shadow imports without
+        # appearing in the runtime .py inventory. Inspect lexical names only.
+        for root in {self.source_root, self.module_root}:
+            for suffix in ("", ".py", ".pyi"):
+                if os.path.lexists(root / (top_level + suffix)):
+                    return True
+        return False
+
+    def _callback_provider_snapshots_current(self) -> bool:
+        """Check private origin bytes once per bulk analysis cycle."""
+        if self._local_module_census_depth and self._callback_provider_cycle_checked:
+            return True
+        self._callback_provider_cycle_checked = True
+        return all(
+            callback_provider_snapshot_current(snapshot)
+            for snapshot in self._callback_provider_snapshots.values()
+        )
+
+    def _verified_callback_provider_kind(self, symbol: str) -> str | None:
+        """Bind every chain declaration to its retained typed tree and origin."""
+        required_symbols = callback_provider_symbols(symbol)
+        if not required_symbols:
+            return None
+        method_suffix = ".BackgroundTasks.add_task"
+        for required_symbol in required_symbols:
+            module = (
+                required_symbol[: -len(method_suffix)]
+                if required_symbol.endswith(method_suffix)
+                else required_symbol.rsplit(".", 1)[0]
+            )
+            snapshot = self._callback_provider_snapshots.get(module)
+            tree = self._trees.get(module)
+            state = self._build_result.graph.get(module) if self._build_result is not None else None
+            if (
+                snapshot is None
+                or tree is None
+                or state is None
+                or not getattr(state, "path", None)
+                or str(Path(state.path).absolute()) != snapshot.typed_path
+                or getattr(state, "source_hash", None) != snapshot.typed_sha1
+                or self._callback_provider_shadowed(module)
+            ):
+                return None
+            declaration_node: Any = tree
+            for component in required_symbol[len(module) + 1 :].split("."):
+                names = getattr(declaration_node, "names", None)
+                item = names.get(component) if names is not None else None
+                if item is None:
+                    return None
+                declaration_node = item.node
+            declaration = self._callable_declaration(declaration_node)
+            if declaration is None or declaration[0] != required_symbol:
+                return None
+        if symbol not in self._callback_provider_kind_cache:
+            self._callback_provider_kind_cache[symbol] = callback_provider_kind(
+                symbol, self._callback_provider_snapshots
+            )
+        return self._callback_provider_kind_cache[symbol]
 
     def _project_member_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
         """Resolve a method through an exact source-proven project class export."""
@@ -6746,16 +6873,28 @@ class MypyAnalyzer:
             callback_summary: _ExecutorSummary | None = None
             callback_edge_kind: str | None = None
             allow_async_callback = False
-            if wrapper_symbol in self.EXECUTOR_SUMMARIES:
+            if (
+                wrapper_symbol in self.EXECUTOR_SUMMARIES
+                or wrapper_symbol in self.BACKGROUND_CALLBACK_SUMMARIES
+            ) and self._exact_project_identity(wrapper_symbol) is None:
+                # Project-owned declarations retain ordinary source traversal.
+                # Typed names alone cannot authorize package callback semantics.
+                # Keep the physical call's resolution identity unchanged.
                 traced = True
-                if id(call) in awaited_call_ids:
-                    callback_summary = self.EXECUTOR_SUMMARIES[wrapper_symbol]
-                    callback_edge_kind = f"executor_callback:{wrapper_symbol}"
-            elif wrapper_symbol in self.BACKGROUND_CALLBACK_SUMMARIES:
-                traced = True
-                callback_summary = self.BACKGROUND_CALLBACK_SUMMARIES[wrapper_symbol]
-                callback_edge_kind = f"background_task_callback:{wrapper_symbol}"
-                allow_async_callback = True
+                provider_kind = self._verified_callback_provider_kind(wrapper_symbol)
+                if provider_kind is None:
+                    self._record_analysis_limitation("CALLBACK_PROVIDER_ORIGIN_UNVERIFIED")
+                else:
+                    if provider_kind == "analysis-stdlib-environment-only":
+                        self._record_analysis_limitation("ANALYZER_STDLIB_ONLY")
+                    if wrapper_symbol in self.EXECUTOR_SUMMARIES:
+                        if id(call) in awaited_call_ids:
+                            callback_summary = self.EXECUTOR_SUMMARIES[wrapper_symbol]
+                            callback_edge_kind = f"executor_callback:{wrapper_symbol}"
+                    else:
+                        callback_summary = self.BACKGROUND_CALLBACK_SUMMARIES[wrapper_symbol]
+                        callback_edge_kind = f"background_task_callback:{wrapper_symbol}"
+                        allow_async_callback = True
             elif wrapper_symbol in {
                 "fastapi.param_functions.Depends",
                 "fastapi.param_functions.Security",
@@ -8518,6 +8657,7 @@ class MypyAnalyzer:
                     self._verified_mypy_source_hashes = {}
                     self._verified_package_source_hashes = {}
                     self._verified_package_versions = {}
+                    self._callback_provider_snapshots.clear()
                     self._endpoint_deps.clear()
                 else:
                     if (
@@ -8620,6 +8760,7 @@ class MypyAnalyzer:
             self._verified_mypy_source_hashes.clear()
             self._verified_package_source_hashes.clear()
             self._verified_package_versions.clear()
+            self._callback_provider_snapshots.clear()
         metadata_snapshot_hashes: dict[str, str] = {}
         if authenticated_metadata_roots is not None:
             package_roots.update(authenticated_metadata_roots)
@@ -8655,6 +8796,12 @@ class MypyAnalyzer:
             # retain an earlier version/source pin under a new fingerprint.
             self._verified_package_source_hashes.clear()
             self._verified_package_versions.clear()
+            self._callback_provider_snapshots.clear()
+        origin_snapshots = dict(self._callback_provider_snapshots)
+        inputs.update(callback_provider_fingerprint_inputs(origin_snapshots))
+        for module, snapshot in origin_snapshots.items():
+            if not callback_provider_snapshot_current(snapshot):
+                self._callback_provider_snapshots.pop(module, None)
         payload = json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(payload).hexdigest()
 
