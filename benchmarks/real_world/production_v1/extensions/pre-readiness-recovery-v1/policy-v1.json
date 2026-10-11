@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "protocol": "ground-truth-review-canary-pre-readiness-recovery-v1",
+  "profile_id": "ground-truth-review-canary-pre-readiness-recovery-v1",
+  "enabled_after_profile_publication": true,
+  "maximum_retries_per_attempt": 1,
+  "maximum_grant_lifetime_seconds": 86400,
+  "allowed_failure_phases": ["prebinding", "binding_created_broker_not_ready"],
+  "allowed_failure_reasons": ["canonical campaign path mismatch", "broker failed before readiness"],
+  "must_prove_absent": ["prepared", "launch_claimed", "native_result", "pending", "completed", "submission", "reviewer_interaction"],
+  "launch_authorized_by_grant": false,
+  "resource_limits_may_change": false
+}

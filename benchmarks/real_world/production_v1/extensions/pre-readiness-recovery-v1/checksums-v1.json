@@ -1,0 +1,10 @@
+{
+  "files": {
+    "benchmarks/real_world/ground_truth_pre_readiness_recovery_v1.py": "sha256:c40f0db64bf3dc3f9e8ea966d6e5bb45eee2a46d11b27870cce5c59b7faedc85",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/README.md": "sha256:a127da16eb257ca469d3d724ee45aff959bb471563eab83cb5dc84c6761236a0",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/grant-schema-v1.json": "sha256:9a1c356e5c101dddab571be6b164483b872663462c9da0dcf5fd9abf359ca1f9",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/policy-v1.json": "sha256:0053a603a6fb097bb3fa179dbe4aaf628fbff96b395af2201e74b56f3bd6e23c"
+  },
+  "profile_id": "ground-truth-review-canary-pre-readiness-recovery-v1",
+  "schema_version": 1
+}

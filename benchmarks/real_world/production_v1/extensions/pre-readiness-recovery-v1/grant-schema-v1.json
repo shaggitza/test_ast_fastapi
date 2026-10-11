@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/ground-truth-pre-readiness-recovery/grant-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol", "sequence", "campaign_id", "campaign_manifest_sha256", "canonical_campaign_path", "corpus_sha256", "attempt_id", "lane", "reviewer_id", "source_bindings_sha256", "packet_publication_entry_hash", "runtime_attestation_entry_hash", "production_profile_sha256", "prior_authorization_entry_hash", "prior_authorization_expires_at", "failed_event_entry_hash", "failed_event_kind", "failure_phase", "failure_reason", "evidence", "no_launch_proof", "custody_inventory_sha256", "issued_at", "expires_at", "previous_hash", "entry_hash"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "protocol": {"const": "ground-truth-review-canary-pre-readiness-recovery-v1"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "campaign_id": {"type": "string", "minLength": 1},
+    "campaign_manifest_sha256": {"$ref": "#/$defs/hash"},
+    "canonical_campaign_path": {"type": "string", "minLength": 1},
+    "corpus_sha256": {"$ref": "#/$defs/hash"},
+    "attempt_id": {"type": "string", "pattern": "^prod-v1-i[0-9]{3}-rank[0-9]{3}-pr[0-9]+-[AB]$"},
+    "lane": {"enum": ["A", "B"]},
+    "reviewer_id": {"type": "string", "minLength": 1},
+    "source_bindings_sha256": {"$ref": "#/$defs/hash"},
+    "packet_publication_entry_hash": {"$ref": "#/$defs/hash"},
+    "runtime_attestation_entry_hash": {"$ref": "#/$defs/hash"},
+    "production_profile_sha256": {"$ref": "#/$defs/hash"},
+    "prior_authorization_entry_hash": {"$ref": "#/$defs/hash"},
+    "prior_authorization_expires_at": {"type": "string", "format": "date-time"},
+    "failed_event_entry_hash": {"$ref": "#/$defs/hash"},
+    "failed_event_kind": {"const": "operational_failed"},
+    "failure_phase": {"enum": ["prebinding", "binding_created_broker_not_ready"]},
+    "failure_reason": {"enum": ["canonical campaign path mismatch", "broker failed before readiness"]},
+    "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}},
+    "no_launch_proof": {"type": "object", "additionalProperties": false, "required": ["authoritative", "prepared_absent", "launch_claim_absent", "model_invocation_absent", "native_result_absent", "pending_absent", "submission_absent", "reviewer_interaction_absent", "broker_dead", "socket_registry_slot_cleanup_verified"], "properties": {"authoritative": {"const": true}, "prepared_absent": {"const": true}, "launch_claim_absent": {"const": true}, "model_invocation_absent": {"const": true}, "native_result_absent": {"const": true}, "pending_absent": {"const": true}, "submission_absent": {"const": true}, "reviewer_interaction_absent": {"const": true}, "broker_dead": {"const": true}, "socket_registry_slot_cleanup_verified": {"const": true}}},
+    "custody_inventory_sha256": {"$ref": "#/$defs/hash"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "previous_hash": {"$ref": "#/$defs/hash"},
+    "entry_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "evidence": {"type": "object", "additionalProperties": false, "required": ["kind", "sha256", "archive_path"], "properties": {"kind": {"enum": ["failed_event", "binding", "broker_log", "no_launch_census", "cleanup_inventory"]}, "sha256": {"$ref": "#/$defs/hash"}, "archive_path": {"type": "string", "minLength": 1}}}
+  }
+}
