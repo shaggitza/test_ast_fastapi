@@ -415,7 +415,7 @@ class EffectContractDocument(_StrictModel):
     def contract_hashes(self) -> dict[str, str]:
         """Return deterministic per-contract semantic hashes."""
         return {
-            contract.id: _semantic_hash(_contract_document_payload(contract))
+            contract.id: effect_contract_hash(contract)
             for contract in sorted(self.contracts, key=lambda item: item.id)
         }
 
@@ -653,3 +653,8 @@ def _contract_document_payload(contract: EffectContract) -> dict[str, Any]:
             if behavior.get(field) is False:
                 behavior.pop(field)
     return payload
+
+
+def effect_contract_hash(contract: EffectContract) -> str:
+    """Hash one contract with the canonical field filtering used by documents."""
+    return _semantic_hash(_contract_document_payload(contract))

@@ -4,8 +4,6 @@ Report data models.
 Models representing analysis reports and results.
 """
 
-import hashlib
-import json
 import re
 from datetime import datetime
 from enum import Enum
@@ -22,6 +20,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
     EffectContract,
     FiniteValueStatus,
     ResourceIdentityEvidence,
+    effect_contract_hash,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import EffectContractAudit
 from fastapi_endpoint_detector.models.endpoint import (
@@ -42,23 +41,6 @@ from fastapi_endpoint_detector.models.sql_transaction import (
 def _source_project_root(app_path: str) -> Path:
     path = Path(app_path).resolve()
     return path.parent if path.is_file() else path
-
-
-def _contract_hash(contract: EffectContract) -> str:
-    payload = contract.model_dump(mode="json", exclude_none=True)
-    package = payload.get("package")
-    if isinstance(package, dict) and not package.get("source_hashes"):
-        package.pop("source_hashes", None)
-    behavior = payload.get("behavior")
-    if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
-        behavior.pop("stage_receiver_from_yield")
-    canonical_bytes = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(canonical_bytes).hexdigest()}"
 
 
 class ConfidenceLevel(str, Enum):
@@ -848,7 +830,7 @@ class AnalysisReport(BaseModel):
                 or evidence.contract_hash != coverage.contract_hash
                 or evidence.contract.symbol != coverage.symbol
                 or evidence.contract.invocation != coverage.invocation
-                or _contract_hash(evidence.contract) != evidence.contract_hash
+                or effect_contract_hash(evidence.contract) != evidence.contract_hash
             ):
                 raise ValueError("contract evidence is inconsistent with audit coverage")
             endpoint_record = next(

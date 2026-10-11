@@ -1016,7 +1016,10 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
     dependencies = analyzer.analyze_endpoint(endpoint)
     sites = [site for site in dependencies.resolved_call_sites if site.line == 3]
     assert len(sites) == 1
-    assert sites[0].canonical_symbol == "race_pkg.emit"
+    if mutation == "source_removed":
+        assert sites[0].canonical_symbol is None
+    else:
+        assert sites[0].canonical_symbol == "race_pkg.emit"
     audit = audit_effect_contracts(
         load_effect_contracts(contracts),
         source_root=tmp_path,
@@ -1035,6 +1038,11 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
         assert reads == 2
         assert occurrence.audit_status == AuditCallStatus.MATCHED
         assert analyzer.verified_package_versions["race-pkg"] == "1.0"
+    elif mutation == "source_removed":
+        assert occurrence.audit_status == AuditCallStatus.AMBIGUOUS
+        assert occurrence.reason_code == "mutated_imported_callable"
+        assert analyzer.verified_package_versions == {}
+        assert analyzer.verified_package_source_hashes == {}
     else:
         assert occurrence.audit_status == AuditCallStatus.UNMATCHED
         assert occurrence.reason_code == "package_applicability_unverified"
