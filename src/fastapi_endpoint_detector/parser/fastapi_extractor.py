@@ -246,7 +246,16 @@ class FastAPIExtractor:
         if self._app is not None:
             return self._app
 
-        if self.app_entry is not None or self.bootstrap_entry is not None:
+        use_configured_selection = (
+            self.app_entry is not None
+            or self.bootstrap_entry is not None
+            or (
+                self.app_path.is_dir()
+                and self.module_name is None
+                and not (self.app_path / "__init__.py").is_file()
+            )
+        )
+        if use_configured_selection:
             _module_name, import_root = self._import_context()
             if self.app_path.is_dir():
                 import_root = self.app_path

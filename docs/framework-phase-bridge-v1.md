@@ -60,6 +60,21 @@ mypy registration joins, callback phase slicing, retained typed declarations,
 report projection, and exact reverse-graph symbol-span joins. They do not
 create execution receipts or establish runtime truth.
 
+## Application-process observation boundary
+
+The phase manifest retains callback and registration start/end positions,
+including separate registrations on the same line. Isolated execution can
+sign custody of an application-process report, but that process can modify
+its observer. These callback claims are therefore discarded before custody
+signing and reported as `self_reported_nonpositive`, with zero observed
+callbacks. Signed legacy archives remain readable and receive the same
+nonpositive treatment.
+
+An independent trusted observer is still required to establish callback
+execution. Static phase manifests and sandbox infrastructure checks do not
+satisfy that requirement. The source-staging copy is read-only and readable
+by the runtime uid; the original checkout's modes and content remain intact.
+
 ## Integration hooks still required
 
 The selected-preset mapper/report/output hook is wired. Remaining bounded

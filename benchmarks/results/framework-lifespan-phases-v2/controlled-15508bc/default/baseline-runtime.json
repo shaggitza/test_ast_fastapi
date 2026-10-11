@@ -1,0 +1,47 @@
+{
+  "configuration": {
+    "app_entry": null,
+    "app_variable": "app",
+    "backend": "mypy",
+    "bootstrap_entry": null,
+    "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5"
+  },
+  "failure": {
+    "message": "static runtime phase coverage is conditional",
+    "phase": "unavailable"
+  },
+  "impact": null,
+  "inventory": null,
+  "mode": "runtime",
+  "provenance": {
+    "dependency_lock_sha256": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5",
+    "effective_invocation_sha256": "sha256:9ae9e1c93995b6bbde15c306ade22f1c9e528800c387b8947d417cb61f030a6e",
+    "runtime_attestation_sha256": "sha256:d9f253ec26ed64434063160443c1c7e7f7b453ffa688c4536f199bae1e36b96a",
+    "runtime_canary_receipt_sha256": "sha256:d40d34c8f3d53a0187b94ca77928b8839489ec0d3b9903af794318570495dc6e",
+    "runtime_image_digest": "test-ast-runtime-phase-15508bc@sha256:8c2d95773208aab2a4391316ba4bd6446ac6d896ba581420545053822d9f24e4",
+    "runtime_policy_sha256": "sha256:bff3276436f244bfeafd544c4580f8f8457f063d1d1f424294ddbb3cc644648d",
+    "runtime_sbom_sha256": "sha256:150519b5360cc6e47acf198191e514bcc879fb4b6c71272b075cec4181d61961",
+    "runtime_seccomp_sha256": "sha256:96dbac26aac6041de88eaf99f653d606933469dd104157b877190d998ab68d4a",
+    "source_sha256": "sha256:f55d361536cc72bd4c2de731b122577d7641e0d3b14054f569fb26453a4c4df8",
+    "tool_sha256": "sha256:3671e01e191ff71245820362a6bfb98ed5859cd321cd0f582bd36605e7d49e6b"
+  },
+  "resources": {
+    "peak_rss_bytes": {
+      "reason": "phase_not_completed",
+      "status": "not_measured"
+    }
+  },
+  "schema_version": 1,
+  "snapshot": "baseline",
+  "status": "failure",
+  "timing": {
+    "impact": {
+      "reason": "phase_not_completed",
+      "status": "not_measured"
+    },
+    "list": {
+      "reason": "phase_not_completed",
+      "status": "not_measured"
+    }
+  }
+}

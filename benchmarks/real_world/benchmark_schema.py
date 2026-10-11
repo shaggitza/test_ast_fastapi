@@ -21,6 +21,8 @@ __all__ = [
     "PrimaryArtifact",
     "RecordKind",
     "finite_nonnegative",
+    "prediction_is_completed",
+    "prediction_status",
     "read_primary_artifact",
     "read_primary_jsonl",
     "strict_json_loads",
@@ -199,9 +201,30 @@ def _validate_prediction_record(
         not isinstance(item, str) or not item.strip() for item in unresolved
     ):
         raise BenchmarkSchemaError(f"{location}: unresolved must contain non-empty strings")
+    if schema_version in {None, 2} and "status" in record:
+        status = record["status"]
+        if not isinstance(status, str) or status not in _ALLOWED_PREDICTION_STATUS:
+            raise BenchmarkSchemaError(
+                f"{location}: legacy prediction status must be completed, partial, or unresolved"
+            )
     _validate_timing(record, location)
     if schema_version == 3:
         _validate_v3_prediction(record, unresolved, location)
+
+
+def prediction_status(record: dict[str, Any]) -> str:
+    """Return a validated status, including the legacy schema default."""
+    if "status" in record:
+        status = record["status"]
+        if isinstance(status, str):
+            return status
+        raise BenchmarkSchemaError("prediction status must be a string")
+    return "completed"
+
+
+def prediction_is_completed(record: dict[str, Any]) -> bool:
+    """A prediction is complete only when status and diagnostics agree."""
+    return prediction_status(record) == "completed" and not record.get("unresolved", [])
 
 
 def _validate_record(record: dict[str, Any], kind: RecordKind, location: str) -> None:

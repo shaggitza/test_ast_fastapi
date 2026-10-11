@@ -966,6 +966,78 @@ class MypyAnalyzer:
             if self.no_site_packages and original_mypypath is not None:
                 os.environ["MYPYPATH"] = original_mypypath
 
+    def framework_phase_build_snapshot(self) -> tuple[Any, dict[str, bytes | None]] | None:
+        """Return the retained build and source bytes, without triggering a build."""
+        if self._build_result is None or not self._trees:
+            return None
+        return self._build_result, dict(self._analysis_source_snapshots)
+
+    def framework_phase_source_bytes(self, path: Path, *, max_bytes: int) -> bytes | None:
+        """Read one bounded, in-root source file without following symlinks."""
+        directory_flag = getattr(os, "O_DIRECTORY", 0)
+        nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+        if (
+            max_bytes < 0
+            or not directory_flag
+            or not nofollow_flag
+            or os.open not in os.supports_dir_fd
+            or not self.source_root.is_absolute()
+        ):
+            return None
+        try:
+            relative = path.relative_to(self.source_root)
+        except ValueError:
+            return None
+        if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+            return None
+        current = self.source_root
+        leaf_descriptor = -1
+        directory_descriptor = -1
+        try:
+            for part in relative.parts:
+                current = current / part
+                if current.is_symlink():
+                    return None
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(self.source_root)
+            directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
+            directory_descriptor = os.open(os.path.sep, directory_flags)
+            for part in self.source_root.parts[1:]:
+                next_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=directory_descriptor,
+                )
+                os.close(directory_descriptor)
+                directory_descriptor = next_descriptor
+            for part in relative.parts[:-1]:
+                next_descriptor = os.open(
+                    part,
+                    directory_flags,
+                    dir_fd=directory_descriptor,
+                )
+                os.close(directory_descriptor)
+                directory_descriptor = next_descriptor
+            leaf_descriptor = os.open(
+                relative.parts[-1],
+                os.O_RDONLY | nofollow_flag | getattr(os, "O_NONBLOCK", 0),
+                dir_fd=directory_descriptor,
+            )
+            opened = os.fstat(leaf_descriptor)
+            if not stat.S_ISREG(opened.st_mode):
+                return None
+            if opened.st_size > max_bytes:
+                return None
+            data = os.read(leaf_descriptor, max_bytes + 1)
+            return data if len(data) <= max_bytes else None
+        except (OSError, ValueError):
+            return None
+        finally:
+            if leaf_descriptor >= 0:
+                os.close(leaf_descriptor)
+            if directory_descriptor >= 0:
+                os.close(directory_descriptor)
+
     def _effective_follow_imports(self) -> str:
         """Translate inventory policy to mypy's string option vocabulary."""
         value = getattr(self.source_inventory, "follow_imports", True)

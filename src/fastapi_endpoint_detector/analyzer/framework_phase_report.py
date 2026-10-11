@@ -25,6 +25,7 @@ class FrameworkPhaseReport(BaseModel):
     conditional_count: int = Field(ge=0)
     unavailable_count: int = Field(ge=0)
     records: tuple[dict[str, object], ...]
+    runtime_manifest: dict[str, object]
     lifecycle_conditional_surfaces: tuple[dict[str, object], ...]
     limitations: tuple[str, ...]
     source_digests: tuple[str, ...]
@@ -35,6 +36,10 @@ class FrameworkPhaseReport(BaseModel):
 
 def phase_report_payload(evidence: FrameworkPhaseIntegration) -> FrameworkPhaseReport:
     """Serialize immutable evidence without changing its strength or truth role."""
+    from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (  # noqa: PLC0415
+        manifest_from_report,
+    )
+
     counts = {
         state: sum(record.status == state for record in evidence.records)
         for state in ("established", "conditional", "unavailable")
@@ -51,6 +56,7 @@ def phase_report_payload(evidence: FrameworkPhaseIntegration) -> FrameworkPhaseR
             {**record.model_dump(mode="json"), "status": record.status}
             for record in evidence.records
         ),
+        runtime_manifest=manifest_from_report(evidence).model_dump(mode="json"),
         lifecycle_conditional_surfaces=tuple(
             item.model_dump(mode="json") for item in evidence.lifecycle_conditional_surfaces
         ),
@@ -73,6 +79,11 @@ def unavailable_phase_report(*, snapshot_side: str, limitation: str) -> Framewor
         conditional_count=0,
         unavailable_count=0,
         records=(),
+        runtime_manifest={
+            "schema_version": 1,
+            "protocol": "framework-phase-manifest-v1",
+            "entries": [],
+        },
         lifecycle_conditional_surfaces=(),
         limitations=(limitation,),
         source_digests=(),

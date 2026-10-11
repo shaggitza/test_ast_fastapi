@@ -9,7 +9,7 @@ import json
 import re
 from datetime import datetime
 from enum import Enum
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -37,6 +37,11 @@ from fastapi_endpoint_detector.models.sql_transaction import (
     SQLTransactionPathReport,
     SQLTransactionReport,
 )
+
+
+def _source_project_root(app_path: str) -> Path:
+    path = Path(app_path).resolve()
+    return path.parent if path.is_file() else path
 
 
 def _contract_hash(contract: EffectContract) -> str:
@@ -568,6 +573,45 @@ class AnalysisReport(BaseModel):
             )
         }
         path_pairs: list[tuple[str, str, str]] = []
+        # Source-only projections require their supplied snapshots. Re-sealing
+        # serialized digests does not substitute for checking those bytes and
+        # reconstructing the wrapper/delegate identities from source.
+        # Defer the analyzer import until validation to avoid model/analyzer cycles.
+        from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (  # noqa: PLC0415
+            _fixture_source_projections,
+        )
+
+        expected_projections = {
+            item.id: item.model_dump(mode="json", exclude={"id"})
+            for item in _fixture_source_projections(_source_project_root(self.app_path), audit)
+        }
+        supplied_projections = {
+            item.id: item.model_dump(mode="json", exclude={"id"})
+            for item in path_report.source_projections
+        }
+        if expected_projections != supplied_projections:
+            raise ValueError("SQL source projection contradicts its supplied source snapshots")
+        for projection in path_report.source_projections:
+            projection_begin = occurrence_by_id.get(projection.begin_occurrence_id)
+            projection_stage = occurrence_by_id.get(projection.unresolved_stage_occurrence_id)
+            if (
+                projection_begin is None
+                or projection_stage is None
+                or projection_begin.resolver_status.value != "exact"
+                or projection_begin.audit_status.value != "matched"
+                or projection_stage.resolver_status.value != "unresolved"
+                or projection_stage.reason_code != "fixture_type_proof_unavailable"
+                or projection_stage.source_spelling != f"{projection.receiver_expression}.execute"
+            ):
+                raise ValueError("SQL source projection roles contradict its exact audit")
+            if any(
+                occurrence.file_path != projection.endpoint_file_path
+                or not any(
+                    endpoint.id == projection.endpoint_id for endpoint in occurrence.endpoints
+                )
+                for occurrence in (projection_begin, projection_stage)
+            ):
+                raise ValueError("SQL source projection is absent from its endpoint source audit")
         for path in path_report.ordered_paths:
             evidence = evidence_by_endpoint.get(path.endpoint_id)
             if evidence is None:
