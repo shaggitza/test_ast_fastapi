@@ -271,9 +271,9 @@ def read_primary_artifact(path: Path, kind: RecordKind) -> PrimaryArtifact:
             )
         seen[identity] = line_number
         records.append(value)
-    if not records:
+    if not records and kind == "ground_truth":
         raise BenchmarkSchemaError(f"{path}: artifact has no records")
-    if kind == "prediction":
+    if kind == "prediction" and records:
         candidates = {
             record["candidate"] for record in records if isinstance(record.get("candidate"), str)
         }

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "id": "gh103-source-evidence-policy-v1",
+  "collector_minimum_python": "3.10",
+  "toml_parser": "stdlib tomllib on Python >=3.11; inert declared tomli compatibility on Python 3.10",
+  "text_encoding": "strict UTF-8; preserve exact fetched bytes for hashes; parse logical lines with splitlines()",
+  "origin": "https://api.github.com",
+  "authentication": "GITHUB_TOKEN or GH_TOKEN when already configured; otherwise public unauthenticated reads; never prompt or persist credentials",
+  "budgets": {
+    "requests_total": 1500,
+    "tree_requests": 200,
+    "blob_requests": 1200,
+    "overhead_requests": 100,
+    "response_bytes_per_request": 4194304,
+    "response_bytes_total": 268435456,
+    "wall_seconds": 1200,
+    "file_bytes": 1048576,
+    "source_bytes_per_side": 8388608,
+    "tree_entries": 1000000,
+    "tree_pages_per_side": 10,
+    "candidate_paths_per_side": 6,
+    "report_bytes": 20971520,
+    "request_timeout_seconds": 20
+  },
+  "candidate_selection_order": [
+    "root Python metadata in lexical path order",
+    "root license candidates in lexical path order",
+    "root dependency declarations and lockfiles in lexical path order",
+    "remaining deduplicated candidates in lexical path order"
+  ],
+  "candidate_groups": {
+    "python_versions": ["pyproject.toml", "setup.cfg", "tox.ini", ".python-version"],
+    "license": ["LICENSE", "LICENCE", "COPYING", "NOTICE", "case-insensitive suffix variants"],
+    "dependencies": ["pyproject.toml", "setup.py", "setup.cfg", "requirements*.txt", "constraints*.txt", "Pipfile", "poetry.lock", "uv.lock", "pdm.lock", "conda*.yml", "environment*.yml", "tox.ini"]
+  },
+  "statuses": {
+    "observed": "At least one candidate was read and parsed under a supported rule; recognized facts remain observed when other selected files are unsupported, with unknown_count recorded.",
+    "missing": "Complete tree and candidate scan found no in-scope candidate path.",
+    "uncertain": "Incomplete tree, candidate cap, source-byte/file-size cap, invalid UTF-8, or parse ambiguity prevents a complete conclusion.",
+    "multiple_or_conflicting": "Multiple evidence files or incompatible recognized declarations were observed under the group's conflict rule.",
+    "unsupported": "Candidate bytes were read but syntax or source form is outside supported parser rules."
+  },
+  "conflict_rules": {
+    "python_versions": "More than one distinct recognized declaration fact across files is multiple_or_conflicting.",
+    "license": "More than one in-scope license/copying/notice candidate file is multiple_or_conflicting, independent of identifier equality.",
+    "dependencies": "Different specifier strings for the same normalized dependency name are multiple_or_conflicting; otherwise supported facts remain observed."
+  },
+  "mixed_supported_and_unsupported": "Keep status observed when any selected source yields supported facts; include unsupported candidates in unknown_count and unsupported_syntax reason_codes.",
+  "dependency_declaration_fact": "declarations_present is true, false, or null and is separate from the common status vocabulary",
+  "tree_policy": "Use complete recursive tree; when truncated or response-capped, verify exact commit metadata as needed and walk nonrecursive tree objects with a visited set. Incomplete traversal is uncertain and never establishes absence.",
+  "blob_identity": "Strictly decode API base64, require declared/tree sizes to agree, recompute SHA1('blob ' + ASCII(size) + NUL + raw bytes) and require tree OID match; record raw size and SHA-256.",
+  "global_failure_policy": "Global request, response-byte, wall-time, report-size, checksum, authentication, lock-identity, or blob-identity failure aborts without publishing any artifact.",
+  "publication": "Strict schema and exact lock identity validation; atomic same-directory hard-link no-clobber output.",
+  "interpretation_limits": ["source declarations and file presence only", "no runtime compatibility", "no installed dependency feasibility or resolvability", "no security or legal clearance", "no PR-type classification", "no reviewer labels or canonical truth", "no benchmark evaluation result"],
+  "forbidden_operations": ["clone", "checkout", "import upstream source", "execute setup.py", "install dependencies", "build", "shell", "subprocess", "VM", "model", "broker", "corpus job"]
+}

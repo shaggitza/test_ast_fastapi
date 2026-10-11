@@ -577,6 +577,33 @@ class _CallableUnion:
     targets: tuple[tuple[tuple[str, InvocationKind], _FinitePointsTo | None], ...]
 
 
+_TraceExitKind = Literal["break", "continue", "return", "raise"]
+
+
+@dataclass(frozen=True)
+class _TraceEnvironment:
+    """All bounded local value domains at one structured control-flow exit."""
+
+    flow: dict[str, Any]
+    strings: dict[str, Any]
+    deferred: dict[str, Any]
+    callables: dict[str, Any]
+    partials: dict[str, Any]
+    lambdas: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _TraceExit:
+    kind: _TraceExitKind
+    environment: _TraceEnvironment
+
+
+@dataclass(frozen=True)
+class _TraceFlow:
+    normal: bool
+    exits: tuple[_TraceExit, ...] = ()
+
+
 @dataclass(frozen=True)
 class _ExecutorSummary:
     """Exact callback and forwarding semantics for one executor wrapper."""
@@ -598,9 +625,11 @@ class MypyAnalyzer:
     # Schema 27 distinguishes typed execution evidence and creation-time partial
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
-    EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v7-partial-holes-exposure-identities"
-    )
+    EXECUTION_STATE_POLICY = "conditional-finally-partial-capture-v10-structured-loop-exits"
+    MAX_CONTROL_EXIT_STATES = 32
+    MAX_LOOP_FLOW_PASSES = 4
+    MAX_LOOP_BODY_EVALUATIONS = 32
+    MAX_FINALLY_BODY_EVALUATIONS = 32
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
     MAX_CALL_SPAN_SOURCE_ITEMS = 200_000
@@ -615,7 +644,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 8
+    EXECUTION_SUMMARY_VERSION = 9
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -5492,6 +5521,46 @@ class MypyAnalyzer:
             return False
         return None
 
+    def _partial_function_capture_names(
+        self,
+        call: Any,
+        call_site: ResolvedCallSite | None,
+        callable_environment: dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]],
+        import_map: dict[str, str],
+        excluded_names: set[str],
+    ) -> set[str]:
+        """Keep ordinary function aliases captured by one proven partial constructor."""
+        from mypy.nodes import ARG_NAMED, ARG_POS, NameExpr
+
+        if (
+            call_site is None
+            or call_site.status != CallResolutionStatus.EXACT
+            or call_site.canonical_symbol != "functools.partial"
+            or call_site.invocation != InvocationKind.CONSTRUCTOR
+            or self._explicit_import_fullname(call.callee, import_map) != "functools.partial"
+            or not call.args
+            or len(call.args) > 257
+            or not (len(call.args) == len(call.arg_kinds) == len(call.arg_names))
+            or call.arg_kinds[0] != ARG_POS
+            or call.arg_names[0] is not None
+        ):
+            return set()
+        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
+            if not ((kind == ARG_POS and name is None) or (kind == ARG_NAMED and name is not None)):
+                return set()
+
+        captured: set[str] = set()
+        for argument in call.args:
+            if not isinstance(argument, NameExpr) or argument.name in excluded_names:
+                continue
+            value = callable_environment.get(argument.name)
+            if value is None or isinstance(value, _CallableUnion):
+                continue
+            declaration, receiver = value
+            if declaration[1] == InvocationKind.FUNCTION and receiver is None:
+                captured.add(argument.name)
+        return captured
+
     @staticmethod
     def _exposed_partial_names(root: Any, *, max_nodes: int = 4096) -> tuple[set[str], bool]:
         """Collect local roots exposed through bounded argument expressions."""
@@ -5702,9 +5771,7 @@ class MypyAnalyzer:
         lambda_environment: dict[str, Any] = {}
         lambda_execution_states: dict[int, str] = {}
         possible_execution_depth = [0]
-        try_callable_snapshots: list[
-            list[dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]]
-        ] = []
+        try_callable_snapshots: list[list[_TraceEnvironment]] = []
         try_assignment_target_ids: list[set[int]] = []
         try_unbound_name_load_ids: list[set[int]] = []
         try_definite_unbound_name_load_ids: list[set[int]] = []
@@ -5972,8 +6039,7 @@ class MypyAnalyzer:
         def handle_call_expr(call: CallExpr) -> None:
             """Trace exact calls, adding bounded finite receiver edges as LOW only."""
             nonlocal string_environment
-            for snapshots in try_callable_snapshots:
-                snapshots.append(dict(callable_environment))
+            _record_exception_state(call)
             call_site = self._resolved_call_site(
                 call,
                 current_file,
@@ -6534,6 +6600,13 @@ class MypyAnalyzer:
             # A call with unrelated arguments cannot invalidate every local
             # fact. Kill only values explicitly exposed to the call; unknown
             # star expansion invalidates the bounded local state.
+            captured_function_names = self._partial_function_capture_names(
+                call,
+                call_site,
+                callable_environment,
+                import_map,
+                partial_environment.keys() | lambda_environment.keys(),
+            )
             exposed_names: set[str] = set()
             if isinstance(callee, MemberExpr) and isinstance(callee.expr, NameExpr):
                 exposed_names.add(callee.expr.name)
@@ -6575,7 +6648,10 @@ class MypyAnalyzer:
             for name in exposed_names:
                 flow_environment.pop(name, None)
                 deferred_environment.pop(name, None)
-                callable_environment.pop(name, None)
+                # Constructing a proven partial stores ordinary function objects;
+                # it does not invoke them or rebind their caller-local aliases.
+                if name not in captured_function_names:
+                    callable_environment.pop(name, None)
                 lambda_environment.pop(name, None)
                 string_environment.pop(name, None)
                 partial_environment.pop(name, None)
@@ -6601,84 +6677,44 @@ class MypyAnalyzer:
             for name in alias_target_names(target):
                 clear_alias_name(name)
 
-        def context_bound_names(body: Any) -> set[str] | None:
-            """Collect reachable local writes without entering nested scope bodies."""
+        def context_bound_names(
+            body: Any, *, reject_nonlocal_targets: bool = False
+        ) -> set[str] | None:
+            """Collect reachable writes, optionally rejecting unknown mutation targets."""
             from types import GetSetDescriptorType, MemberDescriptorType
 
-            from mypy.nodes import AssignmentExpr, DelStmt, Node, OperatorAssignmentStmt, TempNode
+            from mypy.nodes import (
+                Argument,
+                AssignmentExpr,
+                BytesExpr,
+                ComplexExpr,
+                DelStmt,
+                EllipsisExpr,
+                FloatExpr,
+                GlobalDecl,
+                IntExpr,
+                Node,
+                NonlocalDecl,
+                OperatorAssignmentStmt,
+                OverloadedFuncDef,
+                PassStmt,
+                Statement,
+                StrExpr,
+                TempNode,
+                Var,
+            )
 
             names: set[str] = set()
-            pending: list[Any] = [body]
-            seen: set[int] = set()
+            invoked_names: set[str] = set()
+            direct_partial_callees: set[int] = set()
+            source_function_ids: set[int] | None = None
+            source_scopes: dict[int, Any] = {
+                id(getattr(function_node, "body", None)): function_node
+            }
+            release_profiles: dict[int, dict[str, set[int]] | None] = {}
             item_count = 0
-            while pending:
-                item = pending.pop()
-                item_count += 1
-                if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
-                    self._record_analysis_limitation(
-                        "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
-                    )
-                    return None
-                if isinstance(item, (list, tuple)):
-                    pending.extend(item)
-                    continue
-                if not isinstance(item, Node) or id(item) in seen:
-                    continue
-                seen.add(id(item))
-                if len(seen) > self.MAX_CALL_SPAN_MYPY_NODES:
-                    self._record_analysis_limitation(
-                        "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
-                    )
-                    return None
-                if isinstance(item, AssignmentStmt) and not isinstance(item.rvalue, TempNode):
-                    for assignment_target in item.lvalues:
-                        names.update(alias_target_names(assignment_target))
-                elif isinstance(item, AssignmentExpr):
-                    names.update(alias_target_names(item.target))
-                elif isinstance(item, OperatorAssignmentStmt):
-                    names.update(alias_target_names(item.lvalue))
-                elif isinstance(item, DelStmt):
-                    names.update(alias_target_names(item.expr))
-                elif isinstance(item, ForStmt):
-                    if (
-                        not item.is_async
-                        and isinstance(item.expr, (ListExpr, TupleExpr))
-                        and not item.expr.items
-                    ):
-                        pending.extend((item.expr, item.else_body))
-                        continue
-                    names.update(alias_target_names(item.index))
-                elif isinstance(item, WithStmt):
-                    for context_target in item.target:
-                        names.update(alias_target_names(context_target))
-                elif isinstance(item, TryStmt):
-                    for exception_target in item.vars:
-                        names.update(alias_target_names(exception_target))
-                elif isinstance(item, (FuncDef, Decorator, ClassDef)):
-                    names.add(item.name)
-                elif isinstance(item, Import):
-                    names.update(alias or module.split(".")[0] for module, alias in item.ids)
-                elif isinstance(item, ImportFrom):
-                    names.update(alias or name for name, alias in item.names)
-                if isinstance(item, IfStmt):
-                    can_reach_else = True
-                    for expression, branch in zip(item.expr, item.body, strict=True):
-                        pending.append(expression)
-                        truth = self._literal_boolean(expression)
-                        if truth is not False:
-                            pending.append(branch)
-                        if truth is True:
-                            can_reach_else = False
-                            break
-                    if can_reach_else:
-                        pending.append(item.else_body)
-                    continue
-                if isinstance(item, WhileStmt) and self._literal_boolean(item.expr) is False:
-                    pending.extend((item.expr, item.else_body))
-                    continue
-                if isinstance(item, LambdaExpr):
-                    # A lambda's body and bindings belong to its deferred scope.
-                    continue
+
+            def syntax_children(item: Any) -> list[Any]:
                 fields = set(getattr(item, "__dict__", {}))
                 for cls in type(item).__mro__:
                     fields.update(
@@ -6686,6 +6722,7 @@ class MypyAnalyzer:
                         for attribute, descriptor in cls.__dict__.items()
                         if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
                     )
+                children: list[Any] = []
                 for attribute in fields:
                     if attribute.startswith("__") or attribute in {
                         "node",
@@ -6698,16 +6735,781 @@ class MypyAnalyzer:
                         "original_decorators",
                     }:
                         continue
-                    if isinstance(item, FuncDef) and attribute == "body":
-                        continue
-                    if isinstance(item, ClassDef) and attribute in {"defs", "removed_statements"}:
-                        continue
                     child = getattr(item, attribute, None)
                     if isinstance(child, (Node, list, tuple)):
-                        pending.append(child)
+                        children.append(child)
+                return children
+
+            def release_profile(scope: Any) -> dict[str, set[int]] | None:
+                """Prove old local values are unbound or scalar before release.
+
+                This uses every lexical binder, not a single try-body snapshot.
+                Unknown bindings, captured writes and parameters remain unsafe.
+                A unique non-repeated local binder has no prior local value.
+                """
+                nonlocal item_count
+                scope_id = id(scope)
+                if scope_id in release_profiles:
+                    return release_profiles[scope_id]
+                release_profiles[scope_id] = None
+                bindings: dict[str, dict[int, tuple[bool, bool]]] = {}
+                unsafe = {argument.variable.name for argument in getattr(scope, "arguments", ())}
+
+                def scalar(expression: Any) -> bool:
+                    return isinstance(
+                        expression,
+                        (BytesExpr, ComplexExpr, EllipsisExpr, FloatExpr, IntExpr, StrExpr),
+                    ) or (
+                        isinstance(expression, NameExpr)
+                        and expression.name in {"False", "None", "True"}
+                    )
+
+                def remember(target: Any, literal: bool, repeated: bool) -> bool:
+                    targets = [target]
+                    target_count = 0
+                    while targets:
+                        current = targets.pop()
+                        target_count += 1
+                        if target_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                            return False
+                        if current is None:
+                            continue
+                        if isinstance(current, NameExpr):
+                            bindings.setdefault(current.name, {})[id(current)] = (
+                                literal,
+                                repeated,
+                            )
+                        elif isinstance(current, (ListExpr, TupleExpr)):
+                            targets.extend(current.items)
+                        elif isinstance(current, StarExpr):
+                            targets.append(current.expr)
+                        else:
+                            return False
+                    return True
+
+                pending_profile: list[tuple[Any, bool]] = [(getattr(scope, "body", None), False)]
+                profile_seen: set[tuple[int, bool]] = set()
+                while pending_profile:
+                    current, repeated = pending_profile.pop()
+                    item_count += 1
+                    if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                        self._record_analysis_limitation(
+                            "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                        )
+                        return None
+                    if isinstance(current, (list, tuple)):
+                        pending_profile.extend((child, repeated) for child in current)
+                        continue
+                    if not isinstance(current, Node) or (id(current), repeated) in profile_seen:
+                        continue
+                    profile_seen.add((id(current), repeated))
+                    if len(profile_seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                        self._record_analysis_limitation(
+                            "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                        )
+                        return None
+                    if isinstance(current, (GlobalDecl, NonlocalDecl)):
+                        unsafe.update(current.names)
+                        continue
+                    if isinstance(current, (Decorator, ClassDef, MatchStmt)):
+                        # Their binding effects need a separate scope/protocol proof.
+                        return None
+                    if isinstance(current, FuncDef):
+                        bindings.setdefault(current.name, {})[id(current)] = (False, repeated)
+                        pending_profile.extend(
+                            (argument.initializer, repeated) for argument in current.arguments
+                        )
+                        # Captured writes can invalidate an otherwise scalar outer name.
+                        captured: list[Any] = [current.body]
+                        captured_seen: set[int] = set()
+                        while captured:
+                            child = captured.pop()
+                            item_count += 1
+                            if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                                self._record_analysis_limitation(
+                                    "MAX_CONTEXT_BINDING_ITEMS",
+                                    limit=self.MAX_CALL_SPAN_MYPY_ITEMS,
+                                )
+                                return None
+                            if isinstance(child, (list, tuple)):
+                                captured.extend(child)
+                                continue
+                            if not isinstance(child, Node) or id(child) in captured_seen:
+                                continue
+                            captured_seen.add(id(child))
+                            if len(captured_seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                                self._record_analysis_limitation(
+                                    "MAX_CONTEXT_BINDING_NODES",
+                                    limit=self.MAX_CALL_SPAN_MYPY_NODES,
+                                )
+                                return None
+                            if isinstance(child, (GlobalDecl, NonlocalDecl)):
+                                unsafe.update(child.names)
+                            captured.extend(syntax_children(child))
+                        continue
+                    if isinstance(current, LambdaExpr):
+                        pending_profile.extend(
+                            (argument.initializer, repeated) for argument in current.arguments
+                        )
+                        continue
+                    if isinstance(current, AssignmentStmt):
+                        if not isinstance(current.rvalue, TempNode):
+                            for target in current.lvalues:
+                                if not remember(target, scalar(current.rvalue), repeated):
+                                    return None
+                    elif isinstance(current, AssignmentExpr):
+                        if not remember(current.target, scalar(current.value), repeated):
+                            return None
+                    elif isinstance(current, OperatorAssignmentStmt):
+                        if not remember(current.lvalue, False, repeated):
+                            return None
+                    elif isinstance(current, DelStmt):
+                        if not remember(current.expr, True, repeated):
+                            return None
+                    elif isinstance(current, ForStmt):
+                        if not remember(current.index, False, True):
+                            return None
+                    elif isinstance(current, WithStmt):
+                        for context_target in current.target:
+                            if not remember(context_target, False, repeated):
+                                return None
+                    elif isinstance(current, TryStmt):
+                        for exception_target in current.vars:
+                            if not remember(exception_target, False, repeated):
+                                return None
+                    elif isinstance(current, Import):
+                        for module, alias in current.ids:
+                            bindings.setdefault(alias or module.split(".")[0], {})[id(current)] = (
+                                False,
+                                repeated,
+                            )
+                    elif isinstance(current, ImportFrom):
+                        for name, alias in current.names:
+                            bindings.setdefault(alias or name, {})[id(current)] = (False, repeated)
+                    elif isinstance(current, Statement) and not isinstance(
+                        current,
+                        (
+                            AssertStmt,
+                            Block,
+                            BreakStmt,
+                            ContinueStmt,
+                            ExpressionStmt,
+                            IfStmt,
+                            PassStmt,
+                            RaiseStmt,
+                            ReturnStmt,
+                            WhileStmt,
+                        ),
+                    ):
+                        return None
+                    child_repeated = repeated or isinstance(current, (ForStmt, WhileStmt))
+                    pending_profile.extend(
+                        (child, child_repeated) for child in syntax_children(current)
+                    )
+                safe: dict[str, set[int]] = {}
+                for name, occurrences in bindings.items():
+                    if name in unsafe:
+                        continue
+                    if all(literal for literal, _ in occurrences.values()) or (
+                        len(occurrences) == 1 and not next(iter(occurrences.values()))[1]
+                    ):
+                        safe[name] = set(occurrences)
+                release_profiles[scope_id] = safe
+                return safe
+
+            def safe_release(name: str, binder: Any, scope: Any) -> bool:
+                profile = release_profile(scope)
+                return profile is not None and id(binder) in profile.get(name, set())
+
+            def source_body(target: Any) -> Any | None:
+                """Require local syntax or an exact executable project declaration."""
+                nonlocal source_function_ids, item_count
+                if not isinstance(target, FuncDef):
+                    return None
+                if source_function_ids is None:
+                    source_function_ids = set()
+                    declarations: list[Any] = [function_node.body]
+                    declaration_seen: set[int] = set()
+                    while declarations:
+                        declaration = declarations.pop()
+                        item_count += 1
+                        if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                            self._record_analysis_limitation(
+                                "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                            )
+                            return None
+                        if isinstance(declaration, (list, tuple)):
+                            declarations.extend(declaration)
+                            continue
+                        if not isinstance(declaration, Node) or id(declaration) in declaration_seen:
+                            continue
+                        declaration_seen.add(id(declaration))
+                        if len(declaration_seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                            self._record_analysis_limitation(
+                                "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                            )
+                            return None
+                        if isinstance(declaration, FuncDef):
+                            source_function_ids.add(id(declaration))
+                        declarations.extend(syntax_children(declaration))
+                if id(target) in source_function_ids:
+                    source_scopes[id(target.body)] = target
+                    return target.body
+                resolved = self._function_node_for_fullname(target.fullname)
+                if (
+                    resolved is None
+                    or resolved[2] not in self._project_modules
+                    or not resolved[1].endswith(".py")
+                    or self._actual_function(resolved[0]) is not target
+                    or isinstance(resolved[0], Decorator)
+                ):
+                    return None
+                source_scopes[id(target.body)] = target
+                return target.body
+
+            def record_target(target: Any, *, outer_scope: bool, scope: Any) -> bool:
+                if not reject_nonlocal_targets:
+                    names.update(alias_target_names(target))
+                    return True
+                targets = [target]
+                target_count = 0
+                while targets:
+                    binding_target = targets.pop()
+                    target_count += 1
+                    if target_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                        self._record_analysis_limitation(
+                            "MAX_CONTEXT_BINDING_TARGETS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                        )
+                        return False
+                    if binding_target is None:
+                        continue
+                    if isinstance(binding_target, NameExpr):
+                        if not safe_release(binding_target.name, binding_target, scope):
+                            return False
+                        if outer_scope:
+                            names.add(binding_target.name)
+                    elif isinstance(binding_target, (TupleExpr, ListExpr)):
+                        targets.extend(binding_target.items)
+                    elif isinstance(binding_target, StarExpr):
+                        targets.append(binding_target.expr)
+                    else:
+                        return False
+                return True
+
+            def invoked_bodies(expression: Any, *, outer_scope: bool) -> list[Any] | None:
+                """Resolve only source-backed bodies; uncertain callable values abstain."""
+                target = getattr(expression, "node", None)
+                if isinstance(expression, LambdaExpr):
+                    source_scopes[id(expression.body)] = expression
+                    return [expression.body]
+                if isinstance(target, OverloadedFuncDef):
+                    target = target.impl
+                if isinstance(target, Decorator):
+                    # A runtime decorator may replace the declared function.
+                    return None
+                if isinstance(target, FuncDef):
+                    resolved_body = source_body(target)
+                    return [resolved_body] if resolved_body is not None else None
+                if not outer_scope or not isinstance(expression, NameExpr):
+                    return None
+                assigned_lambda = lambda_environment.get(expression.name)
+                if assigned_lambda is not None:
+                    actual_lambda = (
+                        assigned_lambda[0]
+                        if isinstance(assigned_lambda, tuple) and len(assigned_lambda) == 4
+                        else assigned_lambda
+                    )
+                    if not isinstance(actual_lambda, LambdaExpr):
+                        return None
+                    source_scopes[id(actual_lambda.body)] = actual_lambda
+                    return [actual_lambda.body]
+                partial_alias = partial_environment.get(expression.name)
+                alias_value: Any = (
+                    (partial_alias.declaration, partial_alias.receiver)
+                    if partial_alias is not None
+                    else callable_environment.get(expression.name)
+                )
+                if alias_value is None:
+                    return None
+                aliases = (
+                    alias_value.targets
+                    if isinstance(alias_value, _CallableUnion)
+                    else (alias_value,)
+                )
+                bodies: list[Any] = []
+                for declaration, _ in aliases:
+                    if declaration[1] != InvocationKind.FUNCTION:
+                        return None
+                    resolved = self._function_node_for_fullname(declaration[0])
+                    if resolved is None or isinstance(resolved[0], Decorator):
+                        return None
+                    actual = self._actual_function(resolved[0])
+                    if not isinstance(actual, FuncDef):
+                        return None
+                    resolved_body = source_body(actual)
+                    if resolved_body is None:
+                        return None
+                    bodies.append(resolved_body)
+                return bodies or None
+
+            pending: list[tuple[Any, bool, Any]] = [(body, True, function_node)]
+            seen: set[tuple[int, bool, int]] = set()
+            while pending:
+                item, outer_scope, scope = pending.pop()
+                item_count += 1
+                if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                    )
+                    return None
+                if isinstance(item, (list, tuple)):
+                    pending.extend((child, outer_scope, scope) for child in item)
+                    continue
+                if not isinstance(item, Node) or (id(item), outer_scope, id(scope)) in seen:
+                    continue
+                seen.add((id(item), outer_scope, id(scope)))
+                if len(seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                    )
+                    return None
+                if reject_nonlocal_targets and not isinstance(
+                    item,
+                    (
+                        Argument,
+                        AssignmentExpr,
+                        AssignmentStmt,
+                        Block,
+                        BreakStmt,
+                        BytesExpr,
+                        CallExpr,
+                        ComplexExpr,
+                        ContinueStmt,
+                        DelStmt,
+                        EllipsisExpr,
+                        ExpressionStmt,
+                        FloatExpr,
+                        ForStmt,
+                        FuncDef,
+                        IfStmt,
+                        IntExpr,
+                        LambdaExpr,
+                        ListExpr,
+                        NameExpr,
+                        PassStmt,
+                        ReturnStmt,
+                        StrExpr,
+                        TempNode,
+                        TryStmt,
+                        TupleExpr,
+                        Var,
+                        WhileStmt,
+                    ),
+                ):
+                    # Accept only forms whose effects are handled below.
+                    # Other forms may invoke implicit user protocols.
+                    return None
+                if isinstance(item, AssignmentStmt) and not isinstance(item.rvalue, TempNode):
+                    if (
+                        reject_nonlocal_targets
+                        and any(
+                            isinstance(target, (ListExpr, TupleExpr)) for target in item.lvalues
+                        )
+                        and not isinstance(item.rvalue, (ListExpr, TupleExpr))
+                    ):
+                        return None
+                    for assignment_target in item.lvalues:
+                        if not record_target(
+                            assignment_target, outer_scope=outer_scope, scope=scope
+                        ):
+                            return None
+                elif isinstance(item, AssignmentExpr):
+                    if not record_target(item.target, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, OperatorAssignmentStmt):
+                    if not record_target(item.lvalue, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, DelStmt):
+                    if not record_target(item.expr, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, ForStmt):
+                    if (
+                        not item.is_async
+                        and isinstance(item.expr, (ListExpr, TupleExpr))
+                        and not item.expr.items
+                    ):
+                        pending.extend(
+                            ((item.expr, outer_scope, scope), (item.else_body, outer_scope, scope))
+                        )
+                        continue
+                    if reject_nonlocal_targets and (
+                        item.is_async or not isinstance(item.expr, (ListExpr, TupleExpr))
+                    ):
+                        # A deferred or custom iterator can mutate captured state.
+                        return None
+                    if not record_target(item.index, outer_scope=outer_scope, scope=scope):
+                        return None
+                elif isinstance(item, WithStmt):
+                    for context_target in item.target:
+                        if not record_target(context_target, outer_scope=outer_scope, scope=scope):
+                            return None
+                elif isinstance(item, TryStmt):
+                    if reject_nonlocal_targets and item.handlers:
+                        return None
+                    for exception_target in item.vars:
+                        if not record_target(
+                            exception_target, outer_scope=outer_scope, scope=scope
+                        ):
+                            return None
+                elif isinstance(item, (FuncDef, Decorator, ClassDef)):
+                    if reject_nonlocal_targets and not safe_release(item.name, item, scope):
+                        return None
+                    if outer_scope:
+                        names.add(item.name)
+                elif isinstance(item, Import):
+                    if outer_scope:
+                        names.update(alias or module.split(".")[0] for module, alias in item.ids)
+                elif isinstance(item, ImportFrom):
+                    if outer_scope:
+                        names.update(alias or name for name, alias in item.names)
+                if (
+                    reject_nonlocal_targets
+                    and isinstance(item, NameExpr)
+                    and item.name in partial_environment
+                    and id(item) not in direct_partial_callees
+                ):
+                    # Reading the captured mutable object can expose its args or
+                    # keyword mapping even through a source-less method stub.
+                    return None
+                if reject_nonlocal_targets and isinstance(item, CallExpr):
+                    if any(kind in (ARG_STAR, ARG_STAR2) for kind in item.arg_kinds):
+                        return None
+                    if outer_scope and isinstance(item.callee, NameExpr):
+                        invoked_names.add(item.callee.name)
+                        if item.callee.name in partial_environment:
+                            direct_partial_callees.add(id(item.callee))
+                    called_bodies = invoked_bodies(item.callee, outer_scope=outer_scope)
+                    if called_bodies is None:
+                        return None
+                    pending.extend(
+                        (called_body, False, source_scopes[id(called_body)])
+                        for called_body in called_bodies
+                    )
+                    # A supplied local closure can run inside a higher-order helper.
+                    for argument in item.args:
+                        argument_node = getattr(argument, "node", None)
+                        if (
+                            isinstance(argument, LambdaExpr)
+                            or isinstance(argument_node, (FuncDef, Decorator, OverloadedFuncDef))
+                            or (
+                                outer_scope
+                                and isinstance(argument, NameExpr)
+                                and (
+                                    argument.name in callable_environment
+                                    or argument.name in partial_environment
+                                    or argument.name in lambda_environment
+                                )
+                            )
+                        ):
+                            argument_bodies = invoked_bodies(argument, outer_scope=outer_scope)
+                            if argument_bodies is None:
+                                return None
+                            pending.extend(
+                                (called_body, False, source_scopes[id(called_body)])
+                                for called_body in argument_bodies
+                            )
+                if isinstance(item, IfStmt):
+                    if reject_nonlocal_targets and any(
+                        self._literal_boolean(expression) is None for expression in item.expr
+                    ):
+                        return None
+                    can_reach_else = True
+                    for expression, branch in zip(item.expr, item.body, strict=True):
+                        pending.append((expression, outer_scope, scope))
+                        truth = self._literal_boolean(expression)
+                        if truth is not False:
+                            pending.append((branch, outer_scope, scope))
+                        if truth is True:
+                            can_reach_else = False
+                            break
+                    if can_reach_else:
+                        pending.append((item.else_body, outer_scope, scope))
+                    continue
+                if (
+                    reject_nonlocal_targets
+                    and isinstance(item, WhileStmt)
+                    and self._literal_boolean(item.expr) is None
+                ):
+                    return None
+                if isinstance(item, WhileStmt) and self._literal_boolean(item.expr) is False:
+                    pending.extend(
+                        ((item.expr, outer_scope, scope), (item.else_body, outer_scope, scope))
+                    )
+                    continue
+                if isinstance(item, LambdaExpr):
+                    # Default arguments execute at creation; the body is deferred.
+                    pending.extend(
+                        (argument.initializer, outer_scope, scope) for argument in item.arguments
+                    )
+                    continue
+                for child in syntax_children(item):
+                    if isinstance(item, FuncDef) and child is item.body:
+                        continue
+                    if isinstance(item, ClassDef) and (
+                        child is item.defs or child is getattr(item, "removed_statements", None)
+                    ):
+                        continue
+                    pending.append((child, outer_scope, scope))
+            if reject_nonlocal_targets and names & invoked_names:
+                # A callee rebound by this suite may no longer be its typed declaration.
+                return None
             return names
 
-        def walk_node(n: Any) -> bool | None:
+        loop_body_evaluations = [0]
+        finally_body_evaluations = [0]
+
+        def _trace_snapshot() -> _TraceEnvironment:
+            return _TraceEnvironment(
+                dict(flow_environment),
+                dict(string_environment),
+                dict(deferred_environment),
+                dict(callable_environment),
+                dict(partial_environment),
+                dict(lambda_environment),
+            )
+
+        def _restore_trace_snapshot(state: _TraceEnvironment) -> None:
+            nonlocal flow_environment, string_environment, deferred_environment
+            nonlocal callable_environment, partial_environment, lambda_environment
+            flow_environment = dict(state.flow)
+            string_environment = dict(state.strings)
+            deferred_environment = dict(state.deferred)
+            callable_environment = dict(state.callables)
+            partial_environment = dict(state.partials)
+            lambda_environment = dict(state.lambdas)
+
+        def _trace_cap(
+            source_node: Any,
+            code: str,
+            *,
+            target_count: int | None = None,
+            limit: int | None = None,
+        ) -> None:
+            context = (
+                self._active_source_file,
+                self._active_source_line,
+                self._active_source_column,
+            )
+            try:
+                self._active_source_file = current_file
+                line = getattr(source_node, "line", None)
+                if isinstance(line, int) and line > 0:
+                    self._active_source_line = line
+                self._active_source_column = None
+                self._record_analysis_limitation(code, target_count=target_count, limit=limit)
+            finally:
+                (self._active_source_file, self._active_source_line, self._active_source_column) = (
+                    context
+                )
+
+        def _join_trace_snapshots(
+            states: list[_TraceEnvironment],
+            source_node: Any = None,
+        ) -> _TraceEnvironment:
+            if not states:
+                return _TraceEnvironment({}, {}, {}, {}, {}, {})
+
+            def equal_map(attribute: str, *, identity: bool = False) -> dict[str, Any]:
+                maps = [getattr(state, attribute) for state in states]
+                common = set.intersection(*(set(value) for value in maps))
+                return {
+                    key: maps[0][key]
+                    for key in common
+                    if all(
+                        value[key] is maps[0][key] if identity else value[key] == maps[0][key]
+                        for value in maps[1:]
+                    )
+                }
+
+            callables = self._join_callable_environments([state.callables for state in states])
+            missing_binding = False
+            names = set().union(*(set(state.callables) for state in states))
+            for name in sorted(names - set(callables)):
+                targets: list[Any] = []
+                for state in states:
+                    value = state.callables.get(name)
+                    candidates = (
+                        value.targets
+                        if isinstance(value, _CallableUnion)
+                        else (value,)
+                        if value is not None
+                        else ()
+                    )
+                    for candidate in candidates:
+                        if candidate not in targets:
+                            targets.append(candidate)
+                if targets:
+                    missing_binding = True
+                    if len(targets) <= self.MAX_POINTS_TO_TARGETS:
+                        callables[name] = _CallableUnion(tuple(targets))
+                    else:
+                        _trace_cap(
+                            source_node,
+                            "MAX_POINTS_TO_TARGETS",
+                            target_count=len(targets),
+                            limit=self.MAX_POINTS_TO_TARGETS,
+                        )
+            partials = equal_map("partials")
+            lambdas = equal_map("lambdas", identity=True)
+            unsupported_aliases = (
+                set().union(*(set(state.partials) for state in states)) - set(partials)
+            ) | (set().union(*(set(state.lambdas) for state in states)) - set(lambdas))
+            if missing_binding or unsupported_aliases:
+                _trace_cap(source_node, "UNKNOWN_CONTROL_EXIT_BINDING")
+            return _TraceEnvironment(
+                self._join_finite_environments([state.flow for state in states]),
+                equal_map("strings"),
+                equal_map("deferred"),
+                callables,
+                partials,
+                lambdas,
+            )
+
+        def _coalesce_trace_exits(normal: bool, exits: list[_TraceExit]) -> _TraceFlow:
+            unique: list[_TraceExit] = []
+            for exit_state in exits:
+                if exit_state not in unique:
+                    unique.append(exit_state)
+            if len(unique) <= self.MAX_CONTROL_EXIT_STATES:
+                return _TraceFlow(normal, tuple(unique))
+            grouped: dict[_TraceExitKind, list[_TraceEnvironment]] = {}
+            for exit_state in unique:
+                grouped.setdefault(exit_state.kind, []).append(exit_state.environment)
+            _trace_cap(
+                None,
+                "MAX_CONTROL_EXIT_STATES",
+                target_count=len(unique),
+                limit=self.MAX_CONTROL_EXIT_STATES,
+            )
+            return _TraceFlow(
+                normal,
+                tuple(
+                    _TraceExit(kind, _join_trace_snapshots(states))
+                    for kind, states in sorted(grouped.items())
+                ),
+            )
+
+        def _record_exception_state(source_node: Any) -> None:
+            for snapshots in try_callable_snapshots:
+                state = _trace_snapshot()
+                if not snapshots or snapshots[-1] != state:
+                    snapshots.append(state)
+                    if len(snapshots) > self.MAX_CONTROL_EXIT_STATES:
+                        _trace_cap(
+                            source_node,
+                            "MAX_EXCEPTION_FLOW_STATES",
+                            target_count=len(snapshots),
+                            limit=self.MAX_CONTROL_EXIT_STATES,
+                        )
+                        snapshots[:] = [_join_trace_snapshots(snapshots, source_node)]
+
+        def _normal_flow(outcome: _TraceFlow | None) -> _TraceFlow:
+            return outcome if outcome is not None else _TraceFlow(True)
+
+        def _widen_loop_state(state: _TraceEnvironment) -> _TraceEnvironment:
+            callables: dict[str, Any] = {}
+            for name, value in state.callables.items():
+                targets = value.targets if isinstance(value, _CallableUnion) else (value,)
+                callables[name] = _CallableUnion(targets)
+            return _TraceEnvironment({}, {}, {}, callables, {}, {})
+
+        def _walk_loop_flow(
+            loop: Any,
+            *,
+            index: Any = None,
+            condition_true: bool = False,
+            mandatory_single_pass: bool = False,
+        ) -> _TraceFlow:
+            entry = _trace_snapshot()
+            header = entry
+            body_exits: list[_TraceExit] = []
+            converged = False
+            budget_hit = False
+            passes = 1 if mandatory_single_pass else self.MAX_LOOP_FLOW_PASSES
+            for iteration in range(passes):
+                if loop_body_evaluations[0] >= self.MAX_LOOP_BODY_EVALUATIONS:
+                    budget_hit = True
+                    break
+                loop_body_evaluations[0] += 1
+                _restore_trace_snapshot(header)
+                if index is not None:
+                    clear_alias_target(index)
+                if not mandatory_single_pass:
+                    possible_execution_depth[0] += 1
+                try:
+                    if isinstance(loop, WhileStmt) and iteration:
+                        walk_node(loop.expr)
+                    body_flow = _normal_flow(walk_node(loop.body))
+                finally:
+                    if not mandatory_single_pass:
+                        possible_execution_depth[0] -= 1
+                body_exits = list(
+                    _coalesce_trace_exits(
+                        False,
+                        [*body_exits, *body_flow.exits],
+                    ).exits
+                )
+                backedges = [
+                    *([_trace_snapshot()] if body_flow.normal else []),
+                    *(item.environment for item in body_flow.exits if item.kind == "continue"),
+                ]
+                if mandatory_single_pass or not backedges:
+                    converged = True
+                    break
+                next_header = _join_trace_snapshots([entry, *backedges], loop)
+                if next_header == header:
+                    header = next_header
+                    converged = True
+                    break
+                header = next_header
+            if budget_hit or not converged:
+                _trace_cap(
+                    loop,
+                    "MAX_LOOP_FLOW_ITERATIONS",
+                    target_count=loop_body_evaluations[0],
+                    limit=self.MAX_LOOP_BODY_EVALUATIONS
+                    if budget_hit
+                    else self.MAX_LOOP_FLOW_PASSES,
+                )
+                header = _widen_loop_state(header)
+                entry = _widen_loop_state(entry)
+                body_exits = [
+                    _TraceExit(item.kind, _widen_loop_state(item.environment))
+                    for item in body_exits
+                ]
+            escaping = [item for item in body_exits if item.kind not in {"break", "continue"}]
+            normal_states = [item.environment for item in body_exits if item.kind == "break"]
+            if not condition_true:
+                _restore_trace_snapshot(header)
+                if loop.else_body is None:
+                    normal_states.append(_trace_snapshot())
+                else:
+                    possible_execution_depth[0] += 1
+                    try:
+                        else_flow = _normal_flow(walk_node(loop.else_body))
+                    finally:
+                        possible_execution_depth[0] -= 1
+                    if else_flow.normal:
+                        normal_states.append(_trace_snapshot())
+                    # A loop's else suite is outside its body. Its break or
+                    # continue belongs to an enclosing loop, if one exists.
+                    escaping.extend(else_flow.exits)
+            _restore_trace_snapshot(
+                _join_trace_snapshots(normal_states, loop) if normal_states else entry
+            )
+            return _coalesce_trace_exits(bool(normal_states), escaping)
+
+        def walk_node(n: Any) -> _TraceFlow | None:
             """Recursively walk a mypy AST node with a bounded local environment."""
             nonlocal \
                 callable_environment, \
@@ -6753,9 +7555,7 @@ class MypyAnalyzer:
                     and any(id(n) in loads for loads in try_unbound_name_load_ids)
                 )
             ):
-                for snapshots in try_callable_snapshots:
-                    if not snapshots or snapshots[-1] != callable_environment:
-                        snapshots.append(dict(callable_environment))
+                _record_exception_state(n)
             node_line = getattr(n, "line", 0)
             if isinstance(node_line, int) and node_line > 0:
                 self._active_source_file = current_file
@@ -6834,9 +7634,12 @@ class MypyAnalyzer:
                         )
 
             elif isinstance(n, Block):
+                block_exits: list[_TraceExit] = []
                 for stmt in n.body:
-                    if walk_node(stmt) is False:
-                        return False
+                    outcome = _normal_flow(walk_node(stmt))
+                    block_exits.extend(outcome.exits)
+                    if not outcome.normal:
+                        return _coalesce_trace_exits(False, block_exits)
                     if (
                         isinstance(stmt, AssignmentStmt)
                         and isinstance(stmt.rvalue, NameExpr)
@@ -6844,12 +7647,10 @@ class MypyAnalyzer:
                             id(stmt.rvalue) in loads for loads in try_definite_unbound_name_load_ids
                         )
                     ):
-                        return False
-                    # Statements following an unconditional terminal cannot
-                    # contribute executable references in this block.
-                    if isinstance(stmt, (ReturnStmt, RaiseStmt, BreakStmt, ContinueStmt)):
-                        return False
-                return True
+                        # This proven unbound read stops the block like a raise.
+                        block_exits.append(_TraceExit("raise", _trace_snapshot()))
+                        return _coalesce_trace_exits(False, block_exits)
+                return _coalesce_trace_exits(True, block_exits)
 
             elif isinstance(n, ExpressionStmt):
                 walk_node(n.expr)
@@ -7207,9 +8008,15 @@ class MypyAnalyzer:
                         lambda_environment.clear()
                     walk_node(lv)
 
+            elif isinstance(n, BreakStmt):
+                return _TraceFlow(False, (_TraceExit("break", _trace_snapshot()),))
+
+            elif isinstance(n, ContinueStmt):
+                return _TraceFlow(False, (_TraceExit("continue", _trace_snapshot()),))
+
             elif isinstance(n, ReturnStmt):
                 walk_node(n.expr)
-                return False
+                return _TraceFlow(False, (_TraceExit("return", _trace_snapshot()),))
 
             elif isinstance(n, IfStmt):
                 base_environment = dict(flow_environment)
@@ -7227,6 +8034,7 @@ class MypyAnalyzer:
                 branch_partials: list[dict[str, _PartialCallable]] = []
                 branch_lambdas: list[dict[str, Any]] = []
                 branch_completions: list[bool] = []
+                branch_exits: list[_TraceExit] = []
                 selected: int | None = None
                 unknown_before_selection = False
                 for expr, body in zip(n.expr, n.body, strict=True):
@@ -7260,7 +8068,9 @@ class MypyAnalyzer:
                     if branch_possible:
                         possible_execution_depth[0] += 1
                     try:
-                        branch_completes = walk_node(body) is not False
+                        branch_flow = _normal_flow(walk_node(body))
+                        branch_exits.extend(branch_flow.exits)
+                        branch_completes = branch_flow.normal
                     finally:
                         if branch_possible:
                             possible_execution_depth[0] -= 1
@@ -7285,7 +8095,9 @@ class MypyAnalyzer:
                     if unknown_before_selection:
                         possible_execution_depth[0] += 1
                     try:
-                        branch_completes = walk_node(n.else_body) is not False
+                        branch_flow = _normal_flow(walk_node(n.else_body))
+                        branch_exits.extend(branch_flow.exits)
+                        branch_completes = branch_flow.normal
                     finally:
                         if unknown_before_selection:
                             possible_execution_depth[0] -= 1
@@ -7362,15 +8174,12 @@ class MypyAnalyzer:
                     for name in common_lambdas
                     if all(branch[name] is branch_lambdas[0][name] for branch in branch_lambdas[1:])
                 }
-                return bool(continuing_paths)
+                return _coalesce_trace_exits(bool(continuing_paths), branch_exits)
 
             elif isinstance(n, WhileStmt):
                 walk_node(n.expr)
                 if self._literal_boolean(n.expr) is False:
-                    # The loop body is unreachable; only its else suite executes.
-                    if n.else_body is not None:
-                        walk_node(n.else_body)
-                    return None
+                    return _normal_flow(walk_node(n.else_body))
                 mandatory_single_pass = (
                     self._literal_boolean(n.expr) is True
                     and bool(n.body.body)
@@ -7394,203 +8203,88 @@ class MypyAnalyzer:
                         for item in n.body.body[:-1]
                     )
                 )
-                before_callables = dict(callable_environment)
-                before_partials = dict(partial_environment)
-                before_lambdas = dict(lambda_environment)
-                if not mandatory_single_pass:
-                    possible_execution_depth[0] += 1
-                try:
-                    walk_node(n.body)
-                finally:
-                    if not mandatory_single_pass:
-                        possible_execution_depth[0] -= 1
-                after_callables = dict(callable_environment)
-                after_partials = dict(partial_environment)
-                after_lambdas = dict(lambda_environment)
-                callable_environment = (
-                    after_callables
-                    if mandatory_single_pass
-                    else self._join_callable_environments([before_callables, after_callables])
+                return _walk_loop_flow(
+                    n,
+                    condition_true=self._literal_boolean(n.expr) is True,
+                    mandatory_single_pass=mandatory_single_pass,
                 )
-                partial_environment = {
-                    name: value
-                    for name, value in (
-                        after_partials.items() if mandatory_single_pass else before_partials.items()
-                    )
-                    if mandatory_single_pass or after_partials.get(name) == value
-                }
-                lambda_environment = {
-                    name: value
-                    for name, value in (
-                        after_lambdas.items() if mandatory_single_pass else before_lambdas.items()
-                    )
-                    if mandatory_single_pass or after_lambdas.get(name) is value
-                }
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
 
             elif isinstance(n, ForStmt):
-                consume_generator_expression(
-                    n.expr,
-                    n.line,
-                    require_async=bool(n.is_async),
-                )
+                consume_generator_expression(n.expr, n.line, require_async=bool(n.is_async))
                 walk_node(n.expr)
                 if (
                     not n.is_async
                     and isinstance(n.expr, (ListExpr, TupleExpr))
                     and not n.expr.items
                 ):
-                    # The binder never executes on this proven zero-trip path.
-                    return walk_node(n.else_body) if n.else_body is not None else True
-                before_flow = dict(flow_environment)
-                before_strings = dict(string_environment)
-                before_deferred = dict(deferred_environment)
-                before_callables = dict(callable_environment)
-                before_partials = dict(partial_environment)
-                before_lambdas = dict(lambda_environment)
-                clear_alias_target(n.index)
-                possible_execution_depth[0] += 1
-                try:
-                    walk_node(n.body)
-                finally:
-                    possible_execution_depth[0] -= 1
-                after_callables = dict(callable_environment)
-                after_partials = dict(partial_environment)
-                after_lambdas = dict(lambda_environment)
-                joined_callables = self._join_callable_environments(
-                    [before_callables, after_callables]
-                )
-                unknown_binding = False
-                for name in sorted(before_callables.keys() | after_callables.keys()):
-                    if name in joined_callables:
-                        continue
-                    targets: list[Any] = []
-                    for environment in (before_callables, after_callables):
-                        alias_value = environment.get(name)
-                        candidates = (
-                            alias_value.targets
-                            if isinstance(alias_value, _CallableUnion)
-                            else (alias_value,)
-                            if alias_value is not None
-                            else ()
-                        )
-                        for candidate in candidates:
-                            if candidate not in targets:
-                                targets.append(candidate)
-                    if targets:
-                        unknown_binding = True
-                        if len(targets) <= self.MAX_POINTS_TO_TARGETS:
-                            # A missing path is unknown, so a known zero-trip or
-                            # positive-trip target is possible evidence only.
-                            joined_callables[name] = _CallableUnion(tuple(targets))
-                        else:
-                            self._record_analysis_limitation(
-                                "MAX_POINTS_TO_TARGETS",
-                                target_count=len(targets),
-                                limit=self.MAX_POINTS_TO_TARGETS,
-                            )
-                callable_environment = joined_callables
-                partial_environment = {
-                    name: value
-                    for name, value in before_partials.items()
-                    if after_partials.get(name) == value
-                }
-                lambda_environment = {
-                    name: value
-                    for name, value in before_lambdas.items()
-                    if after_lambdas.get(name) is value
-                }
-                unknown_binding |= (set(before_partials) | set(after_partials)) != set(
-                    partial_environment
-                ) or (set(before_lambdas) | set(after_lambdas)) != set(lambda_environment)
-                if unknown_binding:
-                    self._record_analysis_limitation("UNKNOWN_ITERATION_BINDING")
-                flow_environment = self._join_finite_environments([before_flow, flow_environment])
-                string_environment = {
-                    name: value
-                    for name, value in before_strings.items()
-                    if string_environment.get(name) == value
-                }
-                deferred_environment = {
-                    name: value
-                    for name, value in before_deferred.items()
-                    if deferred_environment.get(name) == value
-                }
-                if n.else_body is not None:
-                    # Break may bypass the else path. Keep only bindings that
-                    # agree with the pre-else state and retain possible targets.
-                    before_else_callables = dict(callable_environment)
-                    before_else_partials = dict(partial_environment)
-                    before_else_lambdas = dict(lambda_environment)
-                    possible_execution_depth[0] += 1
-                    try:
-                        walk_node(n.else_body)
-                    finally:
-                        possible_execution_depth[0] -= 1
-                    callable_environment = self._join_callable_environments(
-                        [before_else_callables, callable_environment]
-                    )
-                    partial_environment = {
-                        name: value
-                        for name, value in before_else_partials.items()
-                        if partial_environment.get(name) == value
-                    }
-                    lambda_environment = {
-                        name: value
-                        for name, value in before_else_lambdas.items()
-                        if lambda_environment.get(name) is value
-                    }
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
+                    return _normal_flow(walk_node(n.else_body))
+                return _walk_loop_flow(n, index=n.index)
 
             elif isinstance(n, WithStmt):
                 for expression, context_target in zip(n.expr, n.target, strict=True):
                     walk_node(expression)
                     clear_alias_target(context_target)
+                context_entry = _trace_snapshot()
                 written_names = context_bound_names(n.body)
-                before_alias_names = (
-                    set(callable_environment) | set(partial_environment) | set(lambda_environment)
-                )
-                walk_node(n.body)
-                if written_names is None:
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
-                    callable_environment.clear()
-                    partial_environment.clear()
-                    lambda_environment.clear()
-                else:
-                    affected_aliases = written_names & (
-                        before_alias_names
-                        | set(callable_environment)
-                        | set(partial_environment)
-                        | set(lambda_environment)
-                    )
-                    if affected_aliases:
-                        self._record_analysis_limitation("UNKNOWN_CONTEXT_EXIT_BINDING")
-                    # A manager may suppress an exception before or after a
-                    # body assignment. Its final linear state is not proof of
-                    # that alias at the continuation, but untouched locals stay.
-                    for name in written_names:
-                        clear_alias_name(name)
-                    for context_target in n.target:
-                        clear_alias_target(context_target)
+                body_flow = _normal_flow(walk_node(n.body))
+                context_normals = [_trace_snapshot()] if body_flow.normal else []
+                context_exits: list[_TraceExit] = []
+
+                def sanitize_context_state(state: _TraceEnvironment) -> _TraceEnvironment:
+                    _restore_trace_snapshot(state)
+                    if written_names is None:
+                        _trace_cap(n, "UNKNOWN_CONTEXT_EXIT_BINDING")
+                        _restore_trace_snapshot(_TraceEnvironment({}, {}, {}, {}, {}, {}))
+                    else:
+                        tracked = (
+                            set(context_entry.callables)
+                            | set(context_entry.partials)
+                            | set(context_entry.lambdas)
+                            | set(callable_environment)
+                            | set(partial_environment)
+                            | set(lambda_environment)
+                        )
+                        if tracked & written_names:
+                            _trace_cap(n, "UNKNOWN_CONTEXT_EXIT_BINDING")
+                        for name in written_names:
+                            clear_alias_name(name)
+                        for context_target in n.target:
+                            clear_alias_target(context_target)
+                    after = _trace_snapshot()
+                    if after.callables or after.partials or after.lambdas:
+                        # The suite's writes do not account for the manager's
+                        # implicit __exit__, which may mutate captured locals.
+                        # No manager-exit effect summary is established here.
+                        _trace_cap(n, "UNKNOWN_CONTEXT_MANAGER_EXIT")
+                        _restore_trace_snapshot(_widen_loop_state(after))
+                    return _trace_snapshot()
+
+                for context_exit in body_flow.exits:
+                    sanitized = sanitize_context_state(context_exit.environment)
+                    context_exits.append(_TraceExit(context_exit.kind, sanitized))
+                    if context_exit.kind == "raise":
+                        # The manager may suppress a raised exception. This
+                        # alternative is conditional, not proof of an alias.
+                        context_normals.append(
+                            _join_trace_snapshots(
+                                [context_entry, sanitized],
+                                n,
+                            )
+                        )
+                        _trace_cap(n, "UNKNOWN_CONTEXT_EXCEPTION_SUPPRESSION")
+                context_normals = [sanitize_context_state(state) for state in context_normals]
+                if context_normals:
+                    _restore_trace_snapshot(_join_trace_snapshots(context_normals, n))
+                return _coalesce_trace_exits(bool(context_normals), context_exits)
 
             elif isinstance(n, TryStmt):
                 # An exception may be raised before or after any assignment in the
                 # protected body. Handler entry therefore joins the pre-try and
                 # post-body callable state instead of inheriting one linear walk.
-                before_callables = dict(callable_environment)
-                before_partials = dict(partial_environment)
-                before_lambdas = dict(lambda_environment)
+                before_try_state = _trace_snapshot()
                 try_assigned_names: set[str] = set()
                 assignment_target_ids: set[int] = set()
-                callable_snapshots: list[
-                    dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
-                ] = []
+                callable_snapshots: list[_TraceEnvironment] = []
                 from types import GetSetDescriptorType, MemberDescriptorType
 
                 from mypy.nodes import (
@@ -7734,132 +8428,195 @@ class MypyAnalyzer:
                 try_unbound_name_load_ids.append(unbound_name_load_ids)
                 try_definite_unbound_name_load_ids.append(definite_unbound_name_load_ids)
                 try:
-                    body_can_continue = walk_node(n.body) is not False
+                    body_flow = _normal_flow(walk_node(n.body))
                 finally:
                     try_assignment_target_ids.pop()
                     try_unbound_name_load_ids.pop()
                     try_definite_unbound_name_load_ids.pop()
                     try_callable_snapshots.pop()
-                body_callables = dict(callable_environment)
-                body_partials = dict(partial_environment)
-                body_lambdas = dict(lambda_environment)
-                normal_callables = dict(body_callables)
-                normal_partials = dict(body_partials)
-                normal_lambdas = dict(body_lambdas)
-                normal_can_continue = body_can_continue
-                handler_completions: list[bool] = []
-                handler_callables: list[
-                    dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]]
-                ] = []
-                handler_partials: list[dict[str, _PartialCallable]] = []
-                handler_lambdas: list[dict[str, Any]] = []
-                for handler_index, handler in enumerate(n.handlers):
-                    handler_var = n.vars[handler_index] if handler_index < len(n.vars) else None
-                    flow_environment.clear()
-                    string_environment.clear()
-                    deferred_environment.clear()
-                    callable_environment = self._join_callable_environments(
-                        [before_callables, *callable_snapshots]
-                    )
-                    partial_environment = {
-                        key: value
-                        for key, value in before_partials.items()
-                        if key not in try_assigned_names and body_partials.get(key) == value
-                    }
-                    lambda_environment = {
-                        key: value
-                        for key, value in before_lambdas.items()
-                        if key not in try_assigned_names and body_lambdas.get(key) is value
-                    }
-                    clear_alias_target(handler_var)
-                    possible_execution_depth[0] += 1
-                    try:
-                        handler_can_continue = walk_node(handler) is not False
-                    finally:
-                        possible_execution_depth[0] -= 1
-                    # Python deletes an exception-bound name when leaving its handler.
-                    clear_alias_target(handler_var)
-                    handler_callables.append(dict(callable_environment))
-                    handler_partials.append(dict(partial_environment))
-                    handler_lambdas.append(dict(lambda_environment))
-                    handler_completions.append(handler_can_continue)
+                body_state = _trace_snapshot()
+                pending_exits = list(body_flow.exits)
+                normal_states: list[_TraceEnvironment] = []
+                if body_flow.normal:
+                    if n.else_body is None:
+                        normal_states.append(body_state)
+                    else:
+                        _restore_trace_snapshot(body_state)
+                        possible_execution_depth[0] += 1
+                        try:
+                            else_flow = _normal_flow(walk_node(n.else_body))
+                        finally:
+                            possible_execution_depth[0] -= 1
+                        if else_flow.normal:
+                            normal_states.append(_trace_snapshot())
+                        pending_exits.extend(else_flow.exits)
+
+                handler_sources = [before_try_state, *callable_snapshots]
+                handler_entry = _join_trace_snapshots(handler_sources, n)
                 if hasattr(n, "types") and n.types:
                     for exc_type in n.types:
                         if exc_type:
                             walk_node(exc_type)
-                if n.else_body and body_can_continue:
+                for handler_index, handler in enumerate(n.handlers):
+                    handler_var = n.vars[handler_index] if handler_index < len(n.vars) else None
+                    _restore_trace_snapshot(handler_entry)
                     flow_environment.clear()
                     string_environment.clear()
                     deferred_environment.clear()
-                    callable_environment = dict(body_callables)
-                    partial_environment = dict(body_partials)
-                    lambda_environment = dict(body_lambdas)
+                    partial_environment = {
+                        name: value
+                        for name, value in before_try_state.partials.items()
+                        if name not in try_assigned_names
+                        and body_state.partials.get(name) == value
+                        and all(state.partials.get(name) == value for state in handler_sources)
+                    }
+                    lambda_environment = {
+                        name: value
+                        for name, value in before_try_state.lambdas.items()
+                        if name not in try_assigned_names
+                        and body_state.lambdas.get(name) is value
+                        and all(state.lambdas.get(name) is value for state in handler_sources)
+                    }
+                    if set(handler_entry.partials) - set(partial_environment) or set(
+                        handler_entry.lambdas
+                    ) - set(lambda_environment):
+                        _trace_cap(n, "UNKNOWN_EXCEPTION_EXIT_BINDING")
+                    clear_alias_target(handler_var)
                     possible_execution_depth[0] += 1
                     try:
-                        normal_can_continue = walk_node(n.else_body) is not False
+                        handler_flow = _normal_flow(walk_node(handler))
                     finally:
                         possible_execution_depth[0] -= 1
-                    normal_callables = dict(callable_environment)
-                    normal_partials = dict(partial_environment)
-                    normal_lambdas = dict(lambda_environment)
-                callable_paths = [normal_callables, *handler_callables]
-                partial_paths = [normal_partials, *handler_partials]
-                lambda_paths = [normal_lambdas, *handler_lambdas]
-                completion_paths = [normal_can_continue, *handler_completions]
-                can_continue = any(completion_paths)
-                if not n.finally_body:
-                    callable_paths = [
-                        path
-                        for path, complete in zip(callable_paths, completion_paths, strict=True)
-                        if complete
-                    ]
-                    partial_paths = [
-                        path
-                        for path, complete in zip(partial_paths, completion_paths, strict=True)
-                        if complete
-                    ]
-                    lambda_paths = [
-                        path
-                        for path, complete in zip(lambda_paths, completion_paths, strict=True)
-                        if complete
-                    ]
-                if callable_paths:
-                    callable_environment = self._join_callable_environments(callable_paths)
-                else:
-                    callable_environment.clear()
-                if partial_paths:
-                    common_partial = set.intersection(*(set(path) for path in partial_paths))
-                    partial_environment = {
-                        key: partial_paths[0][key]
-                        for key in common_partial
-                        if all(path[key] == partial_paths[0][key] for path in partial_paths[1:])
-                    }
-                else:
-                    partial_environment.clear()
-                if lambda_paths:
-                    common_lambda = set.intersection(*(set(path) for path in lambda_paths))
-                    lambda_environment = {
-                        key: lambda_paths[0][key]
-                        for key in common_lambda
-                        if all(path[key] is lambda_paths[0][key] for path in lambda_paths[1:])
-                    }
-                else:
-                    lambda_environment.clear()
+                    handler_end = _trace_snapshot()
+                    if handler_flow.normal:
+                        clear_alias_target(handler_var)
+                        normal_states.append(_trace_snapshot())
+                    for abrupt in handler_flow.exits:
+                        _restore_trace_snapshot(abrupt.environment)
+                        # Exception binders are deleted on abrupt exits too.
+                        clear_alias_target(handler_var)
+                        pending_exits.append(_TraceExit(abrupt.kind, _trace_snapshot()))
+                    _restore_trace_snapshot(handler_end)
+                    clear_alias_target(handler_var)
+
                 if n.finally_body:
-                    # Finally runs on every exit from an entered try. Retain
-                    # enclosing uncertainty, without adding uncertainty just
-                    # because control exits normally, raises, or returns.
-                    finally_can_continue = walk_node(n.finally_body) is not False
-                    can_continue = can_continue and finally_can_continue
-                    # Finally is traced for terminal and continuing exits. Its
-                    # merged alias state cannot establish a post-try binding.
-                    callable_environment.clear()
-                    partial_environment.clear()
-                    lambda_environment.clear()
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
-                return can_continue
+                    # Operations can raise before the body's explicit exit.
+                    # Finally must see those source-backed snapshots as well.
+                    pending_exits.extend(_TraceExit("raise", state) for state in callable_snapshots)
+                    pending_exits = list(_coalesce_trace_exits(False, pending_exits).exits)
+                    pending: dict[
+                        Literal["normal", "break", "continue", "return", "raise"],
+                        list[_TraceEnvironment],
+                    ] = {}
+                    if normal_states:
+                        pending["normal"] = normal_states
+                    for abrupt in pending_exits:
+                        pending.setdefault(abrupt.kind, []).append(abrupt.environment)
+                    written_names = context_bound_names(
+                        n.finally_body, reject_nonlocal_targets=True
+                    )
+                    final_normals: list[_TraceEnvironment] = []
+                    final_exits: list[_TraceExit] = []
+
+                    def sanitize_final_state(
+                        candidate: _TraceEnvironment,
+                        incoming: _TraceEnvironment,
+                    ) -> _TraceEnvironment:
+                        if written_names is None:
+                            _trace_cap(n, "UNKNOWN_FINALLY_EXIT_BINDING")
+                            return _TraceEnvironment({}, {}, {}, {}, {}, {})
+                        callables = {
+                            name: value
+                            for name, value in incoming.callables.items()
+                            if name not in written_names and candidate.callables.get(name) == value
+                        }
+                        partials = {
+                            name: value
+                            for name, value in incoming.partials.items()
+                            if name not in written_names and candidate.partials.get(name) == value
+                        }
+                        lambdas = {
+                            name: value
+                            for name, value in incoming.lambdas.items()
+                            if name not in written_names and candidate.lambdas.get(name) is value
+                        }
+                        dropped = (
+                            ((set(incoming.callables) | set(candidate.callables)) - set(callables))
+                            | ((set(incoming.partials) | set(candidate.partials)) - set(partials))
+                            | ((set(incoming.lambdas) | set(candidate.lambdas)) - set(lambdas))
+                        )
+                        if dropped:
+                            _trace_cap(n, "UNKNOWN_FINALLY_EXIT_BINDING", target_count=len(dropped))
+                        return _TraceEnvironment({}, {}, {}, callables, partials, lambdas)
+
+                    for pending_kind, states in pending.items():
+                        incoming = _join_trace_snapshots(states, n)
+                        _restore_trace_snapshot(incoming)
+                        if finally_body_evaluations[0] >= self.MAX_FINALLY_BODY_EVALUATIONS:
+                            _trace_cap(
+                                n,
+                                "MAX_FINALLY_FLOW_ITERATIONS",
+                                target_count=finally_body_evaluations[0],
+                                limit=self.MAX_FINALLY_BODY_EVALUATIONS,
+                            )
+                            unknown = _TraceEnvironment({}, {}, {}, {}, {}, {})
+                            # An unvisited finalizer may preserve or replace
+                            # its incoming control kind; no exact alias survives.
+                            if pending_kind == "normal":
+                                final_normals.append(unknown)
+                            else:
+                                # A finalizer can replace an abrupt kind, but
+                                # cannot resume normally after an abrupt try.
+                                for unknown_kind in ("break", "continue", "return", "raise"):
+                                    final_exits.append(_TraceExit(unknown_kind, unknown))
+                            continue
+                        finally_body_evaluations[0] += 1
+                        conditional_finally = len(pending) > 1
+                        if conditional_finally:
+                            possible_execution_depth[0] += 1
+                        try:
+                            final_flow = _normal_flow(walk_node(n.finally_body))
+                        finally:
+                            if conditional_finally:
+                                possible_execution_depth[0] -= 1
+                        if final_flow.normal:
+                            final_state = sanitize_final_state(_trace_snapshot(), incoming)
+                            if pending_kind == "normal":
+                                final_normals.append(final_state)
+                            else:
+                                final_exits.append(_TraceExit(pending_kind, final_state))
+                        for final_exit in final_flow.exits:
+                            final_exits.append(
+                                _TraceExit(
+                                    final_exit.kind,
+                                    sanitize_final_state(final_exit.environment, incoming),
+                                )
+                            )
+                    normal_states = final_normals
+                    pending_exits = final_exits
+
+                # Preserve the previous exception-boundary abstention for
+                # finite object/string/generator values on every outgoing path.
+                normal_states = [
+                    _TraceEnvironment({}, {}, {}, state.callables, state.partials, state.lambdas)
+                    for state in normal_states
+                ]
+                pending_exits = [
+                    _TraceExit(
+                        item.kind,
+                        _TraceEnvironment(
+                            {},
+                            {},
+                            {},
+                            item.environment.callables,
+                            item.environment.partials,
+                            item.environment.lambdas,
+                        ),
+                    )
+                    for item in pending_exits
+                ]
+                _restore_trace_snapshot(_join_trace_snapshots(normal_states, n))
+                return _coalesce_trace_exits(bool(normal_states), pending_exits)
 
             elif isinstance(n, AwaitExpr):
                 if isinstance(n.expr, CallExpr):
@@ -7869,7 +8626,8 @@ class MypyAnalyzer:
             elif isinstance(n, (RaiseStmt, AssertStmt)):
                 walk_node(n.expr)
                 if isinstance(n, RaiseStmt):
-                    return False
+                    walk_node(n.from_expr)
+                    return _TraceFlow(False, (_TraceExit("raise", _trace_snapshot()),))
 
             elif isinstance(n, IndexExpr):
                 walk_node(n.base)
