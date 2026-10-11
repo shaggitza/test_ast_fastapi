@@ -226,6 +226,128 @@ def test_source_grounded_synthetic_raw_records_allow_unknown_edge_lines(tmp_path
     assert reference_edge.traversable is False
 
 
+@pytest.mark.parametrize("marker", ["missing", None])
+def test_raw_null_or_missing_node_marker_keeps_checked_source_without_span(
+    tmp_path: Path, marker: str | None
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    node = payload["nodes"][1]
+    if marker == "missing":
+        node.pop("source_location")
+    else:
+        node["source_location"] = None
+    graph = tmp_path / "raw-node-no-marker.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    retained = snapshot.nodes[1]
+    assert retained.source_file == Path("app.py")
+    assert retained.source_sha256 == hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
+    assert retained.span is None
+
+
+@pytest.mark.parametrize("collection", ["nodes", "links"])
+def test_node_link_v1_rejects_raw_origin_marker(tmp_path: Path, collection: str) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    record = payload[collection][0]
+    record["_origin"] = "ast"
+    graph = tmp_path / "v1-raw-origin.json"
+    _write_payload(graph, payload)
+    with pytest.raises(GraphifyAdapterError, match="_origin"):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+@pytest.mark.parametrize(
+    ("specifier", "module_id"),
+    [
+        ("requests", "requests"),
+        ("@scope/package", "package"),
+        ("pydantic-settings", "pydantic_settings"),
+    ],
+)
+def test_source_grounded_external_import_stub_is_opaque_and_nontraversable(
+    tmp_path: Path, specifier: str, module_id: str
+) -> None:
+    """Mirror the pinned bare/scoped import constructor, without producer execution."""
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    payload["nodes"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "file_type": "code",
+            "id": module_id,
+            "label": specifier,
+            "source_file": specifier,
+        }
+    )
+    payload["edges"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "relation": "imports",
+            "source": "app_module",
+            "source_file": "app.py",
+            "target": module_id,
+        }
+    )
+    graph = tmp_path / "external-import-stub.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    stub = next(node for node in snapshot.nodes if node.node_id == module_id)
+    edge = snapshot.edges[-1]
+    assert stub.source_file is None
+    assert stub.source_sha256 is None
+    assert stub.span is None
+    assert stub.unverified_source_file == specifier
+    assert edge.span is None
+    assert edge.traversable is False
+
+
+@pytest.mark.parametrize(
+    ("specifier", "node_id"),
+    [("../outside.py", "outside.py"), ("/tmp/evil.py", "evil.py"), ("requests", "other")],
+)
+def test_external_stub_exception_does_not_cover_bad_or_unmatched_paths(
+    tmp_path: Path, specifier: str, node_id: str
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    payload["nodes"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "file_type": "code",
+            "id": node_id,
+            "label": specifier,
+            "source_file": specifier,
+        }
+    )
+    payload["edges"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "relation": "imports",
+            "source": "app_module",
+            "source_file": "app.py",
+            "target": node_id,
+        }
+    )
+    graph = tmp_path / "not-an-external-stub.json"
+    _write_payload(graph, payload)
+    with pytest.raises(GraphifyAdapterError):
+        load_graphify_snapshot(
+            graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+        )
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [

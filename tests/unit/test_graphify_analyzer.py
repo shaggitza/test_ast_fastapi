@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from fastapi_endpoint_detector.analyzer.graphify_adapter import (
+    GRAPHIFY_RAW_SCHEMA,
     GraphifyEdge,
     GraphifySourceSpan,
     GraphSide,
@@ -172,6 +173,63 @@ def test_reverse_traversal_tracks_cross_file_alias_and_exact_method_range(tmp_pa
         endpoints=(_seed(),),
     )
     assert method_result.evidence == ()
+
+
+def test_external_raw_import_stub_cannot_seed_or_bind_endpoint_traversal(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    (root / "app.py").write_text(
+        "from helpers import helper\n\ndef endpoint():\n    return helper()\n", encoding="utf-8"
+    )
+    (root / "helpers.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "graphify_0_9_30_raw_synthetic.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    payload["nodes"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "file_type": "code",
+            "id": "endpoint",
+            "label": "endpoint",
+            "source_file": "endpoint",
+        }
+    )
+    payload["edges"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "relation": "imports",
+            "source": "app_module",
+            "source_file": "app.py",
+            "target": "endpoint",
+        }
+    )
+    graph = tmp_path / "raw-external-endpoint.json"
+    graph.write_text(json.dumps(payload), encoding="utf-8")
+    snapshot = load_graphify_snapshot(
+        graph, project_root=root, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+
+    result = traverse_graphify_snapshot(
+        snapshot,
+        project_root=root,
+        changed_ranges=(ChangedSourceRange(Path("endpoint"), 1, 1),),
+        endpoints=(
+            GraphEndpointSeed(
+                "GET /items",
+                "endpoint",
+                Path("app.py"),
+                3,
+                4,
+                EndpointDiscoveryStatus.ESTABLISHED,
+            ),
+        ),
+    )
+    assert result.evidence == ()
+    assert any("endpoint did not bind uniquely" in item for item in result.limitations)
 
 
 @pytest.mark.integration

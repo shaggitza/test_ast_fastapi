@@ -14,6 +14,7 @@ import math
 import os
 import re
 import stat
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
@@ -110,11 +111,12 @@ class GraphifyNode:
 
     node_id: str
     label: str
-    source_file: Path
-    source_sha256: str
+    source_file: Path | None
+    source_sha256: str | None
     span: GraphifySourceSpan | None
     extractor_strength: GraphifyStrength | None
     producer_origin: str | None = None
+    unverified_source_file: str | None = None
 
 
 @dataclass(frozen=True)
@@ -441,6 +443,71 @@ def _raw_origin(item: dict[str, object], location: str, *, raw_schema: bool) -> 
     return "ast"
 
 
+_EXTERNAL_IMPORT_SPECIFIER = re.compile(
+    r"^(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*)*$"
+)
+
+
+def _pinned_make_id(value: str) -> str:
+    """Mirror Graphify v0.9.30 ``make_id`` for a single import name."""
+    normalized = unicodedata.normalize("NFKC", value)
+    normalized = re.sub(r"[^\w]+", "_", normalized, flags=re.UNICODE)
+    normalized = re.sub(r"_+", "_", normalized)
+    return normalized.strip("_").casefold()
+
+
+def _external_stub_ids(
+    raw_nodes: list[object], raw_edges: list[object], registry: _SourceRegistry
+) -> dict[str, str]:
+    """Identify only pinned bare-import stubs with a verified importer edge.
+
+    The producer uses ``_make_id(final_specifier_segment)`` and stores the raw
+    specifier in both label and source_file. Its neighboring import edge has no
+    source_location; that edge's own source_file must be a checked project file
+    before this exception is granted.
+    """
+    node_by_id: dict[str, dict[str, object]] = {}
+    for value in raw_nodes:
+        if isinstance(value, dict) and isinstance(value.get("id"), str):
+            node_by_id[value["id"]] = cast("dict[str, object]", value)
+    confirmed: dict[str, str] = {}
+    for index, value in enumerate(raw_edges):
+        if not isinstance(value, dict):
+            continue
+        edge = cast("dict[str, object]", value)
+        target = edge.get("target")
+        node = node_by_id.get(target) if isinstance(target, str) else None
+        if node is None or edge.get("relation") not in {"imports", "imports_from"}:
+            continue
+        if (
+            edge.get("_origin") != "ast"
+            or edge.get("confidence") != "EXTRACTED"
+            or "source_location" in edge
+            or "source_file" not in edge
+        ):
+            continue
+        importer = registry.read(edge["source_file"], f"edges[{index}].source_file")
+        if importer.relative_path is None:
+            continue
+        raw_specifier = node.get("source_file")
+        if (
+            not isinstance(raw_specifier, str)
+            or node.get("label") != raw_specifier
+            or node.get("file_type") != "code"
+            or node.get("confidence") != "EXTRACTED"
+            or node.get("_origin") != "ast"
+            or "source_location" in node
+            or _EXTERNAL_IMPORT_SPECIFIER.fullmatch(raw_specifier) is None
+            or any(part in {".", ".."} for part in raw_specifier.split("/"))
+        ):
+            continue
+        module_name = raw_specifier.split("/")[-1]
+        if node.get("id") != _pinned_make_id(module_name):
+            continue
+        confirmed[_pinned_make_id(module_name)] = raw_specifier
+    return confirmed
+
+
 def _validate_optional_fields(item: dict[str, object], location: str) -> None:
     if "confidence_score" in item:
         score = _finite_number(item["confidence_score"], f"{location}.confidence_score")
@@ -536,7 +603,11 @@ def _payload_collections(
 
 
 def _adapt_nodes(
-    raw_nodes: list[object], registry: _SourceRegistry, *, raw_schema: bool = False
+    raw_nodes: list[object],
+    registry: _SourceRegistry,
+    *,
+    raw_schema: bool = False,
+    external_stubs: dict[str, str] | None = None,
 ) -> tuple[tuple[GraphifyNode, ...], set[str]]:
     nodes: list[GraphifyNode] = []
     node_ids: set[str] = set()
@@ -561,12 +632,23 @@ def _adapt_nodes(
         if node["file_type"] != "code":
             raise GraphifyAdapterError(f"{location} is not a code-only node")
         label = _bounded_string(node["label"], f"{location}.label")
-        source, span = _source_span(
-            registry,
-            node["source_file"],
-            node.get("source_location"),
-            location,
-        )
+        external_source = (external_stubs or {}).get(node_id) if raw_schema else None
+        if external_source is not None:
+            if node["source_file"] != external_source:
+                raise GraphifyAdapterError(f"{location}.source_file changed after stub validation")
+            source_file = None
+            source_sha256 = None
+            span = None
+        else:
+            source, span = _source_span(
+                registry,
+                node["source_file"],
+                node.get("source_location"),
+                location,
+            )
+            assert source.relative_path is not None
+            source_file = source.relative_path
+            source_sha256 = source.sha256
         if (
             raw_schema
             and node.get("source_location") is not None
@@ -577,16 +659,16 @@ def _adapt_nodes(
             )
         strength = _strength(node.get("confidence"), f"{location}.confidence", optional=True)
         _validate_optional_fields(node, location)
-        assert source.relative_path is not None
         nodes.append(
             GraphifyNode(
                 node_id,
                 label,
-                source.relative_path,
-                source.sha256,
+                source_file,
+                source_sha256,
                 span,
                 strength,
                 producer_origin,
+                external_source,
             )
         )
     return tuple(nodes), node_ids
@@ -699,8 +781,12 @@ def load_graphify_snapshot(
     graph_sha256, payload = _read_graph_payload(graph_path, expected_sha256, schema)
     raw_nodes, raw_edges, built_at_commit = _payload_collections(payload, schema)
     registry = _SourceRegistry(root)
-    nodes, node_ids = _adapt_nodes(raw_nodes, registry, raw_schema=schema == GRAPHIFY_RAW_SCHEMA)
-    edges = _adapt_edges(raw_edges, registry, node_ids, raw_schema=schema == GRAPHIFY_RAW_SCHEMA)
+    raw_schema = schema == GRAPHIFY_RAW_SCHEMA
+    external_stubs = _external_stub_ids(raw_nodes, raw_edges, registry) if raw_schema else None
+    nodes, node_ids = _adapt_nodes(
+        raw_nodes, registry, raw_schema=raw_schema, external_stubs=external_stubs
+    )
+    edges = _adapt_edges(raw_edges, registry, node_ids, raw_schema=raw_schema)
     registry.verify_unchanged()
     return GraphifySnapshot(
         side=side,
