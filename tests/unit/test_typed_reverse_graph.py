@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildConfig, MypyIncrementalProvider
+from fastapi_endpoint_detector.analyzer.typed_graph_bridge import seeds_for_changed_lines
 from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
     EndpointOccurrenceBinding,
@@ -161,6 +162,126 @@ def test_global_relations_and_lambda_execution_state_are_distinct(tmp_path: Path
         any(uncertainty.category == "deferred_callable" for uncertainty in item.uncertainties)
         for item in result.evidence
     )
+
+
+def test_dead_branches_async_transfer_and_nested_callable_seeds_are_conservative(
+    tmp_path: Path,
+) -> None:
+    inventory, snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": (
+                "from service import changed, dead\n"
+                "from fastapi import Depends\n"
+                "import foreign\n"
+                "def identity(fn):\n"
+                "    return fn\n"
+                "def default_effect():\n"
+                "    changed()\n"
+                "    return 1\n"
+                "def with_default(value=default_effect()):\n"
+                "    return None\n"
+                "def with_dependency(value: int = Depends(default_effect)):\n"
+                "    return value\n"
+                "def after_return():\n"
+                "    changed()\n"
+                "    return\n"
+                "    dead()\n"
+                "def after_raise():\n"
+                "    raise RuntimeError()\n"
+                "    dead()\n"
+                "def maybe_return(flag: bool):\n"
+                "    if flag:\n"
+                "        return\n"
+                "    changed()\n"
+                "def handler():\n"
+                "    if False:\n"
+                "        dead()\n"
+                "    async_job()\n"
+                "    foreign.async_job()\n"
+                "    @identity\n"
+                "    async def nested():\n"
+                "        changed()\n"
+                "        nested()\n"
+                "    return nested\n"
+                "async def async_job():\n"
+                "    changed()\n"
+                "async def awaited_handler():\n"
+                "    await async_job()\n"
+            ),
+            "service": "def changed():\n    return None\ndef dead():\n    return None\n",
+            "foreign": "from service import changed\nasync def async_job():\n    changed()\n",
+        },
+    )
+    app_module = _module(snapshot, "app")
+    service_module = _module(snapshot, "service")
+    handler = _fullname(snapshot, app_module, "handler")
+    dead = _fullname(snapshot, service_module, "dead")
+    changed = _fullname(snapshot, service_module, "changed")
+    binding = _binding(tmp_path, app_module, handler, "route")
+    awaited_binding = _binding(
+        tmp_path,
+        app_module,
+        _fullname(snapshot, app_module, "awaited_handler"),
+        "awaited-route",
+    )
+    graph = build_typed_reverse_graph(
+        inventory, snapshot, [binding, awaited_binding], config_fingerprint="cfg"
+    )
+
+    assert not any(edge.callee == dead for edge in graph.edges)
+    default_transfer = next(edge for edge in graph.edges if edge.callee.endswith("default_effect"))
+    assert default_transfer.caller == app_module
+    assert default_transfer.execution_state == "executed"
+    assert any(
+        item.owner == f"{app_module}.with_dependency"
+        and item.category == "dependency_injection"
+        and item.reason_code == "dependency_parameter_transfer_not_proven"
+        for item in graph.uncertainties
+    )
+    async_edges = [edge for edge in graph.edges if edge.callee == f"{app_module}.async_job"]
+    assert {(edge.caller, edge.execution_state) for edge in async_edges} == {
+        (f"{app_module}.handler", "unknown"),
+        (f"{app_module}.awaited_handler", "executed"),
+    }
+    assert any(
+        item.owner == handler
+        and item.source_spelling == "foreign.async_job"
+        and item.category == "unknown_binding"
+        for item in graph.uncertainties
+    )
+    assert any(
+        item.reason_code == "async_result_not_directly_awaited" for item in graph.uncertainties
+    )
+    assert any(
+        edge.caller == f"{app_module}.maybe_return"
+        and edge.callee == changed
+        and edge.execution_state == "unknown"
+        for edge in graph.edges
+    )
+    changed_result = graph.query([ChangedSeed("target", changed)], side="target")
+    unknown_route = next(
+        item for item in changed_result.evidence if item.occurrence.occurrence_id == "route"
+    )
+    awaited_route = next(
+        item for item in changed_result.evidence if item.occurrence.occurrence_id == "awaited-route"
+    )
+    assert unknown_route.execution_state == "unknown"
+    assert unknown_route.confidence == "LOW"
+    assert awaited_route.execution_state == "executed"
+    assert all(edge.execution_state == "executed" for edge in awaited_route.witnesses)
+
+    nested_line = 31  # changed() inside the decorated handler.nested
+    nested_fullname = f"{app_module}.handler.nested"
+    assert any(
+        edge.caller == nested_fullname and edge.callee == nested_fullname for edge in graph.edges
+    )
+    assert any(
+        item.owner == nested_fullname and item.reason_code == "decorator_transfer_not_imported"
+        for item in graph.uncertainties
+    )
+    seeds = seeds_for_changed_lines(graph, inventory, [("app.py", nested_line)], side="target")
+    assert {seed.symbol for seed in seeds} == {nested_fullname}
 
 
 def test_caps_are_explicit_and_fail_closed_even_when_evidence_was_found(tmp_path: Path) -> None:
