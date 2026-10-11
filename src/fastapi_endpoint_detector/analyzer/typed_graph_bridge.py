@@ -239,15 +239,52 @@ def query_changed_lines(
     side: GraphSide,
 ) -> Any:
     """Reverse-query exact graph symbols whose source spans contain changed lines."""
+    return graph.query(
+        seeds_for_changed_lines(graph, inventory, changed_lines, side=side), side=side
+    )
+
+
+def seeds_for_changed_lines(
+    graph: TypedReverseGraph,
+    inventory: Any,
+    changed_lines: Iterable[tuple[str, int]],
+    *,
+    side: GraphSide,
+) -> tuple[ChangedSeed, ...]:
+    """Seed only the narrowest AST symbol definition containing each changed line."""
     paths = {record.relative_path: str(Path(record.path).resolve()) for record in inventory.files}
     seeds: set[ChangedSeed] = set()
     for relative, line in changed_lines:
         path = paths.get(Path(relative).as_posix())
         if path is None:
             continue
-        for symbol in graph.symbols:
+        containing = [
+            symbol
+            for symbol in graph.symbols
+            if symbol.span is not None
+            and symbol.span.path == path
+            and symbol.span.start_line <= line <= symbol.span.end_line
+        ]
+        if not containing:
+            continue
+        narrowest = min(
+            (
+                symbol.span.end_line - symbol.span.start_line,
+                symbol.span.end_column - symbol.span.start_column,
+            )
+            for symbol in containing
+            if symbol.span is not None
+        )
+        for symbol in containing:
             span = symbol.span
-            if span is not None and span.path == path and span.start_line <= line <= span.end_line:
+            if (
+                span is not None
+                and (
+                    span.end_line - span.start_line,
+                    span.end_column - span.start_column,
+                )
+                == narrowest
+            ):
                 seeds.add(ChangedSeed(side, symbol.fullname, span))
     ordered_seeds = tuple(
         sorted(
@@ -261,4 +298,4 @@ def query_changed_lines(
             ),
         )
     )
-    return graph.query(ordered_seeds, side=side)
+    return ordered_seeds
