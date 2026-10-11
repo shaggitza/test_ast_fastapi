@@ -40,7 +40,7 @@ def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
     }
     if not isinstance(value, dict) or set(value) != required:
         raise PublicCaseProtocolError("result fields do not match protocol v1")
-    if value["protocol_version"] != 1:
+    if type(value["protocol_version"]) is not int or value["protocol_version"] != 1:
         raise PublicCaseProtocolError("unsupported protocol version")
     if value["case"] != FROZEN_CASE_PROFILE:
         raise PublicCaseProtocolError("case identity differs from frozen profile")

@@ -108,6 +108,12 @@ def test_protocol_rejects_non_string_membership_values(field: str, invalid: obje
         validate_result(result(**{field: invalid}))
 
 
+@pytest.mark.parametrize("protocol_version", [True, False, 1.0, "1", [], {}, None])
+def test_protocol_rejects_non_exact_protocol_version(protocol_version: object) -> None:
+    with pytest.raises(PublicCaseProtocolError, match="unsupported protocol version"):
+        validate_result(result(protocol_version=protocol_version))
+
+
 @pytest.mark.parametrize(
     "http_status",
     [[200], {"value": 200}, "200", True, 99, 600],
