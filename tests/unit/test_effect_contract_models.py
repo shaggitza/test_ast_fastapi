@@ -324,6 +324,24 @@ def test_package_applicability_accepts_python_only_and_rejects_partial_distribut
         EffectContractDocument.model_validate(data)
 
 
+def test_package_applicability_accepts_source_hash_only_and_rejects_empty_scope() -> None:
+    data = _document()
+    hashes = {"helpers.py": "sha256:" + "a" * 64}
+    data["contracts"][0]["package"] = {"source_hashes": hashes}  # type: ignore[index]
+
+    document = EffectContractDocument.model_validate(data)
+
+    assert document.contracts[0].package is not None
+    assert document.contracts[0].package.source_hashes == hashes
+    assert document.contracts[0].package.distribution is None
+    assert document.contracts[0].package.python is None
+    data["contracts"][0]["package"] = {"source_hashes": {}}  # type: ignore[index]
+    with pytest.raises(
+        ValidationError, match="requires a distribution, Python range, or source hash pin"
+    ):
+        EffectContractDocument.model_validate(data)
+
+
 def test_method_requires_class_qualified_symbol() -> None:
     data = _document()
     data["contracts"][0]["symbol"] = "client.set"  # type: ignore[index]
