@@ -29,6 +29,13 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Any, ClassVar, Protocol
 
+from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
+    CacheAdmissionError,
+    LocalTypedCachePolicy,
+    external_snapshots_unchanged,
+    prepare_cache_run,
+    remove_run,
+)
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
@@ -571,6 +578,7 @@ class MypyAnalyzer:
         source_inventory: SourceInventory | None = None,
         no_site_packages: bool = False,
         target_platform: str | None = None,
+        typed_cache_policy: LocalTypedCachePolicy | None = None,
     ) -> None:
         """Initialize the mypy analyzer."""
         inventory_root = (
@@ -593,6 +601,8 @@ class MypyAnalyzer:
         # Ordinary analysis keeps mypy's historical environment discovery.
         self.no_site_packages = no_site_packages
         self.target_platform = target_platform
+        self.typed_cache_policy = typed_cache_policy or LocalTypedCachePolicy.disabled()
+        self.cache_admission_observation: dict[str, object] | None = None
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._mypy_available = self._check_mypy_available()
         self._cache_file: Path | None = None
@@ -802,6 +812,7 @@ class MypyAnalyzer:
         from mypy.fscache import FileSystemCache
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
+        from mypy.util import decode_python_encoding
 
         # Collect all Python files using a repository-independent import root.
         sources: list[BuildSource] = []
@@ -810,8 +821,26 @@ class MypyAnalyzer:
             if self._expected_source_fingerprint is not None
             else self._source_records()
         )
+        cache_plan = None
+        external_source_bytes: dict[str, bytes] = {}
+        source_texts: dict[str, str] = {}
+        project_paths: dict[str, str] = {}
+        source_hashes: dict[str, str] = {}
+        if self.typed_cache_policy.enabled:
+            try:
+                project_paths = {module: str(path.resolve()) for path, module, _ in source_records}
+                source_hashes = {module: digest for _path, module, digest in source_records}
+                for path, _module, digest in source_records:
+                    snapshot = self._source_record_snapshots.get(str(path.resolve()))
+                    if snapshot is None or hashlib.sha256(snapshot).hexdigest() != digest:
+                        raise CacheAdmissionError("project source snapshot is unavailable or stale")
+                    source_texts[str(path.resolve())] = decode_python_encoding(snapshot)
+            except (CacheAdmissionError, OSError, ValueError):
+                source_texts.clear()
+
         for py_file, module_name, _digest in source_records:
-            sources.append(BuildSource(path=str(py_file), module=module_name))
+            source_text = source_texts.get(str(py_file.resolve()))
+            sources.append(BuildSource(path=str(py_file), module=module_name, text=source_text))
             self._module_to_path[module_name] = str(py_file)
 
         # Configure mypy for full analysis with AST retention
@@ -832,6 +861,28 @@ class MypyAnalyzer:
         options.incremental = False
         options.check_untyped_defs = True
         options.export_types = True  # Critical for type information!
+        if self.typed_cache_policy.enabled and source_texts:
+            try:
+                cache_plan, external_source_bytes = prepare_cache_run(
+                    self.typed_cache_policy,
+                    project_root=self.source_root,
+                    module_root=self.module_root,
+                    project_sources=project_paths,
+                    source_hashes=source_hashes,
+                    options=options,
+                    mypy_version=self._resolver_version,
+                    source_texts=source_texts,
+                )
+            except (CacheAdmissionError, OSError, ValueError) as exc:
+                cache_plan = None
+                self.cache_admission_observation = {
+                    "disposition": "cold_fallback",
+                    "reason": str(exc),
+                }
+        if cache_plan is not None:
+            options.incremental = True
+            options.cache_map = cache_plan.cache_map
+            options.cache_dir = str(cache_plan.run_root / "output")
 
         original_path = sys.path.copy()
         original_mypypath = os.environ.pop("MYPYPATH", None) if self.no_site_packages else None
@@ -892,6 +943,28 @@ class MypyAnalyzer:
                 fscache = HermeticFileSystemCache()
             else:
                 fscache = FileSystemCache()
+            cold_fscache = fscache
+            if cache_plan is not None and external_source_bytes:
+                base_fscache = fscache
+
+                class SnapshotFileSystemCache(FileSystemCache):
+                    def read(self, path: str) -> bytes:
+                        snapshot = external_source_bytes.get(str(Path(path).resolve()))
+                        return snapshot if snapshot is not None else base_fscache.read(path)
+
+                    def hash_digest(self, path: str) -> str:
+                        snapshot = external_source_bytes.get(str(Path(path).resolve()))
+                        if snapshot is not None:
+                            return hashlib.sha1(snapshot).hexdigest()
+                        return base_fscache.hash_digest(path)
+
+                    def stat_or_none(self, path: str) -> os.stat_result | None:
+                        return base_fscache.stat_or_none(path)
+
+                    def listdir(self, path: str) -> list[str]:
+                        return base_fscache.listdir(path)
+
+                fscache = SnapshotFileSystemCache()
             self._build_result = mypy_build(
                 sources=sources,
                 options=options,
@@ -899,6 +972,82 @@ class MypyAnalyzer:
                 # mypy otherwise adds the process cwd even with no-site-packages.
                 alt_lib_path=str(self.module_root) if self.no_site_packages else None,
             )
+            if cache_plan is not None:
+                hit_modules = {
+                    module
+                    for module in cache_plan.admitted_modules
+                    if module in self._build_result.graph
+                    and getattr(self._build_result.graph[module], "tree", None) is not None
+                    and module not in self._build_result.manager.rechecked_modules
+                }
+                graph_source_hashes_match = all(
+                    getattr(self._build_result.graph[module], "meta_source_hash", None)
+                    == cache_plan.expected_graph.get(module)
+                    for module in hit_modules
+                )
+                roots_fresh = set(self._module_to_path) <= set(
+                    self._build_result.manager.rechecked_modules
+                )
+                cache_inputs_intact = all(
+                    hashlib.sha256(Path(cache_path).read_bytes()).hexdigest() == digest
+                    for cache_path, digest in (cache_plan.artifact_hashes or {}).items()
+                )
+                external_sources_unchanged = external_snapshots_unchanged(external_source_bytes)
+                self.cache_admission_observation = {
+                    "cache_hit_modules": sorted(hit_modules),
+                    "graph_source_hashes_match": graph_source_hashes_match,
+                    "graph_source_hashes": {
+                        module: getattr(self._build_result.graph[module], "meta_source_hash", None)
+                        for module in hit_modules
+                    },
+                    "manifest_source_hashes": {
+                        module: cache_plan.expected_graph.get(module) for module in hit_modules
+                    },
+                    "cache_artifact_sha256": sorted((cache_plan.artifact_hashes or {}).values()),
+                    "roots_fresh": roots_fresh,
+                    "cache_inputs_intact": cache_inputs_intact,
+                    "external_sources_unchanged": external_sources_unchanged,
+                    "warm_rechecked_modules": sorted(self._build_result.manager.rechecked_modules),
+                    "trust_id": cache_plan.trust_id,
+                    "manifest_sha256": cache_plan.attestation_sha256,
+                }
+                proof_failed = (
+                    not hit_modules
+                    or not graph_source_hashes_match
+                    or not roots_fresh
+                    or not cache_inputs_intact
+                    or not external_sources_unchanged
+                )
+                # The paired v2 identity/report/runtime protocol is not enabled
+                # in this tranche. Keep the successful read as a private
+                # diagnostic and expose only the legacy full-cold result.
+                original_options = Options()
+                original_options.ignore_missing_imports = True
+                if self.target_platform is not None:
+                    original_options.platform = self.target_platform
+                original_options.no_site_packages = self.no_site_packages
+                if self.no_site_packages:
+                    original_options.python_executable = None
+                original_options.follow_imports = self._effective_follow_imports()
+                original_options.mypy_path = [str(self.module_root)]
+                original_options.namespace_packages = True
+                original_options.explicit_package_bases = True
+                original_options.preserve_asts = True
+                original_options.incremental = False
+                original_options.check_untyped_defs = True
+                original_options.export_types = True
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=original_options,
+                    fscache=cold_fscache,
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                self.cache_admission_observation["fallback"] = (
+                    "cache_proof_failed"
+                    if proof_failed
+                    else "v2_identity_report_runtime_protocol_not_enabled"
+                )
+                remove_run(cache_plan)
             analyzed_source_hashes: dict[str, str] = {}
 
             # Store the types map
@@ -962,6 +1111,7 @@ class MypyAnalyzer:
             self._built_source_fingerprint = self._expected_source_fingerprint
 
         finally:
+            remove_run(cache_plan)
             sys.path = original_path
             if self.no_site_packages and original_mypypath is not None:
                 os.environ["MYPYPATH"] = original_mypypath
