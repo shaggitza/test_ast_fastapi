@@ -241,24 +241,156 @@ def _parse_url(  # noqa: PLR0911
         return None
 
 
-def _method_option(arg: list[_Token]) -> str | None:
-    # Deliberately allow only an object containing the single literal method.
+def _method_option(arg: list[_Token]) -> str | None:  # noqa: PLR0911, PLR0912
+    """Read one literal top-level method from an ordinary options object."""
     if len(arg) < 5 or arg[0].value != "{" or arg[-1].value != "}":
         return None
-    inner = arg[1:-1]
-    if (
-        len(inner) == 3
-        and inner[0].value == "method"
-        and inner[1].value == ":"
-        and inner[2].kind == "string"
-    ):
-        method = inner[2].value.upper()
-        return (
-            method
-            if method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-            else None
-        )
-    return None
+    properties: list[list[_Token]] = []
+    begin, stack = 1, []
+    pairs = {"{": "}", "[": "]", "(": ")"}
+    for index in range(1, len(arg) - 1):
+        value = arg[index].value
+        if value in pairs:
+            stack.append(pairs[value])
+        elif value in {"}", "]", ")"}:
+            if not stack or stack.pop() != value:
+                return None
+        elif value == "," and not stack:
+            if index == begin:
+                return None
+            properties.append(arg[begin:index])
+            begin = index + 1
+    if stack:
+        return None
+    if begin < len(arg) - 1:
+        properties.append(arg[begin:-1])
+    elif not properties:
+        return None
+    methods: list[list[_Token]] = []
+    for prop in properties:
+        if len(prop) < 3 or prop[0].kind not in {"id", "string"} or prop[1].value != ":":
+            return None
+        if prop[0].value == "method":
+            methods.append(prop)
+        elif any(token.kind == "id" and token.value == "method" for token in prop[2:]):
+            return None
+    if len(methods) != 1:
+        return None
+    prop = methods[0]
+    if len(prop) != 3 or prop[2].kind != "string":
+        return None
+    method = prop[2].value.upper()
+    return (
+        method if method in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"} else None
+    )
+
+
+def _template_url(  # noqa: PLR0911
+    arg: list[_Token],
+) -> tuple[str, str, str, str | None, str | None] | None:
+    """Accept a dynamic base followed by a static path and optional query."""
+    if len(arg) != 1 or arg[0].kind != "template":
+        return None
+    raw = arg[0].value
+    if "\\" in raw or not raw.startswith("${"):
+        return None
+    close = raw.find("}")
+    if close <= 2:
+        return None
+    base_expression = raw[2:close]
+    # This is deliberately a finite base grammar. Do not accept arbitrary
+    # expressions whose braces may have confused the outer template lexer.
+    if re.fullmatch(r"[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*", base_expression) is None:
+        return None
+    suffix = raw[close + 1 :]
+    if not suffix.startswith("/") or "#" in suffix:
+        return None
+    path, separator, query = suffix.partition("?")
+    if any(char in path for char in "${}`"):
+        return None
+    if separator:
+        probe = re.sub(r"\$\{[^{}]+\}", "", query)
+        if "${" in probe or "}" in probe or "{" in probe or "`" in query:
+            return None
+        query_evidence = "dynamic" if "${" in query else query or None
+    else:
+        query_evidence = None
+    parsed = _parse_url(path)
+    if parsed is None:
+        return None
+    protocol, default, route, _query, _origin = parsed
+    return protocol, default, route, query_evidence, None
+
+
+def _template_write_tokens(token: _Token) -> tuple[list[list[_Token]], bool]:  # noqa: PLR0912, PLR0915
+    """Return lexed `${...}` expressions, failing closed on unknown structure."""
+    raw = token.value
+    result: list[list[_Token]] = []
+    cursor = 0
+    while True:
+        opening = raw.find("${", cursor)
+        if opening < 0:
+            return result, True
+        slash_count = 0
+        escape_cursor = opening - 1
+        while escape_cursor >= 0 and raw[escape_cursor] == "\\":
+            slash_count += 1
+            escape_cursor -= 1
+        if slash_count % 2:
+            cursor = opening + 2
+            continue
+        start = opening + 2
+        depth, pos = 1, start
+        quote = ""
+        escaped = False
+        while pos < len(raw):
+            char = raw[pos]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+            elif raw.startswith("//", pos):
+                newline = _LINE_END.search(raw, pos + 2)
+                if newline is None:
+                    return result, False
+                pos = newline.end() - 1
+            elif raw.startswith("/*", pos):
+                end = raw.find("*/", pos + 2)
+                if end < 0:
+                    return result, False
+                pos = end + 1
+            elif char == "/":
+                # Regex literals and division need expression context. Keep
+                # unsupported slash expressions fail-closed for this file.
+                return result, False
+            elif char in "'\"":
+                quote = char
+            elif char == "`":
+                # Nested templates need a full JS lexer to distinguish their
+                # own interpolations. Treat the containing file as uncertain.
+                return result, False
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    expression = raw[start:pos]
+                    nested = _tokens(expression)
+                    offset = token.start + 1 + start
+                    result.append(
+                        [
+                            _Token(item.kind, item.value, item.start + offset, item.end + offset)
+                            for item in nested
+                        ]
+                    )
+                    cursor = pos + 1
+                    break
+            pos += 1
+        else:
+            return result, False
 
 
 def _axios_config(arg: list[_Token]) -> tuple[str, str] | None:
@@ -412,6 +544,79 @@ def _has_assignment_operator(tokens: list[_Token], index: int, source: str) -> b
             "--",
         )
     )
+
+
+def _is_destructuring_write(  # noqa: PLR0911, PLR0912, PLR0915
+    tokens: list[_Token], index: int
+) -> bool:
+    """Recognize a bare name used as a target in a bounded assignment pattern."""
+    if index and tokens[index - 1].value in {".", "?."}:
+        if index >= 3 and all(item.value == "." for item in tokens[index - 3 : index]):
+            pass  # Rest binding in an array/object assignment pattern.
+        else:
+            return False
+    pairs = {"[": "]", "{": "}"}
+    # The nearest containing pattern determines whether this name is a target.
+    for opening in range(index - 1, -1, -1):
+        opener = tokens[opening].value
+        if opener not in pairs:
+            continue
+        if opening and (
+            tokens[opening - 1].kind in {"id", "string"}
+            or tokens[opening - 1].value in {")", "]", ".", "?."}
+        ):
+            # `Foreign[fetch] = value` assigns a property, not a pattern.
+            continue
+        depth = 1
+        closing = opening + 1
+        while closing < len(tokens) and depth:
+            if tokens[closing].value == opener:
+                depth += 1
+            elif tokens[closing].value == pairs[opener]:
+                depth -= 1
+            closing += 1
+        if depth or not opening < index < closing - 1:
+            continue
+        end = closing - 1
+        after = end + 1
+        while after < len(tokens) and tokens[after].value == ")":
+            after += 1
+        if after >= len(tokens) or tokens[after].value != "=":
+            continue
+        # Locate this direct child slot, respecting nested patterns.
+        slot_start = opening + 1
+        level = 0
+        for pos in range(opening + 1, index):
+            value = tokens[pos].value
+            if value in {"[", "{", "("}:
+                level += 1
+            elif value in {"]", "}", ")"}:
+                level -= 1
+            elif value == "," and level == 0:
+                slot_start = pos + 1
+        slot_end = index + 1
+        level = 0
+        while slot_end < end:
+            value = tokens[slot_end].value
+            if value in {"[", "{", "("}:
+                level += 1
+            elif value in {"]", "}", ")"}:
+                level -= 1
+            elif value == "," and level == 0:
+                break
+            slot_end += 1
+        slot = tokens[slot_start:slot_end]
+        if any(item.value == "=" for item in slot[: index - slot_start]):
+            return False  # A name in a default value is a read, not a target.
+        if opener == "[":
+            return True
+        # In object patterns, property keys and computed keys are reads.
+        if index > opening + 1 and tokens[index - 1].value == ":":
+            return True
+        if index + 1 < slot_end and tokens[index + 1].value == ":":
+            return False
+        return not (slot and slot[0].value == "[")
+    return False
 
 
 def _shadowed_client_names(tokens: list[_Token], source: str) -> tuple[set[str], set[str]]:  # noqa: PLR0912, PLR0915
@@ -588,6 +793,28 @@ def _shadowed_client_names(tokens: list[_Token], source: str) -> tuple[set[str],
                     if imported.kind == "id":
                         bind(imported)
             cursor = source_index + 1
+    # Interpolations are executable expressions, even though the main lexer
+    # keeps each template opaque for URL extraction. Account for writes there
+    # before making any file-wide browser-global observations.
+    for template in (item for item in tokens if item.kind == "template"):
+        expression_tokens, valid = _template_write_tokens(template)
+        if not valid:
+            shadowed.update(names)
+            continue
+        for expression in expression_tokens:
+            for index, expression_token in enumerate(expression):
+                if (
+                    expression_token.kind == "id"
+                    and expression_token.value in names
+                    and (
+                        (
+                            _is_global_axios(expression, index)
+                            and _has_assignment_operator(expression, index, source)
+                        )
+                        or _is_destructuring_write(expression, index)
+                    )
+                ):
+                    bind(expression_token)
     return shadowed, axios_imports
 
 
@@ -670,14 +897,19 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
             continue
         args, close_i = parsed_args
         url: str | None = None
+        parsed_url: tuple[str, str, str, str | None, str | None] | None = None
         method = fixed or "GET"
         uncertainty: str | None = None
         if name in {"fetch", "websocket"}:
             if 1 <= len(args) <= 2:
                 url = _literal(args[0])
+                if name == "fetch" and url is None:
+                    parsed_url = _template_url(args[0])
+                    if parsed_url is not None:
+                        url = args[0][0].value
                 if url is None:
                     uncertainty = "dynamic_or_nonliteral_url"
-                elif _has_string_escape(args[0]):
+                elif parsed_url is None and _has_string_escape(args[0]):
                     uncertainty = "escaped_url_literal"
                 if len(args) == 2:
                     parsed_method = _method_option(args[1])
@@ -714,7 +946,8 @@ def extract_client_observation_inventory(  # noqa: PLR0912, PLR0915
                 uncertainty = "unsupported_or_dynamic_axios_options"
         else:
             uncertainty = "unsupported_argument_shape"
-        parsed_url = _parse_url(url) if url is not None else None
+        if parsed_url is None:
+            parsed_url = _parse_url(url) if url is not None else None
         if parsed_url is None and uncertainty is None:
             uncertainty = "unsupported_url"
         if parsed_url and method and uncertainty is None:

@@ -26,7 +26,7 @@ _EXPECTED_PRESET_HASHES = {
     "mongodb-v1": "sha256:87b8ef6b0ccd3ef4862fb78ffad20cc88ddf55fa1580e286d87ab5c17f0070c9",
     "object-storage-v1": "sha256:1d465f50407ef3d4a168d12646e894fb4d363dc97874e1a3fb140c9bcf7b5523",
     "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
-    "sqlalchemy-v1": "sha256:132982ba61f04626df531dc80c71ce5d21c12ec583a932d21c220486785c8d04",
+    "sqlalchemy-v1": "sha256:e22fad64f602a3056eefdc5b7365cd6c729a73377a1b4565be60235585446458",
 }
 
 _EXPECTED_CONTRACT_IDS = {
@@ -123,6 +123,10 @@ _EXPECTED_CONTRACT_IDS = {
         "sqlalchemy-session-flush",
         "sqlalchemy-session-merge",
         "sqlalchemy-session-rollback",
+        "sqlalchemy-session-transaction-commit",
+        "sqlalchemy-session-transaction-rollback",
+        "sqlalchemy-async-session-transaction-commit",
+        "sqlalchemy-async-session-transaction-rollback",
     },
 }
 
@@ -523,6 +527,27 @@ def test_sqlalchemy_preset_declares_exact_transaction_and_savepoint_scopes() -> 
         "sqlalchemy-session-begin-nested": "savepoint_release_rollback",
         "sqlalchemy-async-session-begin": "transaction_commit_rollback",
         "sqlalchemy-async-session-begin-nested": "savepoint_release_rollback",
+    }
+    returned_scopes = {
+        contract.id: (
+            contract.behavior.returns_transaction_scope.value
+            if contract.behavior.returns_transaction_scope is not None
+            else None
+        )
+        for contract in loaded.document.contracts
+        if contract.operation.value == "begin"
+    }
+    assert returned_scopes == scopes
+    receiver_targets = {
+        contract.id
+        for contract in loaded.document.contracts
+        if contract.behavior.transaction_target_from_receiver
+    }
+    assert receiver_targets == {
+        "sqlalchemy-session-transaction-commit",
+        "sqlalchemy-session-transaction-rollback",
+        "sqlalchemy-async-session-transaction-commit",
+        "sqlalchemy-async-session-transaction-rollback",
     }
 
 
