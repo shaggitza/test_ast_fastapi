@@ -11,6 +11,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from shutil import copyfile
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from benchmarks.real_world import expansion_source_evidence as evidence
@@ -26,6 +27,11 @@ def response(value: object) -> bytes:
 
 
 class SourceEvidenceTests(unittest.TestCase):
+    def _temporary_directory(self) -> str:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        return temporary.name
+
     def test_each_supported_fact_kind_has_a_strict_nested_contract(self) -> None:
         facts = {
             "python_versions": [
@@ -110,7 +116,7 @@ class SourceEvidenceTests(unittest.TestCase):
         report = evidence.run(
             LOCK,
             CHECKSUMS,
-            Path(self.enterContext(__import__("tempfile").TemporaryDirectory())) / "report.json",
+            Path(self._temporary_directory()) / "report.json",
             responder=lambda _: response({"sha": tree_sha, "tree": [], "truncated": False}),
         )
         lock, lock_hash = evidence.frozen.load_lock(
@@ -161,9 +167,7 @@ class SourceEvidenceTests(unittest.TestCase):
         changed_lock_hash["lock_sha256"] = "sha256:" + "0" * 64
         with self.assertRaisesRegex(evidence.EvidenceError, "report_provenance_mismatch"):
             evidence.validate_report(changed_lock_hash, lock, lock_hash)
-        publication_target = (
-            Path(self.enterContext(__import__("tempfile").TemporaryDirectory())) / "bad.json"
-        )
+        publication_target = Path(self._temporary_directory()) / "bad.json"
         with self.assertRaisesRegex(evidence.EvidenceError, "report_provenance_mismatch"):
             evidence._publish(publication_target, changed_lock_hash, lock, lock_hash)
         self.assertFalse(publication_target.exists())
@@ -178,7 +182,7 @@ class SourceEvidenceTests(unittest.TestCase):
             self.assertTrue(url.startswith("https://api.github.com/repos/"))
             return response({"sha": tree_sha, "tree": [], "truncated": False})
 
-        output = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        output = self._temporary_directory()
         output_path = Path(output) / "report.json"
         report = evidence.run(LOCK, CHECKSUMS, output_path, responder=responder)
         self.assertEqual(len(report["records"]), 100)
@@ -499,7 +503,7 @@ class SourceEvidenceTests(unittest.TestCase):
             self.assertEqual(budget.response_bytes, len(body))
             self.assertEqual(budget.attempts[0]["response_status"], status)
 
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         for status in (401, 403):
             target = directory / f"auth-{status}.json"
 
@@ -548,7 +552,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(budget.attempts[1]["response_status"], 404)
 
     def test_one_unavailable_tree_keeps_every_locked_record_uncertain(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "facts.json"
 
         def unavailable(url: str) -> bytes:
@@ -667,7 +671,7 @@ class SourceEvidenceTests(unittest.TestCase):
                 api.get_json(route, "tree")
 
     def test_diagnostic_transport_failure_persists_sanitized_counters(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "diagnostic.json"
         calls = 0
         secret = "token-must-never-be-written"
@@ -710,7 +714,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(len(receipt["source_ids"]["lock"]), len("sha256:") + 64)
 
     def test_diagnostic_receipt_no_clobber(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "diagnostic.json"
         target.write_text("keep")
         with self.assertRaisesRegex(evidence.EvidenceError, "receipt_exists_no_clobber"):
@@ -718,7 +722,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "keep")
 
     def test_diagnostic_http_failure_records_status_without_body(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "diagnostic.json"
         secret_body = b"private token response body"
 
@@ -741,7 +745,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertNotIn("private-token", target.read_text())
 
     def test_diagnostic_request_cap_and_canonical_frozen_identity(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "diagnostic.json"
 
         def responder(url: str) -> bytes:
@@ -770,7 +774,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(receipt["canonical_identity_sha256"], f"sha256:{expected_identity}")
 
     def test_diagnostic_per_response_cap_is_strict(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "diagnostic.json"
         receipt = evidence.run_diagnostic(
             LOCK,
@@ -790,7 +794,7 @@ class SourceEvidenceTests(unittest.TestCase):
         )
 
     def test_normal_transport_failure_persists_attempt_receipt(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "facts.json"
         receipt_path = directory / "facts.json.attempts.json"
         calls = 0
@@ -822,7 +826,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertNotIn(secret, receipt_path.read_text())
 
     def test_partial_read_failure_marks_unknown_instead_of_zero(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "diagnostic.json"
 
         class FailingResponse:
@@ -892,7 +896,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(budget.attempts[0]["response_bytes"], 10)
 
     def test_normal_receipt_no_clobber(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "facts.json"
         receipt = directory / "facts.json.attempts.json"
         receipt.write_text("preserve")
@@ -909,7 +913,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(receipt.read_text(), "preserve")
 
     def test_diagnostic_receipt_collision_preflights_before_transport(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         receipt = directory / "diagnostic.json"
         receipt.write_bytes(b"preserve\x00bytes")
         calls = 0
@@ -941,7 +945,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.POLICY_PROFILE.read_bytes(), policy_bytes)
 
     def test_derived_receipt_cannot_clobber_policy_in_either_mode(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         output = directory / "facts.json"
         receipt = output.with_name(output.name + ".attempts.json")
         receipt.write_bytes(b"policy bytes")
@@ -961,7 +965,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(receipt.read_bytes(), b"policy bytes")
 
     def test_receipt_race_preserves_original_failure_and_foreign_bytes(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "facts.json"
         receipt = target.with_name(target.name + ".attempts.json")
         foreign = b"created by another process"
@@ -976,7 +980,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertFalse(target.exists())
 
     def test_unexpected_exception_is_sanitized_after_receipt_and_in_cli(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         secret = "Authorization=Bearer secret https://private.invalid body=private"
         output = directory / "api.json"
         with (
@@ -1015,7 +1019,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertNotIn(secret.encode(), cli_receipt.read_bytes())
 
     def test_base_exception_still_propagates(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         output = directory / "facts.json"
         with (
             patch.object(evidence, "build_report", side_effect=KeyboardInterrupt),
@@ -1043,7 +1047,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(absent["status"], "missing")
 
     def test_existing_output_is_never_clobbered(self) -> None:
-        directory = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        directory = self._temporary_directory()
         target = Path(directory) / "existing.json"
         target.write_text("keep")
         with self.assertRaisesRegex(evidence.EvidenceError, "output_exists_no_clobber"):
@@ -1051,7 +1055,7 @@ class SourceEvidenceTests(unittest.TestCase):
         self.assertEqual(target.read_text(), "keep")
 
     def test_tampered_lock_fails_before_artifact_publication(self) -> None:
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         expansion = directory / "expansion"
         expansion.mkdir()
         for name in (
@@ -1079,7 +1083,7 @@ class SourceEvidenceTests(unittest.TestCase):
         def responder(_url: str) -> bytes:
             return response({"sha": tree_sha, "tree": [], "truncated": False})
 
-        directory = Path(self.enterContext(__import__("tempfile").TemporaryDirectory()))
+        directory = Path(self._temporary_directory())
         target = directory / "too-large.json"
         with (
             patch.object(evidence, "MAX_REPORT_BYTES", 1),
@@ -1116,7 +1120,7 @@ class SourceEvidenceTests(unittest.TestCase):
             tree_sha = url.rsplit("/", 1)[-1]
             return response({"sha": tree_sha, "tree": [], "truncated": False})
 
-        directory = self.enterContext(__import__("tempfile").TemporaryDirectory())
+        directory = self._temporary_directory()
         target = Path(directory) / "must-not-exist.json"
         with self.assertRaisesRegex(evidence.EvidenceError, "overhead_request_budget_exhausted"):
             evidence.run(LOCK, CHECKSUMS, target, responder=responder)
