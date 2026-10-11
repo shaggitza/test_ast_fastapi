@@ -189,6 +189,29 @@ def _dump(value: object) -> bytes:
     return encoded.encode("utf-8")
 
 
+def _preflight_json_depth(encoded: str) -> None:
+    """Reject excessive JSON nesting before the recursive stdlib parser runs."""
+    depth = 0
+    quoted = False
+    escaped = False
+    for char in encoded:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_DEPTH * 3 + 8:
+                raise IdentityError("serialized identity exceeds maximum nesting depth")
+        elif char in "]}":
+            depth -= 1
+
+
 def canonical_bytes(value: object, *, domain: str) -> bytes:
     """Encode a supported value with explicit type tags and a domain/version tag."""
     if not domain or len(domain) > 128 or len(domain.encode("utf-8")) > 128:
@@ -433,15 +456,29 @@ def _decode_typed(  # noqa: PLR0911, PLR0912, PLR0915
             return items
         if tag == "tuple":
             return tuple(items)
-        return set(items) if tag == "set" else frozenset(items)
+        if tag in {"set", "frozenset"}:
+            encoded_items = [_dump(item) for item in value[1]]
+            if encoded_items != sorted(encoded_items) or len(set(encoded_items)) != len(
+                encoded_items
+            ):
+                raise IdentityError("canonical set members are duplicated or out of order")
+            try:
+                return set(items) if tag == "set" else frozenset(items)
+            except (TypeError, ValueError) as exc:
+                raise IdentityError("canonical set member is not hashable") from exc
+        raise IdentityError("canonical record contains an unknown typed sequence")
     if tag == "mapping" and len(value) == 2 and isinstance(value[1], list):
         mapping_result: dict[str, object] = {}
+        previous_key: str | None = None
         for pair in value[1]:
             if not isinstance(pair, list) or len(pair) != 2:
                 raise IdentityError("canonical mapping entry is malformed")
             key = _decode_typed(pair[0], depth + 1, counter)
             if not isinstance(key, str) or key in mapping_result:
                 raise IdentityError("canonical mapping key is invalid")
+            if previous_key is not None and key <= previous_key:
+                raise IdentityError("canonical mapping keys are out of order")
+            previous_key = key
             mapping_result[key] = _decode_typed(pair[1], depth + 1, counter)
         return mapping_result
     raise IdentityError("canonical record contains an unknown typed value")
@@ -520,6 +557,12 @@ def _validated_context(  # noqa: PLR0912, PLR0915
         for name in ("engine", "engine_version", "python", "invocation_mode")
     ):
         raise IdentityError("actual engine/runtime fields must be non-empty strings")
+    if actual_build_context["invocation_mode"] not in {
+        "cold",
+        "authenticated_dependency_hit",
+        "cold_fallback",
+    }:
+        raise IdentityError("actual invocation mode is unknown")
     _validate_digest(actual_build_context["config_sha256"])
     search_paths = _string_sequence(semantic_context["search_paths"], "search_paths")
     import_roots = _string_sequence(semantic_context["import_roots"], "import_roots")
@@ -711,6 +754,27 @@ class TypedBuildIdentityV2:
         ):
             raise IdentityError("provenance source/provider records have invalid types")
         _validate_build_provenance(build_provenance)
+        invocation_mode = build_context.get("invocation_mode")
+        build_result = build_provenance["result"]
+        fresh_modules = build_provenance["fresh_modules"]
+        if invocation_mode != self.cache_disposition.value:
+            raise IdentityError("actual invocation mode disagrees with cache disposition")
+        project_modules = sorted(
+            str(item["fullname"])
+            for item in inventory
+            if isinstance(item, Mapping) and item.get("side") == "project"
+        )
+        if fresh_modules != project_modules:
+            raise IdentityError("fresh modules must exactly match project inventory modules")
+        if self.cache_disposition is CacheDisposition.AUTHENTICATED_DEPENDENCY_HIT:
+            if build_result != "success":
+                raise IdentityError("dependency hit requires a successful build")
+            claim_facts = provenance["cache_claim_facts"]
+            if not isinstance(claim_facts, Mapping):
+                raise IdentityError("dependency hit lacks validated cache claim facts")
+            claim_fresh = claim_facts["fresh_project_modules"]
+            if claim_fresh != project_modules:
+                raise IdentityError("fresh project modules disagree with build provenance")
         if (
             digest(actual, domain="typed-actual-build-options-v2")
             != self.actual_build_options_sha256
@@ -942,10 +1006,11 @@ class TypedBuildIdentityV2:
             raise IdentityError(f"unsupported JSON constant: {constant}")
 
         try:
+            _preflight_json_depth(encoded)
             value = json.loads(
                 encoded, object_pairs_hook=unique_object, parse_constant=reject_constant
             )
-        except (json.JSONDecodeError, UnicodeError) as exc:
+        except (json.JSONDecodeError, UnicodeError, RecursionError) as exc:
             raise IdentityError("invalid serialized identity JSON") from exc
         if not isinstance(value, Mapping):
             raise IdentityError("serialized identity must be an object")
