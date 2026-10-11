@@ -7,6 +7,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -187,3 +188,31 @@ def test_r6_result_replay_is_byte_deterministic() -> None:
     assert proof["fastapi_endpoint_detector.analyzer.deployment_observations"]["sha256"] == (
         evaluator.DEPLOYMENT_SCANNER_SHA256
     )
+
+
+@pytest.mark.parametrize("explicit_output", [False, True])
+def test_r6_run_preserves_historical_artifact_and_honors_explicit_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_output: bool
+) -> None:
+    fixture = tmp_path / "nonpython_v1"
+    historical = fixture / "results/evaluation.json"
+    historical.parent.mkdir(parents=True)
+    sentinel = b"historical evaluation must remain unchanged\n"
+    historical.write_bytes(sentinel)
+    minimal_result = {
+        "scope_units": {},
+        "scanner": {},
+        "acceptance_claim": "test",
+    }
+    monkeypatch.setattr(evaluator, "build_result", lambda *_args: minimal_result)
+    argv = ["evaluate_nonpython_r6.py", "--fixture-dir", str(fixture)]
+    output = fixture / "results/evaluation-r6.json"
+    if explicit_output:
+        output = tmp_path / "explicit.json"
+        argv.extend(["--write", str(output)])
+    monkeypatch.setattr(sys, "argv", argv)
+
+    assert evaluator.run() == 0
+    assert historical.read_bytes() == sentinel
+    assert output.read_text() == json.dumps(minimal_result, indent=2, sort_keys=True) + "\n"
+    assert (fixture / "results/evaluation-r6.json").exists() is not explicit_output

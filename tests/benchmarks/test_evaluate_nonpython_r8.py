@@ -77,7 +77,7 @@ def test_r8_emits_separate_atoms_and_never_guesses_dynamic_origin_or_prefix() ->
     assert result["verified_source_file_count"] == 25
     assert result["verified_diff_count"] == 6
     assert len(result["verified_licenses"]) == 6
-    assert len(result["acceptance_criteria"]) == 7
+    assert len(result["acceptance_criteria"]) == 8
     assert result["public_integration"]["status"] == "present in this base"
 
     case_map = {case["case_id"]: case for case in result["cases"]}
@@ -175,7 +175,8 @@ def test_r8_result_replay_is_byte_deterministic() -> None:
 def test_r8_limits_acceptance_to_direct_extractor_evidence() -> None:
     result = evaluator.build_result(repo_root=ROOT)
     assert result["acceptance_claim"] == (
-        "R8/R9 bounded approval complete; GH108 full acceptance remains open"
+        "R8/R9 bounded source observations recorded; "
+        "subprocess criterion unverified; GH108 full acceptance remains open"
     )
     fanout = next(
         item
@@ -184,3 +185,33 @@ def test_r8_limits_acceptance_to_direct_extractor_evidence() -> None:
     )
     assert fanout["finding"].startswith("UNVERIFIED:")
     assert fanout["source_refs"] == []
+
+    subprocess_criterion = next(
+        item
+        for item in result["acceptance_criteria"]
+        if item["criterion"] == "subprocess_observations"
+    )
+    assert subprocess_criterion["finding"].startswith("UNVERIFIED:")
+    assert subprocess_criterion["source_refs"] == []
+    langflow = next(
+        case for case in result["cases"] if case["case_id"] == "langflow-ai/langflow#13992"
+    )
+    assert langflow["raw_subprocess_observations"] == []
+    assert langflow["atoms"][0]["observation_refs"]["subprocess"] == []
+
+
+def test_r8_committed_artifact_does_not_claim_subprocess_observations() -> None:
+    artifact = json.loads((FIXTURE / "results/evaluation-r8.json").read_text())
+    subprocess_criterion = next(
+        item
+        for item in artifact["acceptance_criteria"]
+        if item["criterion"] == "subprocess_observations"
+    )
+    assert subprocess_criterion["finding"].startswith("UNVERIFIED:")
+    assert subprocess_criterion["source_refs"] == []
+    assert "subprocess criterion unverified" in artifact["acceptance_claim"]
+    langflow = next(
+        case for case in artifact["cases"] if case["case_id"] == "langflow-ai/langflow#13992"
+    )
+    assert langflow["raw_subprocess_observations"] == []
+    assert langflow["atoms"][0]["observation_refs"]["subprocess"] == []

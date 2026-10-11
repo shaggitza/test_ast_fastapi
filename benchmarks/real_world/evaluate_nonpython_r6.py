@@ -841,7 +841,7 @@ def run() -> int:
         result = build_result(args.fixture_dir, args.scanner_commit)
     except (NonPythonFixtureError, OSError, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
-    output = args.write or args.fixture_dir / "results/evaluation.json"
+    output = args.write or args.fixture_dir / "results/evaluation-r6.json"
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(

@@ -820,7 +820,10 @@ def build_result(
             "total_audited_nonpython_atom_count": atom_total,
         },
         "truth_status": spec["truth_status"],
-        "acceptance_claim": ("R8/R9 bounded approval complete; GH108 full acceptance remains open"),
+        "acceptance_claim": (
+            "R8/R9 bounded source observations recorded; "
+            "subprocess criterion unverified; GH108 full acceptance remains open"
+        ),
         "interpretation": (
             "Six audited PRs contain eight client route atoms plus one conditional "
             "deployment atom. This records nine atoms independently of PR count; "
@@ -856,13 +859,21 @@ def build_result(
                 "source_refs": ["src/fastapi_endpoint_detector/analyzer/client_observations.py"],
             },
             {
-                "criterion": "docker_env_subprocess_contracts",
+                "criterion": "docker_environment_observations",
                 "finding": (
-                    "Docker, env and subprocess observations are source-only and certainty-labelled"
+                    "Docker and environment observations are source-only and certainty-labelled"
                 ),
                 "source_refs": [
                     "src/fastapi_endpoint_detector/analyzer/deployment_observations.py"
                 ],
+            },
+            {
+                "criterion": "subprocess_observations",
+                "finding": (
+                    "UNVERIFIED: no raw subprocess observations or scanner references are present; "
+                    "historical stdio.client audit citations are not scanner observations"
+                ),
+                "source_refs": [],
             },
             {
                 "criterion": "no_cross_language_global_url_fanout",
