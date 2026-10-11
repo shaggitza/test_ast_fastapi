@@ -119,3 +119,12 @@ def test_subprocess_observations_respect_lambda_and_class_scope(
     assert tuple(row.value for row in observations) == expected
     assert all(row.certainty == "exact" for row in observations)
     assert all(row.source_path == Path("deploy.py") for row in observations)
+
+
+def test_enclosing_import_after_function_definition_is_resolved_at_callsite() -> None:
+    observations = extract_subprocess_observations(
+        "def launch():\n    subprocess.run(['late-import'])\nimport subprocess\nlaunch()\n",
+        Path("deploy.py"),
+    )
+
+    assert [(row.value, row.certainty) for row in observations] == [(("late-import",), "exact")]
