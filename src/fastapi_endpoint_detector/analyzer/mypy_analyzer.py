@@ -620,8 +620,8 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v8-"
-        "strict-release-partial-alternatives-provider-origin"
+        "conditional-elif-try-else-guaranteed-finally-v9-"
+        "strict-release-partial-alternatives-provider-origin-function-capture"
     )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
@@ -5940,6 +5940,46 @@ class MypyAnalyzer:
             return False
         return None
 
+    def _partial_function_capture_names(
+        self,
+        call: Any,
+        call_site: ResolvedCallSite | None,
+        callable_environment: dict[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]],
+        import_map: dict[str, str],
+        excluded_names: set[str],
+    ) -> set[str]:
+        """Keep ordinary function aliases captured by one proven partial constructor."""
+        from mypy.nodes import ARG_NAMED, ARG_POS, NameExpr
+
+        if (
+            call_site is None
+            or call_site.status != CallResolutionStatus.EXACT
+            or call_site.canonical_symbol != "functools.partial"
+            or call_site.invocation != InvocationKind.CONSTRUCTOR
+            or self._explicit_import_fullname(call.callee, import_map) != "functools.partial"
+            or not call.args
+            or len(call.args) > 257
+            or not (len(call.args) == len(call.arg_kinds) == len(call.arg_names))
+            or call.arg_kinds[0] != ARG_POS
+            or call.arg_names[0] is not None
+        ):
+            return set()
+        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
+            if not ((kind == ARG_POS and name is None) or (kind == ARG_NAMED and name is not None)):
+                return set()
+
+        captured: set[str] = set()
+        for argument in call.args:
+            if not isinstance(argument, NameExpr) or argument.name in excluded_names:
+                continue
+            value = callable_environment.get(argument.name)
+            if value is None or isinstance(value, _CallableUnion):
+                continue
+            declaration, receiver = value
+            if declaration[1] == InvocationKind.FUNCTION and receiver is None:
+                captured.add(argument.name)
+        return captured
+
     @staticmethod
     def _exposed_partial_names(root: Any, *, max_nodes: int = 4096) -> tuple[set[str], bool]:
         """Collect local roots exposed through bounded argument expressions."""
@@ -7096,6 +7136,13 @@ class MypyAnalyzer:
             # A call with unrelated arguments cannot invalidate every local
             # fact. Kill only values explicitly exposed to the call; unknown
             # star expansion invalidates the bounded local state.
+            captured_function_names = self._partial_function_capture_names(
+                call,
+                call_site,
+                callable_environment,
+                import_map,
+                partial_environment.keys() | lambda_environment.keys(),
+            )
             exposed_names: set[str] = set()
             if isinstance(callee, MemberExpr) and isinstance(callee.expr, NameExpr):
                 exposed_names.add(callee.expr.name)
@@ -7137,7 +7184,10 @@ class MypyAnalyzer:
             for name in exposed_names:
                 flow_environment.pop(name, None)
                 deferred_environment.pop(name, None)
-                callable_environment.pop(name, None)
+                # Constructing a proven partial stores ordinary function objects;
+                # it does not invoke them or rebind their caller-local aliases.
+                if name not in captured_function_names:
+                    callable_environment.pop(name, None)
                 lambda_environment.pop(name, None)
                 string_environment.pop(name, None)
                 partial_environment.pop(name, None)
