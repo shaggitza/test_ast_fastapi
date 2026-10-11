@@ -13,6 +13,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -26,11 +27,13 @@ CLIENT_SCANNER_PATH = "src/fastapi_endpoint_detector/analyzer/client_observation
 DEPLOYMENT_SCANNER_PATH = "src/fastapi_endpoint_detector/analyzer/deployment_observations.py"
 CLIENT_SCANNER_SHA256 = "341d1d1144d6ecd60f093c25143cc6e55375adc87f0ab950e975760e1da41c52"
 DEPLOYMENT_SCANNER_SHA256 = "8ac7f49a1c16fb2bedf971bec1824b2082cc2506fb71c8204863aa4b2bb4305c"
+PINNED_SOURCE_MANIFEST_SHA256 = "ea78d3508776d7488077fe4ed142ea9a8fb029083c7a76c632ce17b5303ddd48"
 HERE = Path(__file__).resolve().parent
 FIXTURE = HERE / "nonpython_v1"
 WORKER = r"""
 import dataclasses, json, sys
 from pathlib import Path
+sys.path.insert(0, sys.argv.pop(1))
 from fastapi_endpoint_detector.analyzer.client_observations import (
     EstablishedSurface, extract_client_observations, join_established_surfaces,
 )
@@ -85,6 +88,20 @@ for case in payload["cases"]:
         "key":o.key,"value":encode(o.value),"certainty":o.certainty,
         "uncertainty":o.uncertainty,
       } for o in subprocess_observations],
+    }
+out["_executed_sources"] = {}
+for name, module in sorted(sys.modules.items()):
+    if not name.startswith("fastapi_endpoint_detector"):
+        continue
+    module_file = getattr(module, "__file__", None)
+    if module_file is None:
+        continue
+    path = Path(module_file).resolve()
+    if path.suffix != ".py":
+        continue
+    out["_executed_sources"][name] = {
+        "path": path.relative_to(Path(sys.path[0]).resolve()).as_posix(),
+        "sha256": __import__("hashlib").sha256(path.read_bytes()).hexdigest()
     }
 json.dump(out,sys.stdout,sort_keys=True)
 """
@@ -395,8 +412,45 @@ def validate_fixture(  # noqa: PLR0912, PLR0915
     }
 
 
+def _pinned_package_manifest() -> dict[str, str]:
+    manifest_path = FIXTURE / "pinned_scanner" / "source_manifest.json"
+    if sha256(manifest_path.read_bytes()) != PINNED_SOURCE_MANIFEST_SHA256:
+        raise NonPythonFixtureError("pinned scanner source manifest SHA-256 mismatch")
+    manifest = strict_json(manifest_path)
+    if not isinstance(manifest, dict) or manifest.get("commit") != SCANNER_COMMIT:
+        raise NonPythonFixtureError("pinned scanner source manifest has invalid commit")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files:
+        raise NonPythonFixtureError("pinned scanner source manifest is empty")
+    expected = {
+        CLIENT_SCANNER_PATH.removeprefix("src/"),
+        DEPLOYMENT_SCANNER_PATH.removeprefix("src/"),
+    }
+    if not expected.issubset(files):
+        raise NonPythonFixtureError("pinned scanner manifest omits scanner modules")
+    for relative, digest in files.items():
+        if (
+            not isinstance(relative, str)
+            or not relative.endswith(".py")
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise NonPythonFixtureError("invalid pinned scanner source manifest entry")
+    return cast("dict[str, str]", files)
+
+
 def _archive_scanner(repo_root: Path, scanner_commit: str, target: Path) -> tuple[str, str | None]:
     _require_trusted_scanner_commit(scanner_commit)
+    manifest = _pinned_package_manifest()
+    # Establish a valid Git context before deciding that only the historical
+    # object is absent. All other Git failures must remain visible.
+    subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     try:
         resolved = subprocess.run(
             ["git", "rev-parse", f"{scanner_commit}^{{commit}}"],
@@ -405,15 +459,37 @@ def _archive_scanner(repo_root: Path, scanner_commit: str, target: Path) -> tupl
             capture_output=True,
             text=True,
         ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        # Depth-limited CI checkouts may omit this historical object. The
-        # fixture carries the exact approved module bytes, checked below.
+    except subprocess.CalledProcessError as git_error:
+        # Fallback is valid only for a valid repository whose object database
+        # confirms that this trusted commit is absent.
+        absent = subprocess.run(
+            ["git", "cat-file", "-e", f"{scanner_commit}^{{commit}}"],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+        )
+        if absent.returncode == 0:
+            raise NonPythonFixtureError(
+                "scanner commit exists but could not be resolved"
+            ) from git_error
+        if absent.returncode != 128 or b"fatal: Not a valid object name " not in absent.stderr:
+            raise subprocess.CalledProcessError(
+                absent.returncode, absent.args, absent.stdout, absent.stderr
+            ) from git_error
         bundled = FIXTURE / "pinned_scanner"
-        for relative in (CLIENT_SCANNER_PATH, DEPLOYMENT_SCANNER_PATH):
-            source_name = Path(relative).name
-            destination = target / relative
+        for relative, expected_hash in manifest.items():
+            source = bundled / relative
+            if (
+                source.is_symlink()
+                or not source.is_file()
+                or sha256(source.read_bytes()) != expected_hash
+            ):
+                raise NonPythonFixtureError(
+                    f"pinned scanner source SHA-256 mismatch: {relative}"
+                ) from git_error
+            destination = target / "src" / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes((bundled / source_name).read_bytes())
+            shutil.copyfile(source, destination)
     else:
         if resolved != scanner_commit:
             raise NonPythonFixtureError("scanner commit did not resolve to the requested exact SHA")
@@ -431,14 +507,23 @@ def _archive_scanner(repo_root: Path, scanner_commit: str, target: Path) -> tupl
     client_hash = sha256(client_bytes)
     if client_hash != CLIENT_SCANNER_SHA256 or deployment_hash != DEPLOYMENT_SCANNER_SHA256:
         raise NonPythonFixtureError("archived scanner module SHA-256 differs from R6 pin")
+    for relative, expected_hash in manifest.items():
+        source = target / "src" / relative
+        if (
+            source.is_symlink()
+            or not source.is_file()
+            or sha256(source.read_bytes()) != expected_hash
+        ):
+            raise NonPythonFixtureError(f"pinned scanner dependency SHA-256 mismatch: {relative}")
     return client_hash, deployment_hash
 
 
 def _run_worker(scanner_source: Path, payload: dict[str, Any]) -> dict[str, Any]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(scanner_source / "src")
+    env["PYTHONNOUSERSITE"] = "1"
     proc = subprocess.run(
-        [sys.executable, "-c", WORKER],
+        [sys.executable, "-I", "-c", WORKER, str(scanner_source / "src")],
         input=json.dumps(payload),
         text=True,
         capture_output=True,
@@ -453,6 +538,37 @@ def _run_worker(scanner_source: Path, payload: dict[str, Any]) -> dict[str, Any]
         raise NonPythonFixtureError("trusted scanner worker returned invalid JSON") from exc
     if not isinstance(result, dict):
         raise NonPythonFixtureError("trusted scanner worker returned an invalid result")
+    executed = result.pop("_executed_sources", None)
+    required = {
+        "fastapi_endpoint_detector",
+        "fastapi_endpoint_detector.analyzer.client_observations",
+        "fastapi_endpoint_detector.analyzer.deployment_observations",
+        "fastapi_endpoint_detector.models.endpoint",
+    }
+    if not isinstance(executed, dict) or not required.issubset(executed):
+        raise NonPythonFixtureError("worker did not report the complete executed-source proof")
+    seen_paths: set[str] = set()
+    for name, proof in executed.items():
+        if (
+            not isinstance(proof, dict)
+            or not isinstance(proof.get("path"), str)
+            or not isinstance(proof.get("sha256"), str)
+        ):
+            raise NonPythonFixtureError(f"worker source proof is malformed: {name}")
+        relative = safe_relative(proof["path"], "worker source path").as_posix()
+        if relative in seen_paths:
+            raise NonPythonFixtureError("worker source proof contains duplicate executed paths")
+        seen_paths.add(relative)
+        path = (scanner_source / "src" / relative).resolve()
+        expected_hash = _pinned_package_manifest().get(relative)
+        if (
+            expected_hash is None
+            or proof["sha256"] != expected_hash
+            or not path.is_file()
+            or sha256(path.read_bytes()) != expected_hash
+        ):
+            raise NonPythonFixtureError(f"worker executed-source hash mismatch: {name}")
+    result["executed_scanner_sources"] = executed
     return result
 
 
@@ -701,6 +817,7 @@ def build_result(
             "client_source_sha256": client_hash,
             "deployment_source_path": DEPLOYMENT_SCANNER_PATH,
             "deployment_source_sha256": deployment_hash,
+            "executed_sources": scan["executed_scanner_sources"],
         },
         "source_manifest_sha256": sha256((fixture / "source_manifest.json").read_bytes()),
         "case_spec_sha256": sha256((fixture / "evaluation_cases.json").read_bytes()),

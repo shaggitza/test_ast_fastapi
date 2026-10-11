@@ -55,10 +55,6 @@ def test_archive_rejects_counterfeit_scanner_modules(
 def test_archive_uses_hash_pinned_bundle_when_commit_is_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def missing_commit(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        raise subprocess.CalledProcessError(128, "git rev-parse")
-
-    monkeypatch.setattr(subprocess, "run", missing_commit)
     client_hash, deployment_hash = evaluator._archive_scanner(
         ROOT, evaluator.SCANNER_COMMIT, tmp_path
     )
@@ -66,22 +62,43 @@ def test_archive_uses_hash_pinned_bundle_when_commit_is_absent(
     assert deployment_hash == evaluator.DEPLOYMENT_SCANNER_SHA256
 
 
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "fastapi_endpoint_detector/analyzer/client_observations.py",
+        "fastapi_endpoint_detector/models/endpoint.py",
+    ],
+)
 def test_archive_rejects_modified_pinned_bundle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
 ) -> None:
     bundled = tmp_path / "pinned_scanner"
-    bundled.mkdir()
-    for relative in (evaluator.CLIENT_SCANNER_PATH, evaluator.DEPLOYMENT_SCANNER_PATH):
-        source_name = Path(relative).name
-        (bundled / source_name).write_bytes(b"counterfeit scanner module\n")
-
-    def missing_commit(*_args: object, **_kwargs: object) -> SimpleNamespace:
-        raise subprocess.CalledProcessError(128, "git rev-parse")
-
+    shutil.copytree(FIXTURE / "pinned_scanner", bundled)
+    (bundled / relative).write_bytes(b"counterfeit pinned source\n")
     monkeypatch.setattr(evaluator, "FIXTURE", tmp_path)
-    monkeypatch.setattr(subprocess, "run", missing_commit)
-    with pytest.raises(evaluator.NonPythonFixtureError, match="module SHA-256"):
+    with pytest.raises(evaluator.NonPythonFixtureError, match="source SHA-256 mismatch"):
         evaluator._archive_scanner(ROOT, evaluator.SCANNER_COMMIT, tmp_path / "out")
+
+
+def test_archive_propagates_invalid_git_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "missing-git-dir"))
+    with pytest.raises(subprocess.CalledProcessError):
+        evaluator._archive_scanner(ROOT, evaluator.SCANNER_COMMIT, tmp_path)
+
+
+def test_archive_propagates_git_archive_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def archive_failure(args: list[str], **_kwargs: object) -> SimpleNamespace:
+        if args == ["git", "archive", "--format=tar", evaluator.SCANNER_COMMIT]:
+            raise subprocess.CalledProcessError(128, args, stderr=b"corrupt object database")
+        return SimpleNamespace(stdout=evaluator.SCANNER_COMMIT + "\n")
+
+    monkeypatch.setattr(subprocess, "run", archive_failure)
+    with pytest.raises(subprocess.CalledProcessError, match="archive"):
+        evaluator._archive_scanner(ROOT, evaluator.SCANNER_COMMIT, tmp_path)
 
 
 def test_r6_rejects_modified_source_snapshot(tmp_path: Path) -> None:
@@ -140,3 +157,10 @@ def test_r6_result_replay_is_byte_deterministic() -> None:
     second_bytes = (json.dumps(second, indent=2, sort_keys=True) + "\n").encode()
     assert first_bytes == second_bytes
     assert hashlib.sha256(first_bytes).hexdigest() == hashlib.sha256(second_bytes).hexdigest()
+    proof = first["scanner"]["executed_sources"]
+    assert proof["fastapi_endpoint_detector.analyzer.client_observations"]["sha256"] == (
+        evaluator.CLIENT_SCANNER_SHA256
+    )
+    assert proof["fastapi_endpoint_detector.analyzer.deployment_observations"]["sha256"] == (
+        evaluator.DEPLOYMENT_SCANNER_SHA256
+    )
