@@ -94,9 +94,7 @@ def test_v2_bindings_reconcile_official_custody_and_distinct_retry_identity() ->
     }
     assert accepted["campaign_attempt_id"] == ATTEMPT
     assert accepted["run_id"] != ATTEMPT
-    validated_overlay = official.validate_overlay_binding_v2(
-        overlay, expected=overlay_expected
-    )
+    validated_overlay = official.validate_overlay_binding_v2(overlay, expected=overlay_expected)
     assert validated_overlay["run_id"] == run_id
     with pytest.raises(official.OfficialRecoveryError, match="custody/profile"):
         official.validate_runtime_binding_v2(
@@ -116,8 +114,10 @@ def test_committed_broker_source_profile_matches_derived_closure() -> None:
     assert profile["entrypoint"].endswith("ground_truth_retry_broker_v2.py")
     assert profile["external_imports"] == ["pydantic"]
     assert profile_sha256 == _sha(
-        (root / "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/"
-         "broker-source-profile-v2.json").read_bytes()
+        (
+            root / "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/"
+            "broker-source-profile-v2.json"
+        ).read_bytes()
     )
 
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import fcntl
+import functools
 import hashlib
 import importlib.machinery
 import json
@@ -32,6 +33,8 @@ LAUNCH_PROFILE_PROTOCOL = "ground-truth-python-broker-launch-profile-v2"
 RECEIPT_SCHEMA = "benchmarks/real_world/production_v2/broker-freeze-receipt-schema-v1.json"
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MAX_FILE = 32 * 1024 * 1024
+_MAX_RUNTIME_FILES = 256
+_MAX_RUNTIME_TOTAL = 512 * 1024 * 1024
 _MANIFEST = "bundle-manifest-v1.json"
 _EXTERNAL_ROOT = "__external__/site-packages"
 _EXTERNAL_REGISTRY = {
@@ -186,26 +189,24 @@ def _external_files(external_imports: tuple[str, ...]) -> dict[str, tuple[Path, 
 def _runtime_identity() -> dict[str, Any]:
     executable = Path(sys.executable).resolve(strict=True)
     paths = sysconfig.get_paths()
-    library_dir = sysconfig.get_config_var("LIBDIR")
-    library_name = sysconfig.get_config_var("LDLIBRARY")
     runtime_libraries: dict[str, str] = {}
-    if library_dir and library_name and library_name.endswith((".so", ".dylib", ".dll")):
-        runtime_path = (Path(library_dir) / library_name).resolve(strict=True)
-        runtime_libraries[str(runtime_path)] = _sha(_read_regular(runtime_path))
-    try:
-        maps = Path("/proc/self/maps").read_text(encoding="ascii")
-    except OSError as exc:
-        raise BundleError("runtime native-library map is unavailable") from exc
-    for line in maps.splitlines():
-        fields = line.split(maxsplit=5)
-        mapped = fields[5].removesuffix(" (deleted)") if len(fields) == 6 else ""
-        basename = Path(mapped).name
-        if mapped.startswith("/") and ".so" in basename:
-            runtime_path = Path(mapped).resolve(strict=True)
-            runtime_libraries[str(runtime_path)] = _sha(_read_regular(runtime_path))
+    mapped_paths = _isolated_runtime_library_paths(str(executable))
+    runtime_total = 0
+    for mapped in mapped_paths:
+        runtime_path = Path(mapped)
+        raw = _read_runtime_file(runtime_path)
+        runtime_total += len(raw)
+        if runtime_total > _MAX_RUNTIME_TOTAL:
+            raise BundleError("runtime library inventory exceeds aggregate byte limit")
+        runtime_libraries[mapped] = _sha(raw)
+    if not runtime_libraries or len(runtime_libraries) > _MAX_RUNTIME_FILES:
+        raise BundleError("runtime native-library inventory is empty or exceeds file limit")
+    executable_raw = _read_runtime_file(executable)
+    if runtime_total + len(executable_raw) > _MAX_RUNTIME_TOTAL:
+        raise BundleError("runtime inventory exceeds aggregate byte limit")
     return {
         "executable": str(executable),
-        "executable_sha256": _sha(_read_regular(executable)),
+        "executable_sha256": _sha(executable_raw),
         "version": sys.version,
         "implementation": sys.implementation.name,
         "cache_tag": sys.implementation.cache_tag,
@@ -214,6 +215,39 @@ def _runtime_identity() -> dict[str, Any]:
         "platstdlib": str(Path(paths["platstdlib"]).resolve(strict=True)),
         "runtime_libraries": runtime_libraries,
     }
+
+
+@functools.lru_cache(maxsize=4)
+def _isolated_runtime_library_paths(executable: str) -> tuple[str, ...]:
+    """Probe the exact isolated bootstrap imports used before broker import."""
+    probe = """import fcntl,hashlib,importlib.abc,importlib.machinery,importlib.util,json,os
+import pathlib,runpy,sys,sysconfig
+paths=set()
+maps=pathlib.Path('/proc/self/maps').read_text(encoding='ascii')
+for line in maps.splitlines():
+ fields=line.split(maxsplit=5)
+ if len(fields)==6 and fields[5].startswith('/') and '.so' in pathlib.Path(fields[5]).name:
+  paths.add(str(pathlib.Path(fields[5]).resolve(strict=True)))
+print(json.dumps(sorted(paths),separators=(',',':')))"""
+    try:
+        result = subprocess.run(
+            [executable, "-I", "-c", probe],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"},
+        )
+        mapped_paths = json.loads(result.stdout)
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise BundleError("isolated runtime native-library map is unavailable") from exc
+    if not isinstance(mapped_paths, list) or not all(
+        isinstance(item, str) for item in mapped_paths
+    ):
+        raise BundleError("isolated runtime native-library map is invalid")
+    if not mapped_paths or len(mapped_paths) > 256:
+        raise BundleError("runtime native-library inventory is empty or exceeds file limit")
+    return tuple(mapped_paths)
 
 
 def _source_inventory(
@@ -338,6 +372,48 @@ def _read_regular(path: Path) -> bytes:
             size += len(block)
         if size > _MAX_FILE:
             raise BundleError("source exceeds byte limit")
+        return b"".join(blocks)
+    finally:
+        os.close(fd)
+
+
+def _read_runtime_file(path: Path) -> bytes:
+    """Read one identified interpreter/runtime file under the runtime trust policy.
+
+    Runtime paths are separately attested by the existing toolchain identity and
+    runtime-attestation receipt. This reader does not extend that policy to
+    broker source, external packages, native extensions, or control artifacts.
+    """
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        raise BundleError("runtime path must be absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:-1]:
+        current /= part
+        try:
+            if stat.S_ISLNK(current.lstat().st_mode):
+                raise BundleError("runtime has a symlink ancestor")
+        except FileNotFoundError as exc:
+            raise BundleError("runtime path is missing") from exc
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise BundleError("runtime cannot be opened without following symlinks") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, os.getuid()}:
+            raise BundleError("runtime must be root or current uid owned regular data")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise BundleError("runtime must not be group or world writable")
+        blocks: list[bytes] = []
+        size = 0
+        while size <= _MAX_FILE:
+            block = os.read(fd, min(65536, _MAX_FILE + 1 - size))
+            if not block:
+                break
+            blocks.append(block)
+            size += len(block)
+        if size > _MAX_FILE:
+            raise BundleError("runtime exceeds byte limit")
         return b"".join(blocks)
     finally:
         os.close(fd)
@@ -922,9 +998,33 @@ bundle_fd=int(os.environ.pop("GT_BUNDLE_FD"))
 native=json.loads(os.environ.pop("GT_NATIVE_EXTENSIONS"))
 runtime=json.loads(os.environ.pop("GT_RUNTIME_IDENTITY"))
 exe=pathlib.Path(sys.executable).resolve(strict=True)
-raw=exe.read_bytes()
+def runtime_sha256(path,expected_path):
+ path=pathlib.Path(path)
+ if not path.is_absolute() or str(path)!=expected_path:
+  raise RuntimeError("runtime path differs from sealed toolchain identity")
+ current=pathlib.Path(path.anchor)
+ for part in path.parts[1:-1]:
+  current=current/part
+  if current.is_symlink(): raise RuntimeError("runtime path has a symlink ancestor")
+ fd=os.open(path,os.O_RDONLY|getattr(os,"O_NOFOLLOW",0))
+ try:
+  info=os.fstat(fd)
+  if not __import__("stat").S_ISREG(info.st_mode) or info.st_uid not in {0, os.getuid()}:
+   raise RuntimeError("runtime must be root or current uid owned regular data")
+  if info.st_mode&0o022: raise RuntimeError("runtime is group or world writable")
+  digest=hashlib.sha256(); size=0
+  while True:
+   block=os.read(fd,min(65536,33554433-size))
+   if not block: break
+   size+=len(block)
+   if size>33554432: raise RuntimeError("runtime file exceeds byte limit")
+   digest.update(block)
+  return "sha256:"+digest.hexdigest(),size
+ finally: os.close(fd)
+raw_hash,executable_size=runtime_sha256(exe,runtime["executable"])
+runtime_total=executable_size
 if (str(exe)!=runtime["executable"]
- or "sha256:"+hashlib.sha256(raw).hexdigest()!=runtime["executable_sha256"]):
+ or raw_hash!=runtime["executable_sha256"]):
  raise RuntimeError("interpreter executable differs from sealed toolchain identity")
 if (sys.version!=runtime["version"] or sys.implementation.name!=runtime["implementation"]
  or sys.implementation.cache_tag!=runtime["cache_tag"]
@@ -934,16 +1034,27 @@ stdlib=pathlib.Path(sysconfig.get_paths()["stdlib"]).resolve(strict=True)
 if stdlib.as_posix()!=pathlib.Path(runtime["stdlib"]).as_posix():
  raise RuntimeError("standard library root differs from sealed toolchain identity")
 registered=runtime["runtime_libraries"]
+if not isinstance(registered,dict) or not registered or len(registered)>256:
+ raise RuntimeError("native runtime inventory is empty or exceeds file limit")
+mapped_libraries=set()
+runtime_total=0
 for line in pathlib.Path("/proc/self/maps").read_text(encoding="ascii").splitlines():
  fields=line.split(maxsplit=5)
  path=fields[5].removesuffix(" (deleted)") if len(fields)==6 else ""
  if path.startswith("/") and ".so" in pathlib.Path(path).name:
   resolved=str(pathlib.Path(path).resolve(strict=True))
+  if resolved in mapped_libraries: continue
+  mapped_libraries.add(resolved)
   if resolved not in registered:
    raise RuntimeError("unregistered native runtime library is loaded")
-  data=pathlib.Path(resolved).read_bytes()
-  if "sha256:"+hashlib.sha256(data).hexdigest()!=registered[resolved]:
+  actual_hash,actual_size=runtime_sha256(resolved,resolved)
+  runtime_total+=actual_size
+  if runtime_total>536870912:
+   raise RuntimeError("native runtime inventory exceeds aggregate byte limit")
+  if actual_hash!=registered[resolved]:
    raise RuntimeError("native runtime library differs from sealed toolchain identity")
+if mapped_libraries!=set(registered):
+ raise RuntimeError("mapped native runtime closure differs from sealed toolchain identity")
 required=fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL
 for name,item in native.items():
  fd=item["fd"]

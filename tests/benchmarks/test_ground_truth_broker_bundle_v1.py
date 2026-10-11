@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 from benchmarks.real_world import ground_truth_broker_bundle_v1 as bundle_v1
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def digest(raw: bytes) -> str:
@@ -106,8 +104,11 @@ def test_sealed_zip_launcher_executes_only_descriptor_snapshot(tmp_path: Path) -
     profile_sha = digest(b"profile")
     toolchain_sha = bundle_v1.compute_toolchain_sha256(())
     bundle = bundle_v1.materialize_bundle(
-        source, tmp_path / "sealed", ("entry.py",),
-        profile_sha256=profile_sha, toolchain_sha256=toolchain_sha,
+        source,
+        tmp_path / "sealed",
+        ("entry.py",),
+        profile_sha256=profile_sha,
+        toolchain_sha256=toolchain_sha,
         entrypoint="entry.py",
     )
     binding_sha = digest(b"binding")
@@ -127,17 +128,34 @@ def test_sealed_zip_launcher_executes_only_descriptor_snapshot(tmp_path: Path) -
     )
     handle = bundle_v1.LaunchLeaseHandle(lease)
     child = bundle_v1.launch_with_escrow_lease(lease=handle, bundle=bundle)
-    stdout, _ = child.communicate(timeout=5)
-    assert child.returncode == 0
+    stdout, stderr = child.communicate(timeout=5)
+    assert child.returncode == 0, stderr.decode(errors="replace")
     assert stdout == b"sealed-entrypoint\n"
     assert handle.phase == "prepared"
-    handle.mark_ready(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
-                                   launch_profile_sha256=profile_sha))
-    handle.mark_claimed(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
-                                     launch_profile_sha256=profile_sha))
-    handle.mark_escrow_finalized(**identities(bundle, runtime_sha256=runtime_sha,
-                                              binding_sha256=binding_sha,
-                                              launch_profile_sha256=profile_sha))
+    handle.mark_ready(
+        **identities(
+            bundle,
+            runtime_sha256=runtime_sha,
+            binding_sha256=binding_sha,
+            launch_profile_sha256=profile_sha,
+        )
+    )
+    handle.mark_claimed(
+        **identities(
+            bundle,
+            runtime_sha256=runtime_sha,
+            binding_sha256=binding_sha,
+            launch_profile_sha256=profile_sha,
+        )
+    )
+    handle.mark_escrow_finalized(
+        **identities(
+            bundle,
+            runtime_sha256=runtime_sha,
+            binding_sha256=binding_sha,
+            launch_profile_sha256=profile_sha,
+        )
+    )
 
 
 def test_child_imports_snapshot_after_source_and_checkout_mutation(tmp_path: Path) -> None:
@@ -169,8 +187,14 @@ def test_child_imports_snapshot_after_source_and_checkout_mutation(tmp_path: Pat
             launch_profile_sha256=profile_sha,
             toolchain_sha256=toolchain_sha,
         ),
-    ).acquire(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
-                           launch_profile_sha256=profile_sha))
+    ).acquire(
+        **identities(
+            bundle,
+            runtime_sha256=runtime_sha,
+            binding_sha256=binding_sha,
+            launch_profile_sha256=profile_sha,
+        )
+    )
     child = bundle_v1.launch_with_escrow_lease(
         lease=bundle_v1.LaunchLeaseHandle(lease), bundle=bundle
     )
@@ -178,12 +202,18 @@ def test_child_imports_snapshot_after_source_and_checkout_mutation(tmp_path: Pat
     sealed_worker = bundle.root / "worker.py"
     sealed_worker.chmod(0o600)
     sealed_worker.write_text("VALUE = 'mutable-directory'\n")
-    stdout, _ = child.communicate(timeout=5)
-    assert child.returncode == 0
+    stdout, stderr = child.communicate(timeout=5)
+    assert child.returncode == 0, stderr.decode(errors="replace")
     assert stdout == b"snapshot-value\n"
     with pytest.raises(bundle_v1.BundleError, match=r"changed|mode is invalid"):
-        lease.check(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
-                                 launch_profile_sha256=profile_sha))
+        lease.check(
+            **identities(
+                bundle,
+                runtime_sha256=runtime_sha,
+                binding_sha256=binding_sha,
+                launch_profile_sha256=profile_sha,
+            )
+        )
     lease.close()
 
 
@@ -218,15 +248,16 @@ def test_symlinked_source_and_destination_replacement_fail_closed(tmp_path: Path
     (source / "module.py").symlink_to(external)
     with pytest.raises(bundle_v1.BundleError, match="symlink"):
         bundle_v1.materialize_bundle(
-            source, tmp_path / "sealed", ("module.py",),
-            profile_sha256=digest(b"p"), toolchain_sha256=digest(b"t")
+            source,
+            tmp_path / "sealed",
+            ("module.py",),
+            profile_sha256=digest(b"p"),
+            toolchain_sha256=digest(b"t"),
         )
 
     bundle = make_bundle(tmp_path / "other")
     lease_path = tmp_path / "other/lease.lock"
-    lease = bundle_v1.FreezeLease(lease_path, bundle, receipt(bundle)).acquire(
-        **identities(bundle)
-    )
+    lease = bundle_v1.FreezeLease(lease_path, bundle, receipt(bundle)).acquire(**identities(bundle))
     lease_path.unlink()
     lease_path.write_bytes(b"replacement")
     with pytest.raises(bundle_v1.BundleError, match="identity changed"):
@@ -280,9 +311,7 @@ def test_inherited_descriptor_keeps_freeze_after_prepare_process_closes(
 ) -> None:
     bundle = make_bundle(tmp_path)
     path = tmp_path / "lease.lock"
-    prepared = bundle_v1.FreezeLease(path, bundle, receipt(bundle)).acquire(
-        **identities(bundle)
-    )
+    prepared = bundle_v1.FreezeLease(path, bundle, receipt(bundle)).acquire(**identities(bundle))
     child = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(5)"],
         pass_fds=prepared.pass_fds,
@@ -332,7 +361,8 @@ def test_acquire_launch_lease_reads_receipt_and_retains_lock_through_finalize(
     }
     # The test bundle profile identity is the launch-profile byte identity.
     bundle = bundle_v1.materialize_bundle(
-        tmp_path / "checkout", tmp_path / "sealed-v2",
+        tmp_path / "checkout",
+        tmp_path / "sealed-v2",
         ("broker/__init__.py", "broker/worker.py"),
         profile_sha256=profile_value["production_profile_sha256"],
         toolchain_sha256=bundle.toolchain_sha256,
@@ -429,9 +459,7 @@ def test_sealed_toolchain_includes_and_imports_pydantic_source_and_native_extens
         launch_profile_sha256=digest(b"profile-pydantic"),
         toolchain_sha256=toolchain_sha,
     )
-    lease = bundle_v1.FreezeLease(
-        tmp_path / "pydantic-lease.lock", bundle, receipt_value
-    ).acquire(
+    lease = bundle_v1.FreezeLease(tmp_path / "pydantic-lease.lock", bundle, receipt_value).acquire(
         runtime_attestation_sha256=receipt_value.runtime_attestation_sha256,
         binding_sha256=receipt_value.binding_sha256,
         launch_profile_sha256=receipt_value.launch_profile_sha256,
@@ -451,3 +479,125 @@ def test_sealed_toolchain_includes_and_imports_pydantic_source_and_native_extens
     handle.mark_ready(**identities_value)
     handle.mark_claimed(**identities_value)
     handle.mark_escrow_finalized(**identities_value)
+
+
+def test_runtime_reader_accepts_root_owned_system_runtime_and_rejects_source_owner_mismatch(
+    tmp_path: Path,
+) -> None:
+    runtime = Path(sys.executable).resolve(strict=True)
+    assert bundle_v1._read_runtime_file(runtime)
+    if runtime.stat().st_uid == 0 and os.getuid() != 0:
+        with pytest.raises(bundle_v1.BundleError, match="owned by the current uid"):
+            bundle_v1._read_regular(runtime)
+
+
+def test_runtime_reader_rejects_symlink_and_group_or_world_writable_file(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime.bin"
+    runtime.write_bytes(b"trusted runtime")
+    runtime.chmod(0o644)
+    assert bundle_v1._read_runtime_file(runtime)
+    link = tmp_path / "runtime-link"
+    link.symlink_to(runtime)
+    with pytest.raises(bundle_v1.BundleError, match="without following symlinks"):
+        bundle_v1._read_runtime_file(link)
+    runtime.chmod(0o666)
+    with pytest.raises(bundle_v1.BundleError, match="must not be group or world writable"):
+        bundle_v1._read_runtime_file(runtime)
+    runtime.chmod(0o644)
+    linked_parent = tmp_path / "linked-parent"
+    linked_parent.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(bundle_v1.BundleError, match="symlink ancestor"):
+        bundle_v1._read_runtime_file(linked_parent / runtime.name)
+
+
+def test_runtime_reader_rejects_unregistered_nonroot_owner(tmp_path: Path) -> None:
+    if os.getuid() != 0:
+        pytest.skip("wrong-owner runtime fixture requires creating an unregistered uid")
+    runtime = tmp_path / "foreign-runtime.bin"
+    runtime.write_bytes(b"foreign runtime")
+    runtime.chmod(0o644)
+    os.chown(runtime, 12345, 12345)
+    with pytest.raises(bundle_v1.BundleError, match="root or current uid"):
+        bundle_v1._read_runtime_file(runtime)
+
+
+def test_runtime_identity_hash_changes_when_registered_runtime_bytes_change(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime.bin"
+    runtime.write_bytes(b"first")
+    first = digest(bundle_v1._read_runtime_file(runtime))
+    runtime.write_bytes(b"second")
+    second = digest(bundle_v1._read_runtime_file(runtime))
+    assert first != second
+
+
+@pytest.mark.parametrize("closure_change", ["missing", "additional"])
+def test_sealed_child_rejects_missing_or_additional_mapped_runtime_library(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closure_change: str
+) -> None:
+    executable = str(Path(sys.executable).resolve(strict=True))
+    actual_paths = bundle_v1._isolated_runtime_library_paths(executable)
+    if closure_change == "missing":
+        registered_paths = actual_paths[1:]
+        error = "unregistered native runtime library"
+    else:
+        candidate = next(
+            path
+            for path in sorted(Path("/usr/lib/x86_64-linux-gnu").glob("lib*.so*"))
+            if str(path.resolve(strict=True)) not in actual_paths
+        )
+        registered_paths = (*actual_paths, str(candidate.resolve(strict=True)))
+        error = "mapped native runtime closure"
+    monkeypatch.setattr(
+        bundle_v1, "_isolated_runtime_library_paths", lambda _executable: registered_paths
+    )
+    source = tmp_path / "checkout"
+    source.mkdir()
+    (source / "entry.py").write_text("print('should-not-import')\n")
+    toolchain_sha = bundle_v1.compute_toolchain_sha256(())
+    bundle = bundle_v1.materialize_bundle(
+        source,
+        tmp_path / "sealed",
+        ("entry.py",),
+        profile_sha256=digest(b"runtime-closure-profile"),
+        toolchain_sha256=toolchain_sha,
+        entrypoint="entry.py",
+    )
+    runtime_sha = digest(b"runtime")
+    binding_sha = digest(b"binding")
+    lease = bundle_v1.FreezeLease(
+        tmp_path / "lease.lock",
+        bundle,
+        bundle_v1.FreezeReceipt(
+            runtime_attestation_sha256=runtime_sha,
+            bundle_sha256=bundle.digest,
+            binding_sha256=binding_sha,
+            launch_profile_sha256=digest(b"profile"),
+            toolchain_sha256=toolchain_sha,
+        ),
+    ).acquire(
+        runtime_attestation_sha256=runtime_sha,
+        binding_sha256=binding_sha,
+        launch_profile_sha256=digest(b"profile"),
+        toolchain_sha256=toolchain_sha,
+    )
+    child = bundle_v1.launch_with_escrow_lease(
+        lease=bundle_v1.LaunchLeaseHandle(lease), bundle=bundle
+    )
+    stdout, stderr = child.communicate(timeout=10)
+    assert child.returncode != 0
+    assert error.encode() in stderr
+    assert stdout == b""
+
+
+def test_runtime_reader_rejects_root_owned_source_even_though_runtime_reader_allows_it(
+    tmp_path: Path,
+) -> None:
+    if os.getuid() == 0:
+        pytest.skip("wrong-owner source assertion requires an unprivileged test uid")
+    with pytest.raises(bundle_v1.BundleError, match="owned by the current uid"):
+        bundle_v1._read_regular(Path(sys.executable).resolve(strict=True))
+    assert bundle_v1._read_runtime_file(Path(sys.executable).resolve(strict=True))
