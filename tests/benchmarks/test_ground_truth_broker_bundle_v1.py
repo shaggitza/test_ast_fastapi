@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -598,6 +599,16 @@ def test_runtime_reader_rejects_root_owned_source_even_though_runtime_reader_all
 ) -> None:
     if os.getuid() == 0:
         pytest.skip("wrong-owner source assertion requires an unprivileged test uid")
+    # Use a stable system file with an explicitly verified owner.  sys.executable
+    # may be installed in the runner's current UID-owned toolcache, which makes
+    # it a poor fixture for a current-UID ownership rejection.
+    source = Path("/etc/hostname")
+    try:
+        source_stat = source.stat()
+    except OSError as exc:
+        pytest.skip(f"root-owned source fixture /etc/hostname unavailable: {exc}")
+    if not stat.S_ISREG(source_stat.st_mode) or source_stat.st_uid != 0:
+        pytest.skip("root-owned source fixture /etc/hostname is not a regular UID-0 file")
     with pytest.raises(bundle_v1.BundleError, match="owned by the current uid"):
-        bundle_v1._read_regular(Path(sys.executable).resolve(strict=True))
-    assert bundle_v1._read_runtime_file(Path(sys.executable).resolve(strict=True))
+        bundle_v1._read_regular(source)
+    assert bundle_v1._read_runtime_file(source)
