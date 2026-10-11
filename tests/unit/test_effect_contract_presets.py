@@ -22,7 +22,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
 _EXPECTED_PRESET_HASHES = {
     "message-bus-v1": "sha256:875790c0d08b0f6cb2e8681bf56a9066d67bee39225dd7160cb51a447d18ebc3",
     "filesystem-v1": "sha256:066c93f8a569d996bac3f01b3d244f0b7d43a5223050563ad327404e7bad049b",
-    "http-clients-v1": "sha256:ab3d88b368db24f4c6c0879c8104105b09f23997997e63dd232856886bca6e2e",
+    "http-clients-v1": "sha256:4f845db159afb447380e5c5b734c927d01cb099d2d471b70de1db98cb3c1f552",
     "mongodb-v1": "sha256:87b8ef6b0ccd3ef4862fb78ffad20cc88ddf55fa1580e286d87ab5c17f0070c9",
     "object-storage-v1": "sha256:1d465f50407ef3d4a168d12646e894fb4d363dc97874e1a3fb140c9bcf7b5523",
     "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
@@ -67,6 +67,20 @@ _EXPECTED_CONTRACT_IDS = {
         "httpx-client-patch",
         "httpx-client-post",
         "httpx-client-put",
+        "httpx-api-delete",
+        "httpx-api-get",
+        "httpx-api-head",
+        "httpx-api-options",
+        "httpx-api-patch",
+        "httpx-api-post",
+        "httpx-api-put",
+        "requests-api-delete",
+        "requests-api-get",
+        "requests-api-head",
+        "requests-api-options",
+        "requests-api-patch",
+        "requests-api-post",
+        "requests-api-put",
         "requests-session-delete",
         "requests-session-get",
         "requests-session-head",
@@ -174,6 +188,7 @@ def test_presets_never_contain_bare_or_generic_method_symbols() -> None:
                     len(parts) >= 4
                     or parts[0] == "_io"
                     or (parts[0] == "httpx" and parts[1] == "_api")
+                    or (parts[0] == "requests" and parts[1] == "api" and parts[-1] != "request")
                 )
             assert contract.package is not None
             assert contract.package.python is not None or (
@@ -257,6 +272,7 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
     artifacts = Path("/tmp/gh97-wheel-audit")
     wheels = {
         "httpx": artifacts / "httpx-0.28.1-py3-none-any.whl",
+        "requests": artifacts / "requests-2.32.3-py3-none-any.whl",
         "pymongo": next(artifacts.glob("pymongo-4.10.1-*.whl"), None),
         "s3": artifacts / "mypy_boto3_s3-1.35.92-py3-none-any.whl",
         "motor": artifacts / "motor-3.6.0-py3-none-any.whl",
@@ -276,6 +292,20 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
                 "def delete(",
                 "def head(",
                 "def options(",
+            ),
+        ),
+        "requests": (
+            "requests/api.py",
+            "sha256:fd96fd39aeedcd5222cd32b016b3e30c463d7a3b66fce9d2444467003c46b10b",
+            (
+                "def get(",
+                "def post(",
+                "def put(",
+                "def patch(",
+                "def delete(",
+                "def head(",
+                "def options(",
+                "def request(method, url, **kwargs):",
             ),
         ),
         "pymongo": (
@@ -319,6 +349,7 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
     # class and verify the selector points at the declared argument position.
     selector_sources = {
         "httpx": (wheels["httpx"], "httpx/_api.py", "httpx._api", None),
+        "requests": (wheels["requests"], "requests/api.py", "requests.api", None),
         "pymongo": (
             wheels["pymongo"],
             "pymongo/synchronous/collection.py",
@@ -330,6 +361,9 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
     }
     expected_methods: dict[str, dict[str, tuple[str, int | str]]] = {
         "httpx": dict.fromkeys(
+            ("get", "post", "put", "patch", "delete", "head", "options"), ("url", 0)
+        ),
+        "requests": dict.fromkeys(
             ("get", "post", "put", "patch", "delete", "head", "options"), ("url", 0)
         ),
         "pymongo": {
@@ -355,6 +389,7 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
     }
     preset_for_family = {
         "httpx": "http-clients-v1",
+        "requests": "http-clients-v1",
         "pymongo": "mongodb-v1",
         "s3": "object-storage-v1",
         "motor": "mongodb-v1",
@@ -371,7 +406,7 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
                 for node in ast.walk(tree)
                 if isinstance(node, ast.ClassDef) and node.name == owner_name
             )
-            if owner_name != "_api"
+            if family not in {"httpx", "requests"}
             else None
         )
         declarations = {
@@ -420,7 +455,7 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
                 )
             contract_id = (
                 f"{family}-api-{method}"
-                if family == "httpx"
+                if family in {"httpx", "requests"}
                 else (
                     f"pymongo-{method.replace('_', '-')}"
                     if family == "pymongo"
@@ -429,12 +464,6 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
                     else f"motor-{method.replace('_', '-')}"
                 )
             )
-            if family == "httpx":
-                # Candidate HTTPX module rows remain out of the public preset
-                # until the exact-symbol mutation guard is independently approved.
-                assert argument == "url" and index == 0
-                assert contract_id == f"httpx-api-{method.replace('_', '-')}"
-                continue
             contract = next(item for item in loaded.document.contracts if item.id == contract_id)
             if family == "s3":
                 selectors: list[EffectSelector] = []
@@ -450,6 +479,15 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
                     selected.kind.value == "keyword" and selected.name == argument
                     for selected in selectors
                 )
+            elif family in {"httpx", "requests"}:
+                selector = contract.resource
+                assert isinstance(index, int) and index == 0
+                assert selector.index == index
+                assert contract.invocation.value == "function"
+                assert contract.http_method == method.upper()
+                assert contract.package is not None
+                assert contract.package.version == ("==0.28.1" if family == "httpx" else "==2.32.3")
+                assert contract.package.source_hashes
             else:
                 selector = contract.value
                 assert isinstance(index, int)
@@ -481,10 +519,16 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
 def test_http_client_preset_declares_exact_methods_for_each_supported_client() -> None:
     loaded = load_effect_preset("http-clients-v1")
     methods_by_class: dict[str, set[str]] = {}
+    methods_by_function: dict[str, set[str]] = {}
     for contract in loaded.document.contracts:
-        class_symbol = contract.symbol.rsplit(".", maxsplit=1)[0]
         assert contract.http_method is not None
-        methods_by_class.setdefault(class_symbol, set()).add(contract.http_method)
+        if contract.invocation.value == "function":
+            methods_by_function.setdefault(contract.symbol.rsplit(".", maxsplit=1)[0], set()).add(
+                contract.http_method
+            )
+        else:
+            class_symbol = contract.symbol.rsplit(".", maxsplit=1)[0]
+            methods_by_class.setdefault(class_symbol, set()).add(contract.http_method)
 
     expected = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
     assert methods_by_class == {
@@ -492,6 +536,10 @@ def test_http_client_preset_declares_exact_methods_for_each_supported_client() -
         "httpx._client.AsyncClient": expected,
         "httpx._client.Client": expected,
         "requests.sessions.Session": expected,
+    }
+    assert methods_by_function == {
+        "httpx._api": expected,
+        "requests.api": expected,
     }
 
 

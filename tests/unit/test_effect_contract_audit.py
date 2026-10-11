@@ -507,7 +507,7 @@ def test_bundled_presets_match_only_exact_qualified_symbols(
     assert [item.contract_id for item in matched] == [contract_id]
 
 
-def test_held_httpx_module_helper_candidate_is_not_bundled(tmp_path: Path) -> None:
+def test_httpx_module_helper_requires_exact_pinned_applicability(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path, "handler")
     site = _site(
         tmp_path,
@@ -523,7 +523,16 @@ def test_held_httpx_module_helper_candidate_is_not_bundled(tmp_path: Path) -> No
     )
 
     assert audit.summary.matched_calls == 0
-    assert not any(item.contract_id == "httpx-api-post" for item in audit.occurrences)
+    occurrence = audit.occurrences[0]
+    assert occurrence.audit_status == AuditCallStatus.UNMATCHED
+    assert occurrence.reason_code == "package_applicability_unverified"
+    contract = next(
+        item
+        for item in load_effect_preset("http-clients-v1").document.contracts
+        if item.id == "httpx-api-post"
+    )
+    assert contract.package is not None
+    assert contract.package.version == "==0.28.1"
 
 
 def test_exact_matching_is_symbol_and_invocation_only(tmp_path: Path) -> None:
