@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "protocol": "ground-truth-retry-broker-source-profile-v2",
+  "entrypoint": "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/ground_truth_retry_broker_v2.py",
+  "source_files": [
+    "benchmarks/real_world/expansion_protocol_v2.py",
+    "benchmarks/real_world/ground_truth_broker_bundle_v1.py",
+    "benchmarks/real_world/ground_truth_campaign_v1.py",
+    "benchmarks/real_world/ground_truth_packet_v1.py",
+    "benchmarks/real_world/ground_truth_source_v1.py",
+    "benchmarks/real_world/ground_truth_submit_retry_v2.py",
+    "benchmarks/real_world/ground_truth_v2/__init__.py",
+    "benchmarks/real_world/ground_truth_v2/evidence.py",
+    "benchmarks/real_world/ground_truth_v2/schema.py",
+    "benchmarks/real_world/pilot_packet_v2.py",
+    "benchmarks/real_world/pilot_protocol_v2.py",
+    "benchmarks/real_world/pilot_source_v2.py",
+    "benchmarks/real_world/production_v1/extensions/pre-readiness-recovery-v1/ground_truth_retry_broker_v2.py"
+  ],
+  "external_imports": [
+    "pydantic"
+  ],
+  "toolchain_identity_protocol": "ground-truth-python-toolchain-identity-v2",
+  "trusted_native_calls": [
+    "ctypes.CDLL(None,use_errno=True)"
+  ]
+}
