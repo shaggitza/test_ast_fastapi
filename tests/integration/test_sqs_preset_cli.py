@@ -23,6 +23,35 @@ def test_public_cli_validates_sqs_preset() -> None:
         "typed-sqs-send-message",
         "typed-sqs-send-message-batch",
     }
+    contracts = {contract["id"]: contract for contract in data["contracts"]}
+    assert {
+        contract_id: (
+            contract["symbol"],
+            contract["operation"],
+            contract["channel"],
+            contract["resource"],
+            contract["value"],
+            contract["package"],
+        )
+        for contract_id, contract in contracts.items()
+    } == {
+        "typed-sqs-send-message": (
+            "mypy_boto3_sqs.client.SQSClient.send_message",
+            "publish",
+            "message_bus",
+            {"kind": "keyword", "name": "QueueUrl", "path": []},
+            {"kind": "keyword", "name": "MessageBody", "path": []},
+            {"distribution": "mypy-boto3-sqs", "version": "==1.35.91"},
+        ),
+        "typed-sqs-send-message-batch": (
+            "mypy_boto3_sqs.client.SQSClient.send_message_batch",
+            "publish",
+            "message_bus",
+            {"kind": "keyword", "name": "QueueUrl", "path": []},
+            {"kind": "keyword", "name": "Entries", "path": []},
+            {"distribution": "mypy-boto3-sqs", "version": "==1.35.91"},
+        ),
+    }
 
 
 def test_public_audit_loads_configured_sqs_preset(tmp_path: Path) -> None:
