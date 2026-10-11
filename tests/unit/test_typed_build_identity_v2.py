@@ -14,6 +14,7 @@ from fastapi_endpoint_detector.models.typed_build_identity import (
     CacheReason,
     IdentityError,
     TypedBuildIdentityV2,
+    _record_value,
     canonical_bytes,
     digest,
     semantic_mypy_options,
@@ -91,7 +92,11 @@ def _identity(**overrides: object) -> TypedBuildIdentityV2:
             },
         ],
         "provider_semantic_context": {"graph_sha256": "c" * 64},
-        "build_provenance": {"fresh_modules": ["pkg.api"], "result": "success"},
+        "build_provenance": {
+            "schema": "typed-build-provenance-facts-v1",
+            "fresh_modules": ["pkg.api"],
+            "result": "success",
+        },
     }
     values.update(overrides)
     return TypedBuildIdentityV2.create(**values)  # type: ignore[arg-type]
@@ -128,6 +133,60 @@ def test_canonical_bounds_reject_deep_and_oversized_values() -> None:
         canonical_bytes(["x" * 60_000 for _ in range(20)], domain="test")
     with pytest.raises(IdentityError, match="item count"):
         canonical_bytes([None] * 10_001, domain="test")
+
+
+def test_canonical_bounds_accept_exact_depth_and_item_limits() -> None:
+    value: object = "leaf"
+    for _ in range(16):
+        value = [value]
+    depth_record = canonical_bytes(value, domain="test").decode()
+    item_record = canonical_bytes([None] * 9_999, domain="test").decode()
+    assert _record_value(depth_record, "test") == value
+    assert _record_value(item_record, "test") == [None] * 9_999
+
+
+def test_build_provenance_rejects_contradictory_and_unknown_cache_claims() -> None:
+    contradictory = {
+        "schema": "typed-build-provenance-facts-v1",
+        "fresh_modules": ["pkg.api"],
+        "result": "success",
+        "cache_disposition": "authenticated_dependency_hit",
+        "cache_attestation_sha256": "sha256:" + "9" * 64,
+        "observed_cache_hit": True,
+    }
+    with pytest.raises(IdentityError, match="unknown fields"):
+        _identity(build_provenance=contradictory)
+    with pytest.raises(IdentityError, match="unknown schema"):
+        _identity(build_provenance={"schema": "v2", "fresh_modules": [], "result": "success"})
+
+
+def test_fully_resealed_deep_provenance_is_bounded_before_decode() -> None:
+    identity = _identity()
+    envelope = json.loads(identity.provenance_record)
+    mapping_pairs = envelope[2][1]
+    for pair in mapping_pairs:
+        if pair[0] == ["str", "build_provenance"]:
+            pair[1] = ["str", "DEPTH_MARKER"]
+            break
+    deep_json = "[" * 1_200 + "0" + "]" * 1_200
+    record = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).replace(
+        '"DEPTH_MARKER"', deep_json
+    )
+    sealed = identity.to_dict() | {
+        "provenance_record": record,
+        "typed_build_provenance_sha256": "sha256:" + hashlib.sha256(record.encode()).hexdigest(),
+    }
+    encoded = json.dumps(sealed, ensure_ascii=False, separators=(",", ":"))
+    with pytest.raises(IdentityError, match="nesting depth"):
+        TypedBuildIdentityV2.from_dict(sealed)
+    with pytest.raises(IdentityError, match="nesting depth"):
+        TypedBuildIdentityV2.from_json(encoded)
+    with pytest.raises(IdentityError, match="nesting depth"):
+        replace(
+            identity,
+            provenance_record=record,
+            typed_build_provenance_sha256=("sha256:" + hashlib.sha256(record.encode()).hexdigest()),
+        )
 
 
 def test_mypy_projection_excludes_only_three_pinned_cache_controls() -> None:

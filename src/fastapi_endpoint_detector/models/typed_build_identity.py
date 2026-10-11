@@ -161,6 +161,29 @@ def _typed(value: object, depth: int, counter: list[int]) -> object:  # noqa: PL
     raise IdentityError(f"unsupported canonical value type: {type(value).__name__}")
 
 
+def _preflight_value(value: object) -> None:
+    """Bound caller-owned containers iteratively before recursive encoding."""
+    pending: list[tuple[object, int]] = [(value, 0)]
+    items = 0
+    while pending:
+        current, depth = pending.pop()
+        items += 1
+        if items > MAX_ITEMS:
+            raise IdentityError("canonical value exceeds maximum item count")
+        if depth > MAX_DEPTH:
+            raise IdentityError("canonical value exceeds maximum nesting depth")
+        if isinstance(current, Enum):
+            pending.append((current.value, depth + 1))
+        elif isinstance(current, (list, tuple, set, frozenset, Mapping)):
+            if len(current) > MAX_ITEMS:
+                raise IdentityError("canonical value exceeds maximum item count")
+            if isinstance(current, Mapping):
+                pending.extend((key, depth + 1) for key in current)
+                pending.extend((item, depth + 1) for item in current.values())
+            else:
+                pending.extend((item, depth + 1) for item in current)
+
+
 def _dump(value: object) -> bytes:
     encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     return encoded.encode("utf-8")
@@ -170,6 +193,7 @@ def canonical_bytes(value: object, *, domain: str) -> bytes:
     """Encode a supported value with explicit type tags and a domain/version tag."""
     if not domain or len(domain) > 128 or len(domain.encode("utf-8")) > 128:
         raise IdentityError("invalid canonical hash domain")
+    _preflight_value(value)
     payload = _dump([CANONICAL_ENCODING, domain, _typed(value, 0, [0, 0])])
     if len(payload) > MAX_CANONICAL_BYTES:
         raise IdentityError("canonical payload exceeds maximum byte length")
@@ -261,19 +285,60 @@ def _validate_hit_claim(facts: Mapping[str, object] | None) -> None:
     canonical_bytes(dict(facts), domain="typed-cache-hit-claim-facts-v2")
 
 
-def _validate_record(record: str, *, domain: str, expected_digest: str) -> None:
-    raw = record.encode("utf-8")
+def _validate_build_provenance(value: object) -> dict[str, object]:
+    """Validate retained build facts; cache claims live in outer typed fields."""
+    fields = {"schema", "fresh_modules", "result"}
+    if not isinstance(value, Mapping) or set(value) != fields:
+        raise IdentityError("build provenance has missing or unknown fields")
+    if value["schema"] != "typed-build-provenance-facts-v1":
+        raise IdentityError("build provenance has an unknown schema")
+    result = value["result"]
+    if type(result) is not str or result not in {"success", "failure"}:
+        raise IdentityError("build provenance result must be success or failure")
+    fresh_modules = _string_sequence(value["fresh_modules"], "fresh_modules")
+    canonical_bytes(dict(value), domain="typed-build-provenance-facts-v1")
+    return {"schema": value["schema"], "fresh_modules": fresh_modules, "result": result}
+
+
+def _validate_record(record: str, *, domain: str, expected_digest: str) -> None:  # noqa: PLR0912
+    try:
+        raw = record.encode("utf-8")
+    except UnicodeError as exc:
+        raise IdentityError("canonical record is not valid UTF-8") from exc
     if len(raw) > MAX_CANONICAL_BYTES:
         raise IdentityError("canonical record exceeds maximum byte length")
     if "sha256:" + hashlib.sha256(raw).hexdigest() != expected_digest:
         raise IdentityError("canonical record does not match its digest")
+
+    # Canonical typed values expand each logical level into several JSON
+    # arrays.  This lexical pass bounds parser nesting before json.loads can
+    # recurse; exact typed depth and item limits are checked by the decoder.
+    depth = 0
+    quoted = False
+    escaped = False
+    for char in record:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_DEPTH * 3 + 8:
+                raise IdentityError("canonical record exceeds maximum nesting depth")
+        elif char in "]}":
+            depth -= 1
 
     def reject_constant(constant: str) -> object:
         raise IdentityError(f"unsupported canonical JSON constant: {constant}")
 
     try:
         value = json.loads(record, parse_constant=reject_constant)
-    except (json.JSONDecodeError, UnicodeError) as exc:
+    except (json.JSONDecodeError, UnicodeError, RecursionError) as exc:
         raise IdentityError("canonical record is not valid JSON") from exc
     if not isinstance(value, list) or len(value) != 3:
         raise IdentityError("canonical record has an invalid envelope")
@@ -283,8 +348,17 @@ def _validate_record(record: str, *, domain: str, expected_digest: str) -> None:
         raise IdentityError("canonical record is not in canonical JSON form")
 
 
-def _decode_typed(value: object) -> object:  # noqa: PLR0911, PLR0912
+def _decode_typed(  # noqa: PLR0911, PLR0912, PLR0915
+    value: object, depth: int = 0, counter: list[int] | None = None
+) -> object:
     """Decode the bounded tagged representation used by canonical records."""
+    if depth > MAX_DEPTH:
+        raise IdentityError("canonical value exceeds maximum nesting depth")
+    if counter is None:
+        counter = [0]
+    counter[0] += 1
+    if counter[0] > MAX_ITEMS:
+        raise IdentityError("canonical value exceeds maximum item count")
     if not isinstance(value, list) or not value or not isinstance(value[0], str):
         raise IdentityError("canonical record contains a malformed typed value")
     tag = value[0]
@@ -293,20 +367,56 @@ def _decode_typed(value: object) -> object:  # noqa: PLR0911, PLR0912
     if tag == "bool" and len(value) == 2 and type(value[1]) is bool:
         return value[1]
     if tag == "int" and len(value) == 2 and isinstance(value[1], str):
-        return int(value[1])
+        if len(value[1]) > MAX_STRING_BYTES * 4:
+            raise IdentityError("canonical integer exceeds maximum byte length")
+        try:
+            decoded_int = int(value[1])
+        except ValueError as exc:
+            raise IdentityError("canonical integer is malformed") from exc
+        if str(decoded_int) != value[1]:
+            raise IdentityError("canonical integer is not normalized")
+        return decoded_int
     if tag == "float64" and len(value) == 2 and isinstance(value[1], str):
-        return float.fromhex(value[1])
+        try:
+            decoded_float = float.fromhex(value[1])
+        except ValueError as exc:
+            raise IdentityError("canonical float is malformed") from exc
+        if not math.isfinite(decoded_float):
+            raise IdentityError("canonical float is non-finite")
+        if decoded_float.hex() != value[1]:
+            raise IdentityError("canonical float is not normalized")
+        return decoded_float
     if tag == "str" and len(value) == 2 and isinstance(value[1], str):
+        try:
+            string_size = len(value[1].encode("utf-8"))
+        except UnicodeError as exc:
+            raise IdentityError("canonical string is not valid UTF-8") from exc
+        if string_size > MAX_STRING_BYTES:
+            raise IdentityError("canonical string exceeds maximum byte length")
         return value[1]
     if tag == "bytes-hex" and len(value) == 2 and isinstance(value[1], str):
-        return bytes.fromhex(value[1])
+        if len(value[1]) > MAX_STRING_BYTES * 2:
+            raise IdentityError("canonical bytes exceed maximum byte length")
+        try:
+            decoded_bytes = bytes.fromhex(value[1])
+        except ValueError as exc:
+            raise IdentityError("canonical bytes are malformed") from exc
+        if decoded_bytes.hex() != value[1]:
+            raise IdentityError("canonical bytes are not normalized")
+        return decoded_bytes
     if tag == "enum" and len(value) == 3 and isinstance(value[1], str):
+        try:
+            enum_name_size = len(value[1].encode("utf-8"))
+        except UnicodeError as exc:
+            raise IdentityError("canonical enum name is not valid UTF-8") from exc
+        if enum_name_size > MAX_STRING_BYTES:
+            raise IdentityError("canonical enum name exceeds maximum byte length")
         module, separator, qualified_name = value[1].rpartition(".")
         if not separator or not module or not qualified_name:
             raise IdentityError("canonical enum identity is malformed")
         enum_type = Enum(  # type: ignore[misc]
             qualified_name.rsplit(".", maxsplit=1)[-1],
-            {"_CANONICAL_VALUE": _decode_typed(value[2])},
+            {"_CANONICAL_VALUE": _decode_typed(value[2], depth + 1, counter)},
             module=module,
         )
         enum_type.__qualname__ = qualified_name
@@ -316,26 +426,33 @@ def _decode_typed(value: object) -> object:  # noqa: PLR0911, PLR0912
         and len(value) == 2
         and isinstance(value[1], list)
     ):
-        items = [_decode_typed(item) for item in value[1]]
+        if len(value[1]) > MAX_ITEMS:
+            raise IdentityError("canonical value exceeds maximum item count")
+        items = [_decode_typed(item, depth + 1, counter) for item in value[1]]
         if tag == "list":
             return items
         if tag == "tuple":
             return tuple(items)
         return set(items) if tag == "set" else frozenset(items)
     if tag == "mapping" and len(value) == 2 and isinstance(value[1], list):
-        result: dict[str, object] = {}
+        mapping_result: dict[str, object] = {}
         for pair in value[1]:
             if not isinstance(pair, list) or len(pair) != 2:
                 raise IdentityError("canonical mapping entry is malformed")
-            key = _decode_typed(pair[0])
-            if not isinstance(key, str) or key in result:
+            key = _decode_typed(pair[0], depth + 1, counter)
+            if not isinstance(key, str) or key in mapping_result:
                 raise IdentityError("canonical mapping key is invalid")
-            result[key] = _decode_typed(pair[1])
-        return result
+            mapping_result[key] = _decode_typed(pair[1], depth + 1, counter)
+        return mapping_result
     raise IdentityError("canonical record contains an unknown typed value")
 
 
 def _record_value(record: str, domain: str) -> object:
+    _validate_record(
+        record,
+        domain=domain,
+        expected_digest="sha256:" + hashlib.sha256(record.encode("utf-8")).hexdigest(),
+    )
     envelope = json.loads(record)
     if (
         not isinstance(envelope, list)
@@ -593,6 +710,7 @@ class TypedBuildIdentityV2:
             or not isinstance(build_provenance, Mapping)
         ):
             raise IdentityError("provenance source/provider records have invalid types")
+        _validate_build_provenance(build_provenance)
         if (
             digest(actual, domain="typed-actual-build-options-v2")
             != self.actual_build_options_sha256
@@ -672,6 +790,7 @@ class TypedBuildIdentityV2:
         semantic_context, source_inventory, actual_build_context = _validated_context(
             semantic_context, source_inventory, actual_build_context
         )
+        build_provenance = _validate_build_provenance(build_provenance)
         source_digest = digest(source_inventory, domain="typed-source-inventory-v2")
         semantic_options = semantic_mypy_options(mypy_options, mypy_version=mypy_version)
         if cache_disposition is CacheDisposition.AUTHENTICATED_DEPENDENCY_HIT:
@@ -804,7 +923,11 @@ class TypedBuildIdentityV2:
 
     @classmethod
     def from_json(cls, encoded: str) -> TypedBuildIdentityV2:
-        if len(encoded.encode("utf-8")) > MAX_CANONICAL_BYTES:
+        try:
+            encoded_size = len(encoded.encode("utf-8"))
+        except UnicodeError as exc:
+            raise IdentityError("serialized identity is not valid UTF-8") from exc
+        if encoded_size > MAX_CANONICAL_BYTES:
             raise IdentityError("serialized identity exceeds maximum byte length")
 
         def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
