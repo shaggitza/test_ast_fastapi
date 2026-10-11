@@ -36,7 +36,7 @@ def _read(path: Path) -> bytes:
         status = os.fstat(fd)
         if not stat.S_ISREG(status.st_mode) or status.st_uid != os.getuid():
             raise RetryBrokerError("retry broker identity file is unsafe")
-        chunks = []
+        chunks: list[bytes] = []
         while True:
             block = os.read(fd, 1024 * 1024)
             if not block:

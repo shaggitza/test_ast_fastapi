@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import fcntl
 import hashlib
+import importlib.machinery
 import json
 import os
 import re
@@ -32,6 +33,16 @@ RECEIPT_SCHEMA = "benchmarks/real_world/production_v2/broker-freeze-receipt-sche
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MAX_FILE = 32 * 1024 * 1024
 _MANIFEST = "bundle-manifest-v1.json"
+_EXTERNAL_ROOT = "__external__/site-packages"
+_EXTERNAL_REGISTRY = {
+    "pydantic": (
+        "pydantic",
+        "pydantic_core",
+        "annotated_types",
+        "typing_extensions",
+        "typing_inspection",
+    ),
+}
 
 
 def derive_source_closure(source_root: Path, entrypoint: str) -> tuple[str, ...]:  # noqa: PLR0912
@@ -132,60 +143,115 @@ def derive_external_imports(source_root: Path, closure: tuple[str, ...]) -> tupl
     return tuple(sorted(external))
 
 
-def compute_toolchain_sha256(external_imports: tuple[str, ...]) -> str:
-    """Hash the interpreter and registered external import package bytes.
+def _external_files(external_imports: tuple[str, ...]) -> dict[str, tuple[Path, bytes]]:
+    """Capture a finite registered distribution closure from interpreter site roots."""
+    package_names: set[str] = set()
+    for name in external_imports:
+        if name not in _EXTERNAL_REGISTRY:
+            raise BundleError("external import has no committed toolchain registry")
+        package_names.update(_EXTERNAL_REGISTRY[name])
+    roots = {
+        Path(sysconfig.get_paths()[key]).resolve(strict=True)
+        for key in ("purelib", "platlib")
+        if sysconfig.get_paths().get(key)
+    }
+    captured: dict[str, tuple[Path, bytes]] = {}
+    for package in sorted(package_names):
+        matches: list[tuple[Path, Path]] = []
+        for site_root in sorted(roots):
+            directory = site_root / package
+            module = site_root / f"{package}.py"
+            if directory.is_dir() and not directory.is_symlink():
+                matches.append((site_root, directory))
+            elif module.is_file() and not module.is_symlink():
+                matches.append((site_root, module))
+        if len(matches) != 1:
+            raise BundleError("registered external distribution is missing or ambiguous")
+        site_root, package_root = matches[0]
+        files = [package_root] if package_root.is_file() else sorted(package_root.rglob("*"))
+        for candidate in files:
+            if candidate.is_dir() or "__pycache__" in candidate.parts:
+                continue
+            status = candidate.lstat()
+            if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+                raise BundleError("registered external distribution contains a special file")
+            relative = candidate.relative_to(site_root).as_posix()
+            target = f"{_EXTERNAL_ROOT}/{relative}"
+            captured[target] = (candidate, _read_regular(candidate))
+    if len(captured) > 10000 or sum(len(raw) for _, raw in captured.values()) > 256 * 1024 * 1024:
+        raise BundleError("registered external toolchain exceeds finite snapshot limits")
+    return captured
 
-    This identity is rechecked at lease boundaries. It is not a defense against
-    a hostile same-UID process racing an import; deployment must run from a
-    controlled, receipt-bound toolchain.
-    """
+
+def _runtime_identity() -> dict[str, Any]:
     executable = Path(sys.executable).resolve(strict=True)
-    identity: dict[str, Any] = {
-        "protocol": "ground-truth-python-toolchain-identity-v1",
+    paths = sysconfig.get_paths()
+    library_dir = sysconfig.get_config_var("LIBDIR")
+    library_name = sysconfig.get_config_var("LDLIBRARY")
+    runtime_libraries: dict[str, str] = {}
+    if library_dir and library_name and library_name.endswith((".so", ".dylib", ".dll")):
+        runtime_path = (Path(library_dir) / library_name).resolve(strict=True)
+        runtime_libraries[str(runtime_path)] = _sha(_read_regular(runtime_path))
+    try:
+        maps = Path("/proc/self/maps").read_text(encoding="ascii")
+    except OSError as exc:
+        raise BundleError("runtime native-library map is unavailable") from exc
+    for line in maps.splitlines():
+        fields = line.split(maxsplit=5)
+        mapped = fields[5].removesuffix(" (deleted)") if len(fields) == 6 else ""
+        basename = Path(mapped).name
+        if mapped.startswith("/") and ".so" in basename:
+            runtime_path = Path(mapped).resolve(strict=True)
+            runtime_libraries[str(runtime_path)] = _sha(_read_regular(runtime_path))
+    return {
+        "executable": str(executable),
         "executable_sha256": _sha(_read_regular(executable)),
         "version": sys.version,
         "implementation": sys.implementation.name,
         "cache_tag": sys.implementation.cache_tag,
         "soabi": sysconfig.get_config_var("SOABI"),
-        "external": {},
+        "stdlib": str(Path(paths["stdlib"]).resolve(strict=True)),
+        "platstdlib": str(Path(paths["platstdlib"]).resolve(strict=True)),
+        "runtime_libraries": runtime_libraries,
     }
-    external: dict[str, Any] = {}
-    expanded_imports = set(external_imports)
-    if "pydantic" in expanded_imports:
-        # These are pydantic 2's source/toolchain dependencies; all package
-        # bytes are included below, so a different dependency tree changes ID.
-        expanded_imports.update({"pydantic_core", "annotated_types", "typing_extensions"})
-    for name in sorted(expanded_imports):
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            raise BundleError("external import name is invalid")
-        # Resolve only under the interpreter's registered site-package roots;
-        # do not execute import finders or accept caller-selected package paths.
-        search_roots = {
-            Path(sysconfig.get_paths()[key]).resolve(strict=True)
-            for key in ("purelib", "platlib")
-            if sysconfig.get_paths().get(key)
-        }
-        candidates: list[Path] = []
-        for directory in sorted(search_roots):
-            package_dir = directory / name
-            module_file = directory / f"{name}.py"
-            if package_dir.is_dir() and not package_dir.is_symlink():
-                candidates.extend(
-                    item
-                    for item in package_dir.rglob("*")
-                    if item.is_file() and item.suffix in {".py", ".so", ".pyd"}
-                )
-            if module_file.is_file() and not module_file.is_symlink():
-                candidates.append(module_file)
-        files: dict[str, str] = {}
-        for candidate in sorted(set(candidates)):
-            if candidate.is_file():
-                files[str(candidate.resolve())] = _sha(_read_regular(candidate.resolve()))
-        if not files:
-            raise BundleError("registered external import has no verifiable files")
-        external[name] = files
-    identity["external"] = external
-    return _sha(_canonical(identity))
+
+
+def _source_inventory(
+    source_root: Path, files: dict[str, str], external_imports: tuple[str, ...]
+) -> dict[str, Path]:
+    external = _external_files(external_imports)
+    sources: dict[str, Path] = {}
+    for name in files:
+        if name.startswith(_EXTERNAL_ROOT + "/"):
+            item = external.get(name)
+            if item is None:
+                raise BundleError("sealed external file is outside the registered inventory")
+            sources[name] = item[0]
+        else:
+            sources[name] = source_root / _relative(name)
+    if {name for name in files if name.startswith(_EXTERNAL_ROOT + "/")} != set(external):
+        raise BundleError("sealed external package closure is incomplete")
+    return sources
+
+
+def _toolchain_identity(external_imports: tuple[str, ...]) -> dict[str, Any]:
+    external = {
+        path: _sha(raw)
+        for path, (_, raw) in sorted(_external_files(external_imports).items())
+    }
+    return {
+        "protocol": "ground-truth-python-toolchain-identity-v2",
+        "runtime": _runtime_identity(),
+        "external": external,
+        "registry": {
+            name: list(_EXTERNAL_REGISTRY[name]) for name in sorted(set(external_imports))
+        },
+    }
+
+
+def compute_toolchain_sha256(external_imports: tuple[str, ...]) -> str:
+    """Bind interpreter ABI/runtime and every registered package byte."""
+    return _sha(_canonical(_toolchain_identity(external_imports)))
 
 
 def _trusted_process_libc_call(node: ast.Call, ctypes_aliases: set[str]) -> bool:
@@ -337,6 +403,17 @@ def materialize_bundle(
         raise BundleError("external imports differ from committed toolchain allowlist")
     sources = {item: source_root / item for item in selected}
     captured = {item: _read_regular(path) for item, path in sources.items()}
+    external_sources = _external_files(external_imports)
+    toolchain_identity = _toolchain_identity(external_imports)
+    if _sha(_canonical(toolchain_identity)) != toolchain_sha256:
+        raise BundleError("runtime or registered toolchain changed during snapshot")
+    for name, (path, raw) in external_sources.items():
+        captured[name] = raw
+        sources[name] = path
+    if toolchain_identity["external"] != {
+        name: _sha(captured[name]) for name in sorted(external_sources)
+    }:
+        raise BundleError("external package snapshot differs from toolchain identity")
     file_hashes = {item: _sha(raw) for item, raw in captured.items()}
     manifest = {
         "schema_version": 1,
@@ -345,8 +422,9 @@ def materialize_bundle(
         "toolchain_sha256": toolchain_sha256,
         "files": file_hashes,
         "entrypoint": entrypoint,
-        "closure_sha256": _sha(_canonical(list(selected))),
+        "closure_sha256": _sha(_canonical(sorted(captured))),
         "external_imports": list(external_imports),
+        "toolchain_identity": toolchain_identity,
     }
     raw_manifest = _canonical(manifest)
     try:
@@ -391,13 +469,22 @@ def verify_bundle(bundle: Bundle) -> None:
         "entrypoint": manifest.get("entrypoint"),
         "closure_sha256": _sha(_canonical(sorted(bundle.files))),
         "external_imports": manifest.get("external_imports"),
+        "toolchain_identity": manifest.get("toolchain_identity"),
     }
     if manifest != expected or set(bundle.files) != set(bundle.sources):
         raise BundleError("bundle manifest identity mismatch")
     external_imports = manifest.get("external_imports")
+    external_hashes = {
+        name: bundle.files[name]
+        for name in sorted(bundle.files)
+        if name.startswith(_EXTERNAL_ROOT + "/")
+    }
     if (
         not isinstance(external_imports, list)
         or any(not isinstance(item, str) for item in external_imports)
+        or manifest.get("toolchain_identity")
+        != _toolchain_identity(tuple(external_imports))
+        or manifest["toolchain_identity"].get("external") != external_hashes
         or compute_toolchain_sha256(tuple(external_imports)) != bundle.toolchain_sha256
     ):
         raise BundleError("registered Python toolchain identity changed")
@@ -670,17 +757,18 @@ def acquire_launch_lease(
     if (not isinstance(manifest, dict)
                 or set(manifest) != {"schema_version", "protocol", "profile_sha256",
                                      "toolchain_sha256", "files", "entrypoint", "closure_sha256",
-                                     "external_imports"}
+                                     "external_imports", "toolchain_identity"}
             or manifest.get("schema_version") != 1
             or manifest.get("protocol") != PROTOCOL
-            or not isinstance(manifest.get("files"), dict)):
+            or not isinstance(manifest.get("files"), dict)
+            or not isinstance(manifest.get("toolchain_identity"), dict)):
         raise BundleError("bundle manifest schema is invalid")
     file_hashes = manifest["files"]
     if (not file_hashes or any(not isinstance(name, str) or not isinstance(file_hash, str)
                                or not _DIGEST.fullmatch(file_hash)
                                for name, file_hash in file_hashes.items())):
         raise BundleError("bundle manifest file inventory is invalid")
-    sources = {name: source_root / _relative(name) for name in file_hashes}
+    sources = _source_inventory(source_root, file_hashes, tuple(manifest["external_imports"]))
     bundle = Bundle(bundle_root, expected_bundle_sha256, manifest["profile_sha256"],
                     manifest["toolchain_sha256"], file_hashes, sources)
     for path, expected in (
@@ -702,6 +790,8 @@ def acquire_launch_lease(
             or profile_value.get("entrypoint") not in bundle.files
             or manifest.get("entrypoint") != profile_value.get("entrypoint")
             or manifest.get("closure_sha256") != _sha(_canonical(sorted(bundle.files)))
+            or manifest.get("toolchain_identity")
+            != _toolchain_identity(tuple(manifest.get("external_imports", [])))
             or manifest.get("external_imports") != profile_value.get("external_imports")):
         raise BundleError("launch profile is not the exact new versioned bundle profile")
     if receipt.runtime_attestation_sha256 != runtime_attestation_sha256:
@@ -753,6 +843,48 @@ def _sealed_bundle_fd(bundle: Bundle) -> int:
         raise
 
 
+def _native_module_name(relative: str) -> str:
+    prefix = _EXTERNAL_ROOT + "/"
+    if not relative.startswith(prefix) or not relative.endswith(
+        tuple(importlib.machinery.EXTENSION_SUFFIXES)
+    ):
+        raise BundleError("native extension path is not registered")
+    package_path = Path(relative[len(prefix):])
+    module = package_path.name.split(".", 1)[0]
+    if not module.isidentifier():
+        raise BundleError("native extension module name is invalid")
+    return ".".join((*package_path.parent.parts, module))
+
+
+def _sealed_native_fds(bundle: Bundle) -> tuple[dict[str, dict[str, Any]], tuple[int, ...]]:
+    native: dict[str, dict[str, Any]] = {}
+    descriptors: list[int] = []
+    for relative, expected in sorted(bundle.files.items()):
+        if not relative.endswith(tuple(importlib.machinery.EXTENSION_SUFFIXES)):
+            continue
+        module = _native_module_name(relative)
+        if module in native:
+            raise BundleError("native extension module is ambiguous")
+        raw = _read_regular(bundle.root / relative)
+        if _sha(raw) != expected:
+            raise BundleError("native extension changed before snapshot")
+        fd = os.memfd_create("ground-truth-native-extension", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        try:
+            view = memoryview(raw)
+            while view:
+                view = view[os.write(fd, view):]
+            seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+            fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+            if fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals:
+                raise BundleError("native extension snapshot could not be sealed")
+        except BaseException:
+            os.close(fd)
+            raise
+        native[module] = {"fd": fd, "sha256": expected, "seals": seals}
+        descriptors.append(fd)
+    return native, tuple(descriptors)
+
+
 def launch_with_escrow_lease(
     *,
     lease: LaunchLeaseHandle,
@@ -760,12 +892,7 @@ def launch_with_escrow_lease(
     argv: tuple[str, ...] = (),
     env: dict[str, str] | None = None,
 ) -> subprocess.Popen[bytes]:
-    """Launch only from a sealed ZIP descriptor and retain the lease in child.
-
-    This generic entrypoint is a source-closure primitive. Operational broker
-    profiles still must provide an entrypoint which implements the complete
-    validated escrow protocol; this function never falls back to checkout code.
-    """
+    """Run only sealed source/package/native bytes while holding inherited lease."""
     if lease.phase != "prepared":
         raise BundleError("launch requires a prepared, held escrow lease")
     lease.lease.check(
@@ -775,17 +902,83 @@ def launch_with_escrow_lease(
         toolchain_sha256=lease.lease.receipt.toolchain_sha256,
     )
     sealed_fd = _sealed_bundle_fd(bundle)
+    native, native_fds = _sealed_native_fds(bundle)
     manifest = _json(_read_regular(bundle.root / _MANIFEST))
     entrypoint = manifest["entrypoint"]
     module = entrypoint[:-3].replace("/", ".")
-    bootstrap = (
-        f"import runpy,sys;sys.path.insert(0,'/proc/self/fd/{sealed_fd}');"
-        f"runpy.run_module({module!r},run_name='__main__')"
-    )
+    runtime_identity = manifest["toolchain_identity"]["runtime"]
+    bootstrap = f'''import fcntl
+import hashlib
+import importlib.abc
+import importlib.machinery
+import importlib.util
+import json
+import os
+import pathlib
+import runpy
+import sys
+import sysconfig
+bundle_fd=int(os.environ.pop("GT_BUNDLE_FD"))
+native=json.loads(os.environ.pop("GT_NATIVE_EXTENSIONS"))
+runtime=json.loads(os.environ.pop("GT_RUNTIME_IDENTITY"))
+exe=pathlib.Path(sys.executable).resolve(strict=True)
+raw=exe.read_bytes()
+if (str(exe)!=runtime["executable"]
+ or "sha256:"+hashlib.sha256(raw).hexdigest()!=runtime["executable_sha256"]):
+ raise RuntimeError("interpreter executable differs from sealed toolchain identity")
+if (sys.version!=runtime["version"] or sys.implementation.name!=runtime["implementation"]
+ or sys.implementation.cache_tag!=runtime["cache_tag"]
+ or sysconfig.get_config_var("SOABI")!=runtime["soabi"]):
+ raise RuntimeError("interpreter ABI differs from sealed toolchain identity")
+stdlib=pathlib.Path(sysconfig.get_paths()["stdlib"]).resolve(strict=True)
+if stdlib.as_posix()!=pathlib.Path(runtime["stdlib"]).as_posix():
+ raise RuntimeError("standard library root differs from sealed toolchain identity")
+registered=runtime["runtime_libraries"]
+for line in pathlib.Path("/proc/self/maps").read_text(encoding="ascii").splitlines():
+ fields=line.split(maxsplit=5)
+ path=fields[5].removesuffix(" (deleted)") if len(fields)==6 else ""
+ if path.startswith("/") and ".so" in pathlib.Path(path).name:
+  resolved=str(pathlib.Path(path).resolve(strict=True))
+  if resolved not in registered:
+   raise RuntimeError("unregistered native runtime library is loaded")
+  data=pathlib.Path(resolved).read_bytes()
+  if "sha256:"+hashlib.sha256(data).hexdigest()!=registered[resolved]:
+   raise RuntimeError("native runtime library differs from sealed toolchain identity")
+required=fcntl.F_SEAL_WRITE|fcntl.F_SEAL_GROW|fcntl.F_SEAL_SHRINK|fcntl.F_SEAL_SEAL
+for name,item in native.items():
+ fd=item["fd"]
+ if fcntl.fcntl(fd,fcntl.F_GET_SEALS)&required != required:
+  raise RuntimeError("native descriptor is not sealed")
+ data=b""; offset=0
+ while True:
+  block=os.pread(fd,1048576,offset)
+  if not block: break
+  data+=block; offset+=len(block)
+ if "sha256:"+hashlib.sha256(data).hexdigest()!=item["sha256"]:
+  raise RuntimeError("native descriptor hash mismatch")
+class ExactSealedNativeFinder(importlib.abc.MetaPathFinder):
+ def find_spec(self,fullname,path=None,target=None):
+  item=native.get(fullname)
+  if item is None: return None
+  loader=importlib.machinery.ExtensionFileLoader(fullname,"/proc/self/fd/"+str(item["fd"]))
+  return importlib.util.spec_from_loader(fullname,loader)
+sys.meta_path.insert(0,ExactSealedNativeFinder())
+sys.path[:]=[p for p in sys.path if "site-packages" not in p and "dist-packages" not in p]
+sys.path.insert(0,"/proc/self/fd/"+str(bundle_fd)+"/{_EXTERNAL_ROOT}")
+sys.path.insert(0,"/proc/self/fd/"+str(bundle_fd))
+runpy.run_module({module!r},run_name="__main__")'''
     child_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
     child_env["GT_BUNDLE_FD"] = str(sealed_fd)
     child_env["GT_BROKER_FREEZE_FD"] = str(lease.lease.fd)
+    child_env["GT_NATIVE_EXTENSIONS"] = json.dumps(native, sort_keys=True)
+    child_env["GT_RUNTIME_IDENTITY"] = json.dumps(runtime_identity, sort_keys=True)
     if env:
+        if {"GT_BUNDLE_FD", "GT_BROKER_FREEZE_FD", "GT_NATIVE_EXTENSIONS",
+            "GT_RUNTIME_IDENTITY"} & set(env):
+            os.close(sealed_fd)
+            for fd in native_fds:
+                os.close(fd)
+            raise BundleError("caller cannot override sealed runtime descriptors")
         child_env.update(env)
     try:
         process = subprocess.Popen(
@@ -794,14 +987,15 @@ def launch_with_escrow_lease(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             close_fds=True,
-            pass_fds=(sealed_fd, *lease.pass_fds()),
+            pass_fds=(sealed_fd, *native_fds, *lease.pass_fds()),
             env=child_env,
             start_new_session=True,
         )
     finally:
         os.close(sealed_fd)
+        for fd in native_fds:
+            os.close(fd)
     return process
-
 
 def adopt_inherited_launch_lease(
     *,
@@ -831,7 +1025,7 @@ def adopt_inherited_launch_lease(
         manifest["profile_sha256"],
         manifest["toolchain_sha256"],
         files,
-        {path: source_root / _relative(path) for path in files},
+        _source_inventory(source_root, files, tuple(manifest["external_imports"])),
     )
     lease = FreezeLease.__new__(FreezeLease)
     lease.path = Path(receipt.lease_path)

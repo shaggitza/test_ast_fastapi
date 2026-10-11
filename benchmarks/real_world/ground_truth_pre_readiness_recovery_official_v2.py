@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import fcntl
 import hashlib
 import importlib
@@ -21,11 +22,13 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from benchmarks.real_world import ground_truth_broker_bundle_v1 as bundle_v1
+from benchmarks.real_world import ground_truth_campaign_v1 as campaign_v1
 from benchmarks.real_world import ground_truth_pre_readiness_recovery_v1 as protocol
 from benchmarks.real_world import ground_truth_run_v1 as run_v1
+from benchmarks.real_world import ground_truth_submit_v1 as submit_v1
 from benchmarks.real_world.ground_truth_v2.schema import canonical_json
 
 
@@ -134,7 +137,7 @@ def _private_file(path: Path) -> bytes:
             or stat.S_IMODE(st.st_mode) not in {0o400, 0o600}
         ):
             raise OfficialRecoveryError("official evidence file ownership or mode is invalid")
-        chunks = []
+        chunks: list[bytes] = []
         while True:
             block = os.read(fd, 1024 * 1024)
             if not block:
@@ -157,7 +160,7 @@ def _profile_file(path: Path) -> bytes:
             or stat.S_IMODE(st.st_mode) not in {0o400, 0o444, 0o600, 0o644}
         ):
             raise OfficialRecoveryError("extension profile file ownership or mode is invalid")
-        chunks = []
+        chunks: list[bytes] = []
         while True:
             block = os.read(fd, 1024 * 1024)
             if not block:
@@ -244,7 +247,7 @@ def authenticate_broker_source_profile_v2(root: Path) -> tuple[dict[str, Any], s
         or profile.get("schema_version") != 2
         or profile.get("protocol") != "ground-truth-retry-broker-source-profile-v2"
         or profile.get("toolchain_identity_protocol")
-        != "ground-truth-python-toolchain-identity-v1"
+        != "ground-truth-python-toolchain-identity-v2"
         or profile.get("trusted_native_calls") != ["ctypes.CDLL(None,use_errno=True)"]
         or not isinstance(profile.get("entrypoint"), str)
         or not isinstance(profile.get("source_files"), list)
@@ -501,7 +504,7 @@ def _attempt_from_campaign(campaign: dict[str, Any], attempt_id: str) -> dict[st
     rows = [row for row in campaign["lanes"] if row.get("attempt_id") == attempt_id]
     if len(rows) != 1 or rows[0].get("rank") != 1 or rows[0].get("lane") not in {"A", "B"}:
         raise OfficialRecoveryError("attempt is not one uniquely assigned rank-1 review lane")
-    return rows[0]
+    return cast("dict[str, Any]", rows[0])
 
 
 def issue_official_grant(  # noqa: PLR0912, PLR0915
@@ -524,10 +527,10 @@ def issue_official_grant(  # noqa: PLR0912, PLR0915
     campaign, campaign_raw, custody, _ = run_v1._custody(
         root, campaign_path, bindings, cache, ledger, packets
     )
-    private = run_v1.campaign_v1._private_root(ledger)
-    with run_v1.campaign_v1._ledger_lock(private), run_v1._locked_slots(execution_root) as slots:
+    private = campaign_v1._private_root(ledger)
+    with campaign_v1._ledger_lock(private), run_v1._locked_slots(execution_root) as slots:
         current = run_v1._extended_ledger(private, root)
-        genesis, _ = run_v1.campaign_v1._json(private / "ledger-genesis.json", modes={0o400})
+        genesis, _ = campaign_v1._json(private / "ledger-genesis.json", modes={0o400})
         canonical_path = str(Path(genesis["campaign_manifest_path"]).resolve(strict=True))
         # Exact-path/hash rejection happens before archive, grant, slot, or claim writes.
         validate_official_campaign_preflight(
@@ -1189,7 +1192,7 @@ def _retry_rows(  # noqa: PLR0912, PLR0915
                 status = os.fstat(entry)
                 if not stat.S_ISREG(status.st_mode) or stat.S_IMODE(status.st_mode) != 0o400:
                     raise OfficialRecoveryError("retry journal entry is unsafe")
-                chunks = []
+                chunks: list[bytes] = []
                 while True:
                     block = os.read(entry, 1024 * 1024)
                     if not block:
@@ -1203,27 +1206,32 @@ def _retry_rows(  # noqa: PLR0912, PLR0915
                 os.close(entry)
             if not isinstance(row, dict):
                 raise OfficialRecoveryError("retry journal entry is malformed")
-            run_id = row.get("run_id")
+            run_id_value = row.get("run_id")
+            run_id = run_id_value if isinstance(run_id_value, str) else None
             try:
-                valid_run_id = isinstance(run_id, str) and str(uuid.UUID(run_id)) == run_id
+                valid_run_id = run_id is not None and str(uuid.UUID(run_id)) == run_id
             except (ValueError, AttributeError):
                 valid_run_id = False
+            kind_value = row.get("kind")
             if (
-                name != f"{index:06d}-{row.get('kind')}-{row.get('run_id')}.json"
+                not isinstance(kind_value, str)
+                or name != f"{index:06d}-{kind_value}-{row.get('run_id')}.json"
                 or row.get("schema_version") != 1
                 or row.get("protocol") != _RETRY_PROTOCOL
                 or row.get("sequence") != index
                 or row.get("previous_hash") != previous
                 or row.get("entry_hash") != _retry_hash(row)
-                or row.get("kind") not in _RETRY_EVENTS
-                or set(row) != _RETRY_FIELDS.get(row.get("kind"))
+                or kind_value not in _RETRY_EVENTS
+                or set(row) != _RETRY_FIELDS.get(kind_value)
                 or not valid_run_id
                 or not isinstance(row.get("attempt_id"), str)
                 or not protocol._ATTEMPT.fullmatch(row["attempt_id"])
                 or row.get("retry_ordinal", 1) != 1
             ):
                 raise OfficialRecoveryError("retry journal hash chain is invalid")
-            if row["kind"] == "retry_consumed":
+            if run_id is None or kind_value is None:
+                raise OfficialRecoveryError("retry journal identity is invalid")
+            if kind_value == "retry_consumed":
                 if run_id in run_ids:
                     raise OfficialRecoveryError("retry journal reuses a run identifier")
                 run_ids.add(run_id)
@@ -1234,7 +1242,7 @@ def _retry_rows(  # noqa: PLR0912, PLR0915
                 "retry_claimed": "claimed_at",
                 "retry_escrow_finalized": "finalized_at",
                 "retry_failed": "failed_at",
-            }[row["kind"]]
+            }[kind_value]
             protocol._time(row[timestamp_key], timestamp_key)
             if row["kind"] == "retry_prepared":
                 protocol._hash(row["binding_sha256"], "binding_sha256")
@@ -1262,7 +1270,9 @@ def _retry_rows(  # noqa: PLR0912, PLR0915
             else:
                 attempt = row["attempt_id"]
                 prior_phase = phases.get(attempt)
-                allowed = {
+                if prior_phase is None:
+                    raise OfficialRecoveryError("retry journal terminal event has no allocation")
+                allowed: dict[tuple[str, str], str] = {
                     ("consumed", "retry_prepared"): "prepared",
                     ("prepared", "retry_claimed"): "claimed",
                     ("claimed", "retry_escrow_finalized"): "finalized",
@@ -1270,7 +1280,7 @@ def _retry_rows(  # noqa: PLR0912, PLR0915
                     ("prepared", "retry_failed"): "failed",
                     ("claimed", "retry_failed"): "failed",
                 }
-                next_phase = allowed.get((prior_phase, row["kind"]))
+                next_phase = allowed.get((prior_phase, kind_value))
                 if next_phase is None:
                     raise OfficialRecoveryError("retry journal has an invalid terminal transition")
                 phases[attempt] = next_phase
@@ -1364,12 +1374,12 @@ def prepare_authorized_retry(  # noqa: PLR0912, PLR0915
     campaign, campaign_raw, custody, _ = run_v1._custody(
         root, campaign_path, bindings, cache, ledger, packets
     )
-    private = run_v1.campaign_v1._private_root(ledger)
+    private = campaign_v1._private_root(ledger)
     recovery_root = execution_root / "recovery"
     journal = recovery_root / "runs" / "journal"
-    with run_v1.campaign_v1._ledger_lock(private), run_v1._locked_slots(execution_root) as slots:
+    with campaign_v1._ledger_lock(private), run_v1._locked_slots(execution_root) as slots:
         current = run_v1._extended_ledger(private, root)
-        genesis, _ = run_v1.campaign_v1._json(private / "ledger-genesis.json", modes={0o400})
+        genesis, _ = campaign_v1._json(private / "ledger-genesis.json", modes={0o400})
         canonical_path = str(Path(genesis["campaign_manifest_path"]).resolve(strict=True))
         validate_official_campaign_preflight(
             campaign_path, canonical_path, campaign_raw, genesis["campaign_manifest_sha256"]
@@ -1497,7 +1507,6 @@ def prepare_authorized_retry(  # noqa: PLR0912, PLR0915
                 },
             )
             consumed = True
-            submit_v1 = run_v1.submit_v1
             submit_v1.prepare_binding(
                 root,
                 campaign_path,
@@ -1694,7 +1703,7 @@ def prepare_authorized_retry(  # noqa: PLR0912, PLR0915
                 registry.unlink(missing_ok=True)
             if socket_path is not None:
                 socket_path.unlink(missing_ok=True)
-            with run_v1.contextlib.suppress(OSError):
+            with contextlib.suppress(OSError):
                 (slots / f"{run_id}.json").unlink(missing_ok=True)
             if broker_bundle_lease is not None and broker_bundle_lease.lease.fd >= 0:
                 broker_bundle_lease.lease.close()

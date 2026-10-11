@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import sys
 from typing import TYPE_CHECKING
@@ -139,6 +140,53 @@ def test_sealed_zip_launcher_executes_only_descriptor_snapshot(tmp_path: Path) -
                                               launch_profile_sha256=profile_sha))
 
 
+def test_child_imports_snapshot_after_source_and_checkout_mutation(tmp_path: Path) -> None:
+    source = tmp_path / "checkout"
+    source.mkdir()
+    (source / "entry.py").write_text(
+        "import time\ntime.sleep(0.4)\nimport worker\nprint(worker.VALUE)\n"
+    )
+    (source / "worker.py").write_text("VALUE = 'snapshot-value'\n")
+    profile_sha = digest(b"profile-snapshot")
+    toolchain_sha = bundle_v1.compute_toolchain_sha256(())
+    bundle = bundle_v1.materialize_bundle(
+        source,
+        tmp_path / "sealed",
+        ("entry.py", "worker.py"),
+        profile_sha256=profile_sha,
+        toolchain_sha256=toolchain_sha,
+        entrypoint="entry.py",
+    )
+    runtime_sha = digest(b"runtime")
+    binding_sha = digest(b"binding")
+    lease = bundle_v1.FreezeLease(
+        tmp_path / "lease.lock",
+        bundle,
+        bundle_v1.FreezeReceipt(
+            runtime_attestation_sha256=runtime_sha,
+            bundle_sha256=bundle.digest,
+            binding_sha256=binding_sha,
+            launch_profile_sha256=profile_sha,
+            toolchain_sha256=toolchain_sha,
+        ),
+    ).acquire(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
+                           launch_profile_sha256=profile_sha))
+    child = bundle_v1.launch_with_escrow_lease(
+        lease=bundle_v1.LaunchLeaseHandle(lease), bundle=bundle
+    )
+    (source / "worker.py").write_text("VALUE = 'mutable-checkout'\n")
+    sealed_worker = bundle.root / "worker.py"
+    sealed_worker.chmod(0o600)
+    sealed_worker.write_text("VALUE = 'mutable-directory'\n")
+    stdout, _ = child.communicate(timeout=5)
+    assert child.returncode == 0
+    assert stdout == b"snapshot-value\n"
+    with pytest.raises(bundle_v1.BundleError, match=r"changed|mode is invalid"):
+        lease.check(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
+                                 launch_profile_sha256=profile_sha))
+    lease.close()
+
+
 @pytest.mark.parametrize("target", ["source", "sealed", "manifest"])
 def test_freeze_checks_detect_source_bundle_and_manifest_mutation(
     tmp_path: Path, target: str
@@ -236,14 +284,14 @@ def test_inherited_descriptor_keeps_freeze_after_prepare_process_closes(
         **identities(bundle)
     )
     child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(0.4)"],
+        [sys.executable, "-c", "import time; time.sleep(5)"],
         pass_fds=prepared.pass_fds,
     )
     prepared.close()  # Simulates prepare CLI exit after successful broker startup.
     competitor = bundle_v1.FreezeLease(path, bundle, receipt(bundle))
     with pytest.raises(bundle_v1.BundleError, match="already held"):
         competitor.acquire(**identities(bundle))
-    assert child.wait(timeout=2) == 0
+    assert child.wait(timeout=7) == 0
     competitor.acquire(**identities(bundle))
     competitor.close()
 
@@ -339,3 +387,67 @@ def test_acquire_launch_lease_reads_receipt_and_retains_lock_through_finalize(
     handle.mark_escrow_finalized(**actual)
     assert handle.phase == "escrow_finalized"
     assert handle.lease.fd == -1
+
+
+def test_sealed_toolchain_includes_and_imports_pydantic_source_and_native_extension(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "checkout"
+    source.mkdir()
+    (source / "entry.py").write_text(
+        "from pydantic import BaseModel\n"
+        "class Record(BaseModel):\n    value: int\n"
+        "print(Record(value='7').value)\n"
+    )
+    external_imports = ("pydantic",)
+    toolchain_sha = bundle_v1.compute_toolchain_sha256(external_imports)
+    bundle = bundle_v1.materialize_bundle(
+        source,
+        tmp_path / "sealed-pydantic",
+        ("entry.py",),
+        profile_sha256=digest(b"sealed-pydantic-profile"),
+        toolchain_sha256=toolchain_sha,
+        entrypoint="entry.py",
+        trusted_external_imports=external_imports,
+    )
+    extensions = tuple(bundle_v1.importlib.machinery.EXTENSION_SUFFIXES)
+    native = [name for name in bundle.files if name.endswith(extensions)]
+    assert any("pydantic_core" in name for name in native)
+    assert any("pydantic/__init__.py" in name for name in bundle.files)
+    manifest = json.loads((bundle.root / "bundle-manifest-v1.json").read_bytes())
+    external_hashes = {
+        name: expected
+        for name, expected in bundle.files.items()
+        if name.startswith(bundle_v1._EXTERNAL_ROOT + "/")
+    }
+    assert manifest["toolchain_identity"]["external"] == external_hashes
+    assert manifest["toolchain_identity"]["runtime"]["runtime_libraries"]
+    receipt_value = bundle_v1.FreezeReceipt(
+        runtime_attestation_sha256=digest(b"runtime-pydantic"),
+        bundle_sha256=bundle.digest,
+        binding_sha256=digest(b"binding-pydantic"),
+        launch_profile_sha256=digest(b"profile-pydantic"),
+        toolchain_sha256=toolchain_sha,
+    )
+    lease = bundle_v1.FreezeLease(
+        tmp_path / "pydantic-lease.lock", bundle, receipt_value
+    ).acquire(
+        runtime_attestation_sha256=receipt_value.runtime_attestation_sha256,
+        binding_sha256=receipt_value.binding_sha256,
+        launch_profile_sha256=receipt_value.launch_profile_sha256,
+        toolchain_sha256=toolchain_sha,
+    )
+    handle = bundle_v1.LaunchLeaseHandle(lease)
+    child = bundle_v1.launch_with_escrow_lease(lease=handle, bundle=bundle)
+    stdout, stderr = child.communicate(timeout=30)
+    assert child.returncode == 0, stderr.decode(errors="replace")
+    assert stdout == b"7\n"
+    identities_value = identities(
+        bundle,
+        runtime_sha256=receipt_value.runtime_attestation_sha256,
+        binding_sha256=receipt_value.binding_sha256,
+        launch_profile_sha256=receipt_value.launch_profile_sha256,
+    )
+    handle.mark_ready(**identities_value)
+    handle.mark_claimed(**identities_value)
+    handle.mark_escrow_finalized(**identities_value)

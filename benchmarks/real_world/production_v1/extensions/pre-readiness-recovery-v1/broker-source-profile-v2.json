@@ -20,7 +20,7 @@
   "external_imports": [
     "pydantic"
   ],
-  "toolchain_identity_protocol": "ground-truth-python-toolchain-identity-v1",
+  "toolchain_identity_protocol": "ground-truth-python-toolchain-identity-v2",
   "trusted_native_calls": [
     "ctypes.CDLL(None,use_errno=True)"
   ]
