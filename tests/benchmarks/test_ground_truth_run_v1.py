@@ -9,7 +9,6 @@ import os
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any, cast
 
@@ -374,12 +373,21 @@ def test_broker_readiness_budget_is_bounded_and_below_attempt_deadline() -> None
 
 
 def test_zombie_broker_is_not_same_process() -> None:
-    process = subprocess.Popen(["/bin/sleep", "0.05"], start_new_session=True)
-    identity = run._proc_identity(process.pid)
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.buffer.read(1)"],
+        stdin=subprocess.PIPE,
+        start_new_session=True,
+    )
     try:
-        time.sleep(0.1)
+        identity = run._proc_identity(process.pid)
+        assert process.stdin is not None
+        process.stdin.close()
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        assert process.returncode is None
         assert run._same_process(process.pid, identity) is False
     finally:
+        if process.stdin is not None and not process.stdin.closed:
+            process.stdin.close()
         process.wait()
 
 
