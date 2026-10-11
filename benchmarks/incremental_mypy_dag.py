@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
 import statistics
+import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from importlib.metadata import version
 from pathlib import Path
 
@@ -60,6 +63,41 @@ def retarget_import_source(source: str, changed_index: int, modules: int) -> str
 def p95(samples: list[float]) -> float:
     ordered = sorted(samples)
     return ordered[max(0, int(0.95 * len(ordered) + 0.999999) - 1)]
+
+
+def timing_summary(samples: list[float]) -> dict[str, object]:
+    return {
+        "samples": samples,
+        "p50": statistics.median(samples),
+        "p95": p95(samples),
+        "max": max(samples),
+    }
+
+
+def git_value(*args: str) -> str | None:
+    try:
+        return subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def source_receipt(paths: list[Path]) -> list[dict[str, str]]:
+    return [
+        {
+            "path": path.as_posix(),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for path in paths
+    ]
+
+
+def _equivalence_passed(record: dict[str, object]) -> bool:
+    equivalence = record.get("cold_equivalence")
+    return (
+        isinstance(equivalence, dict)
+        and equivalence.get("equivalent_to_independent_cold_build") is True
+        and equivalence.get("cache_fingerprint_matches_independent_cold_build") is True
+    )
 
 
 def _rss_stats() -> dict[str, int | None]:
@@ -164,6 +202,7 @@ def main() -> None:  # noqa: PLR0915
         )
     if args.samples < 1:
         parser.error("--samples must be at least 1")
+    run_id = str(uuid.uuid4())
     cold: list[float] = []
     warm: list[float] = []
     incremental: list[float] = []
@@ -185,6 +224,14 @@ def main() -> None:  # noqa: PLR0915
             root = Path(directory)
             inventory = make_dag(root, args.modules)
             build_config = BuildConfig(root, python_version=args.python_version)
+            source_inventory = [
+                {
+                    "module": module,
+                    "path": path.name,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+                for module, path in sorted(inventory.items())
+            ]
             provider = MypyIncrementalProvider(build_config)
             rss_before = _rss_stats()
             started = time.perf_counter()
@@ -275,6 +322,28 @@ def main() -> None:  # noqa: PLR0915
                 )
             )
     result = {
+        "run_id": run_id,
+        "invocation": {
+            "argv": [sys.executable, *sys.argv],
+            "modules": args.modules,
+            "samples": args.samples,
+            "python_target": args.python_version,
+            "git_revision": git_value("rev-parse", "HEAD"),
+            "git_worktree_status": git_value("status", "--porcelain"),
+            "uv_lock_sha256": (
+                hashlib.sha256(Path("uv.lock").read_bytes()).hexdigest()
+                if Path("uv.lock").is_file()
+                else None
+            ),
+            "implementation_source": source_receipt(
+                [
+                    Path(__file__),
+                    Path("src/fastapi_endpoint_detector/analyzer/mypy_incremental.py"),
+                    Path("src/fastapi_endpoint_detector/models/endpoint.py"),
+                    Path("pyproject.toml"),
+                ]
+            ),
+        },
         "provider": "MypyIncrementalProvider",
         "mypy_version": version("mypy"),
         "supported_engine": "mypy-fine-grained",
@@ -285,37 +354,48 @@ def main() -> None:  # noqa: PLR0915
             "modules": args.modules,
             "one_function_per_module": True,
             "samples": args.samples,
+            "source_inventory_scope": "generated_fixture_module_paths_and_initial_sha256",
+            "source_inventory": source_inventory,
+            "call_chain": [f"m{index}.f{index}" for index in range(args.modules)],
+            "call_chain_semantics": (
+                "each module calls the next module; last function returns its input"
+            ),
+            "config": {
+                "engine": "mypy-fine-grained",
+                "python_version": args.python_version,
+                "mypy_options": [],
+                "config_file": None,
+                "incremental_mode": "retained in-process fine-grained state",
+            },
         },
         "seconds": {
-            "cold_build": {"samples": cold, "p95": p95(cold), "mean": statistics.mean(cold)},
-            "no_change_reuse": {"samples": warm, "p95": p95(warm), "mean": statistics.mean(warm)},
-            "incremental_update": {
-                "samples": incremental,
-                "p95": p95(incremental),
-                "mean": statistics.mean(incremental),
-            },
-            "signature_update_with_dependency_invalidation": {
-                "samples": signature_update,
-                "p95": p95(signature_update),
-                "mean": statistics.mean(signature_update),
-            },
-            "fallback_full_rebuild": {
-                "samples": fallback,
-                "p95": p95(fallback),
-                "mean": statistics.mean(fallback),
-            },
+            "cold_build": timing_summary(cold),
+            "no_change_reuse": timing_summary(warm),
+            "incremental_update": timing_summary(incremental),
+            "signature_update_with_dependency_invalidation": timing_summary(signature_update),
+            "fallback_full_rebuild": timing_summary(fallback),
         },
         "update_modes": modes,
         "phase_provenance": phase_records,
         "incremental_valid": all(mode == "incremental_update" for mode in modes),
         "all_update_phases_match_independent_cold_build": all(
-            record["cold_equivalence"] is not None
-            and record["cold_equivalence"]["equivalent_to_independent_cold_build"]
-            and record["cold_equivalence"]["cache_fingerprint_matches_independent_cold_build"]
+            _equivalence_passed(record)
             for phase, records in phase_records.items()
             if phase not in {"cold_build", "no_change_reuse"}
             for record in records
         ),
+        "runtime_gate": {
+            "threshold_seconds": 30.0,
+            "measured_incremental_p95_seconds": p95(incremental),
+            "passed_for_trusted_synthetic_provider_only": (
+                all(mode == "incremental_update" for mode in modes)
+                and p95(incremental) <= 30.0
+                and all(
+                    _equivalence_passed(record) for record in phase_records["incremental_update"]
+                )
+            ),
+            "gh283_medium_project_acceptance": "not_established_by_synthetic_fixture",
+        },
         "scope": "trusted generated fixture only; not a host-project corpus score",
     }
     print(json.dumps(result, indent=2, sort_keys=True))
