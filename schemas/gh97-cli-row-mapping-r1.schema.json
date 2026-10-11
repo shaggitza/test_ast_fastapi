@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/gh97-cli-row-mapping-r1.schema.json",
+  "title": "GH97 frozen CLI output to inventory row mapping",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "invocations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "invocations": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["invocation_id", "output_sha256", "rows", "unobserved_rows"],
+        "properties": {
+          "invocation_id": {"type": "string", "minLength": 1},
+          "output_sha256": {"$ref": "#/$defs/sha256"},
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["inventory_key", "rows_pointer", "output_pointer", "row_sha256", "fields"],
+              "properties": {
+                "inventory_key": {"$ref": "#/$defs/inventory_key"},
+                "rows_pointer": {"type": "string", "pattern": "^/"},
+                "output_pointer": {"type": "string", "pattern": "^/"},
+                "row_sha256": {"$ref": "#/$defs/sha256"},
+                "fields": {"$ref": "#/$defs/observed_fields"}
+              }
+            }
+          },
+          "unobserved_rows": {
+            "type": "array",
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["inventory_key", "rows_pointer", "fields"],
+              "properties": {
+                "inventory_key": {"$ref": "#/$defs/inventory_key"},
+                "rows_pointer": {"type": "string", "pattern": "^/"},
+                "fields": {"$ref": "#/$defs/physical_fields"}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "inventory_key": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "prefixItems": [
+        {"type": "string"}, {"$ref": "#/$defs/sha256"}, {"type": "string"},
+        {"type": "integer", "minimum": 0}, {"type": "integer", "minimum": 1},
+        {"$ref": "#/$defs/sha256"}
+      ], "items": false
+    },
+    "physical_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "source_sha256", "start_byte", "end_byte", "call_ast_sha256", "callee_syntax"],
+      "properties": {
+        "path": {"type": "string", "pattern": "^/"},
+        "source_sha256": {"type": "string", "pattern": "^/"},
+        "start_byte": {"type": "string", "pattern": "^/"},
+        "end_byte": {"type": "string", "pattern": "^/"},
+        "call_ast_sha256": {"type": "string", "pattern": "^/"},
+        "callee_syntax": {"type": "string", "pattern": "^/"}
+      }
+    },
+    "observed_fields": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_key", "path", "source_sha256", "start_byte", "end_byte", "call_ast_sha256", "callee_syntax"],
+      "properties": {
+        "row_key": {"type": "string", "pattern": "^/"},
+        "path": {"type": "string", "pattern": "^/"},
+        "source_sha256": {"type": "string", "pattern": "^/"},
+        "start_byte": {"type": "string", "pattern": "^/"},
+        "end_byte": {"type": "string", "pattern": "^/"},
+        "call_ast_sha256": {"type": "string", "pattern": "^/"},
+        "callee_syntax": {"type": "string", "pattern": "^/"}
+      }
+    }
+  }
+}

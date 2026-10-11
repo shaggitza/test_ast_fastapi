@@ -1,0 +1,624 @@
+{
+  "$defs": {
+    "AuditCallStatus": {
+      "description": "Dry-run classification of one physical source call.",
+      "enum": [
+        "matched",
+        "unmatched",
+        "ambiguous",
+        "unresolved"
+      ],
+      "title": "AuditCallStatus",
+      "type": "string"
+    },
+    "AuditEndpoint": {
+      "additionalProperties": false,
+      "description": "Handler-aware endpoint identity attached to a reachable call.",
+      "properties": {
+        "id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "methods": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Methods",
+          "type": "array"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "handler_module": {
+          "title": "Handler Module",
+          "type": "string"
+        },
+        "handler_name": {
+          "title": "Handler Name",
+          "type": "string"
+        },
+        "handler_file": {
+          "minLength": 1,
+          "title": "Handler File",
+          "type": "string"
+        },
+        "handler_line": {
+          "minimum": 1,
+          "title": "Handler Line",
+          "type": "integer"
+        },
+        "discovery_status": {
+          "enum": [
+            "established",
+            "conditional"
+          ],
+          "title": "Discovery Status",
+          "type": "string"
+        },
+        "conditions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AuditLimitation"
+          },
+          "title": "Conditions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "methods",
+        "path",
+        "handler_module",
+        "handler_name",
+        "handler_file",
+        "handler_line",
+        "discovery_status"
+      ],
+      "title": "AuditEndpoint",
+      "type": "object"
+    },
+    "AuditLimitation": {
+      "additionalProperties": false,
+      "description": "Normalized source-backed limitation on endpoint inventory.",
+      "properties": {
+        "file_path": {
+          "minLength": 1,
+          "title": "File Path",
+          "type": "string"
+        },
+        "line": {
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_path",
+        "line",
+        "reason"
+      ],
+      "title": "AuditLimitation",
+      "type": "object"
+    },
+    "CallResolutionStatus": {
+      "description": "Typed resolver outcome for a source call site.",
+      "enum": [
+        "exact",
+        "ambiguous",
+        "unresolved"
+      ],
+      "title": "CallResolutionStatus",
+      "type": "string"
+    },
+    "EffectContractAuditOccurrence": {
+      "additionalProperties": false,
+      "description": "One globally deduplicated physical call reachable from audited endpoints.",
+      "properties": {
+        "id": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "file_path": {
+          "minLength": 1,
+          "title": "File Path",
+          "type": "string"
+        },
+        "line": {
+          "minimum": 1,
+          "title": "Line",
+          "type": "integer"
+        },
+        "column": {
+          "minimum": 0,
+          "title": "Column",
+          "type": "integer"
+        },
+        "end_line": {
+          "title": "End Line",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "end_column": {
+          "title": "End Column",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source_spelling": {
+          "minLength": 1,
+          "title": "Source Spelling",
+          "type": "string"
+        },
+        "resolver_status": {
+          "$ref": "#/$defs/CallResolutionStatus"
+        },
+        "audit_status": {
+          "$ref": "#/$defs/AuditCallStatus"
+        },
+        "canonical_symbol": {
+          "title": "Canonical Symbol",
+          "type": "string"
+        },
+        "invocation": {
+          "$ref": "#/$defs/InvocationKind"
+        },
+        "resolver": {
+          "minLength": 1,
+          "title": "Resolver",
+          "type": "string"
+        },
+        "resolver_version": {
+          "minLength": 1,
+          "title": "Resolver Version",
+          "type": "string"
+        },
+        "receiver_candidates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Receiver Candidates",
+          "type": "array"
+        },
+        "reason_code": {
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "receiver_origin": {
+          "$ref": "#/$defs/ResourceIdentityEvidence"
+        },
+        "resource_identity": {
+          "$ref": "#/$defs/ResourceIdentityEvidence"
+        },
+        "contract_id": {
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_hash": {
+          "title": "Contract Hash",
+          "type": "string"
+        },
+        "endpoints": {
+          "items": {
+            "$ref": "#/$defs/AuditEndpoint"
+          },
+          "minItems": 1,
+          "title": "Endpoints",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "file_path",
+        "line",
+        "column",
+        "source_spelling",
+        "resolver_status",
+        "audit_status",
+        "resolver",
+        "resolver_version",
+        "endpoints"
+      ],
+      "title": "EffectContractAuditOccurrence",
+      "type": "object"
+    },
+    "EffectContractAuditProvenance": {
+      "additionalProperties": false,
+      "description": "Contract and resolver provenance for a reproducible audit.",
+      "properties": {
+        "matcher_schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Matcher Schema Version",
+          "type": "integer"
+        },
+        "matcher": {
+          "const": "exact_symbol_invocation_v1",
+          "default": "exact_symbol_invocation_v1",
+          "title": "Matcher",
+          "type": "string"
+        },
+        "contract_source_path": {
+          "minLength": 1,
+          "title": "Contract Source Path",
+          "type": "string"
+        },
+        "raw_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Raw Hash",
+          "type": "string"
+        },
+        "config_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Config Hash",
+          "type": "string"
+        },
+        "preset_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Preset Hash",
+          "type": "string"
+        },
+        "contract_hashes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Contract Hashes",
+          "type": "object"
+        },
+        "resolver_versions": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Resolver Versions",
+          "type": "array"
+        },
+        "occurrence_corpus_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Occurrence Corpus Hash",
+          "type": "string"
+        },
+        "audit_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Audit Hash",
+          "type": "string"
+        },
+        "package_evidence_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string",
+          "title": "Package Evidence Hash"
+        }
+      },
+      "required": [
+        "contract_source_path",
+        "raw_hash",
+        "config_hash",
+        "preset_hash",
+        "contract_hashes",
+        "resolver_versions",
+        "occurrence_corpus_hash",
+        "audit_hash"
+      ],
+      "title": "EffectContractAuditProvenance",
+      "type": "object"
+    },
+    "EffectContractAuditScope": {
+      "additionalProperties": false,
+      "description": "Completeness and traversal boundaries of the endpoint-reachable corpus.",
+      "properties": {
+        "kind": {
+          "const": "endpoint_reachable_calls",
+          "default": "endpoint_reachable_calls",
+          "title": "Kind",
+          "type": "string"
+        },
+        "source_root": {
+          "const": ".",
+          "default": ".",
+          "title": "Source Root",
+          "type": "string"
+        },
+        "inventory_status": {
+          "enum": [
+            "established",
+            "conditional",
+            "unavailable"
+          ],
+          "title": "Inventory Status",
+          "type": "string"
+        },
+        "inventory_limitations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AuditLimitation"
+          },
+          "title": "Inventory Limitations",
+          "type": "array"
+        },
+        "endpoint_inventory": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AuditEndpoint"
+          },
+          "title": "Endpoint Inventory",
+          "type": "array"
+        },
+        "endpoints": {
+          "minimum": 0,
+          "title": "Endpoints",
+          "type": "integer"
+        },
+        "established_endpoints": {
+          "minimum": 0,
+          "title": "Established Endpoints",
+          "type": "integer"
+        },
+        "conditional_endpoints": {
+          "minimum": 0,
+          "title": "Conditional Endpoints",
+          "type": "integer"
+        },
+        "track_transitive": {
+          "title": "Track Transitive",
+          "type": "boolean"
+        },
+        "max_depth": {
+          "minimum": 1,
+          "title": "Max Depth",
+          "type": "integer"
+        },
+        "cache_enabled": {
+          "title": "Cache Enabled",
+          "type": "boolean"
+        },
+        "package_applicability": {
+          "default": "not_evaluated",
+          "enum": [
+            "not_evaluated",
+            "source_pins_evaluated"
+          ],
+          "title": "Package Applicability",
+          "type": "string"
+        }
+      },
+      "required": [
+        "inventory_status",
+        "endpoints",
+        "established_endpoints",
+        "conditional_endpoints",
+        "track_transitive",
+        "max_depth",
+        "cache_enabled"
+      ],
+      "title": "EffectContractAuditScope",
+      "type": "object"
+    },
+    "EffectContractAuditSummary": {
+      "additionalProperties": false,
+      "description": "Exhaustive counts over globally deduplicated physical calls.",
+      "properties": {
+        "contracts": {
+          "minimum": 0,
+          "title": "Contracts",
+          "type": "integer"
+        },
+        "matched_contracts": {
+          "minimum": 0,
+          "title": "Matched Contracts",
+          "type": "integer"
+        },
+        "unmatched_contracts": {
+          "minimum": 0,
+          "title": "Unmatched Contracts",
+          "type": "integer"
+        },
+        "physical_occurrences": {
+          "minimum": 0,
+          "title": "Physical Occurrences",
+          "type": "integer"
+        },
+        "matched_calls": {
+          "minimum": 0,
+          "title": "Matched Calls",
+          "type": "integer"
+        },
+        "unmatched_calls": {
+          "minimum": 0,
+          "title": "Unmatched Calls",
+          "type": "integer"
+        },
+        "ambiguous_calls": {
+          "minimum": 0,
+          "title": "Ambiguous Calls",
+          "type": "integer"
+        },
+        "unresolved_calls": {
+          "minimum": 0,
+          "title": "Unresolved Calls",
+          "type": "integer"
+        },
+        "endpoint_links": {
+          "minimum": 0,
+          "title": "Endpoint Links",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "contracts",
+        "matched_contracts",
+        "unmatched_contracts",
+        "physical_occurrences",
+        "matched_calls",
+        "unmatched_calls",
+        "ambiguous_calls",
+        "unresolved_calls",
+        "endpoint_links"
+      ],
+      "title": "EffectContractAuditSummary",
+      "type": "object"
+    },
+    "EffectContractCoverage": {
+      "additionalProperties": false,
+      "description": "Reachable physical-call coverage for one configured contract.",
+      "properties": {
+        "contract_id": {
+          "title": "Contract Id",
+          "type": "string"
+        },
+        "contract_hash": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "title": "Contract Hash",
+          "type": "string"
+        },
+        "symbol": {
+          "title": "Symbol",
+          "type": "string"
+        },
+        "invocation": {
+          "$ref": "#/$defs/InvocationKind"
+        },
+        "matched": {
+          "title": "Matched",
+          "type": "boolean"
+        },
+        "occurrence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Occurrence Ids",
+          "type": "array"
+        },
+        "endpoint_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Endpoint Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "contract_id",
+        "contract_hash",
+        "symbol",
+        "invocation",
+        "matched"
+      ],
+      "title": "EffectContractCoverage",
+      "type": "object"
+    },
+    "FiniteValueStatus": {
+      "description": "Strength of one bounded source value set.",
+      "enum": [
+        "exact",
+        "finite",
+        "unavailable"
+      ],
+      "title": "FiniteValueStatus",
+      "type": "string"
+    },
+    "InvocationKind": {
+      "description": "Statically resolvable callable shape.",
+      "enum": [
+        "function",
+        "instance_method",
+        "class_method",
+        "constructor"
+      ],
+      "title": "InvocationKind",
+      "type": "string"
+    },
+    "ResourceIdentityEvidence": {
+      "additionalProperties": false,
+      "description": "Versioned finite resource identity without exposing source literals.",
+      "properties": {
+        "schema_version": {
+          "const": 1,
+          "default": 1,
+          "title": "Schema Version",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/FiniteValueStatus"
+        },
+        "value_hashes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8,
+          "title": "Value Hashes",
+          "type": "array"
+        },
+        "reason_code": {
+          "title": "Reason Code",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "ResourceIdentityEvidence",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete dry-run report, isolated from impact candidates and confidence.",
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "matching_status": {
+      "const": "complete",
+      "default": "complete",
+      "title": "Matching Status",
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/EffectContractAuditScope"
+    },
+    "provenance": {
+      "$ref": "#/$defs/EffectContractAuditProvenance"
+    },
+    "summary": {
+      "$ref": "#/$defs/EffectContractAuditSummary"
+    },
+    "contract_coverage": {
+      "items": {
+        "$ref": "#/$defs/EffectContractCoverage"
+      },
+      "title": "Contract Coverage",
+      "type": "array"
+    },
+    "occurrences": {
+      "items": {
+        "$ref": "#/$defs/EffectContractAuditOccurrence"
+      },
+      "title": "Occurrences",
+      "type": "array"
+    }
+  },
+  "required": [
+    "scope",
+    "provenance",
+    "summary",
+    "contract_coverage",
+    "occurrences"
+  ],
+  "title": "Public audit-effect-contracts JSON report schema v1 (exclude_none CLI serialization)",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/gh97-audit-effect-contracts-output-v1.schema.json"
+}

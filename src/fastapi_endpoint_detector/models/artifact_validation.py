@@ -24,7 +24,7 @@ def _reject_non_finite(token: str) -> None:
     raise BenchmarkSchemaError(f"non-finite JSON number {token!r}")
 
 
-def strict_json_loads(content: str, source: str) -> Any:
+def strict_json_loads(content: str | bytes, source: str) -> Any:
     """Decode JSON while rejecting duplicate object members and non-finite numbers."""
     try:
         return json.loads(
@@ -32,7 +32,7 @@ def strict_json_loads(content: str, source: str) -> Any:
             object_pairs_hook=_reject_duplicate_members,
             parse_constant=_reject_non_finite,
         )
-    except (json.JSONDecodeError, BenchmarkSchemaError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, BenchmarkSchemaError) as error:
         raise BenchmarkSchemaError(f"invalid JSON in {source}: {error}") from error
 
 
