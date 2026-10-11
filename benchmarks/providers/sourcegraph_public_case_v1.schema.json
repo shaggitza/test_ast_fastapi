@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:gh20:sourcegraph-public-case:v1",
+  "title": "Sourcegraph public common-case result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "case", "operation", "status", "transport", "endpoint", "request", "response_raw", "error", "provider_evidence"],
+  "properties": {
+    "protocol_version": {"const": 1},
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["profile", "source_lock", "source_lock_git_blob", "source_lock_sha256", "source_record", "repository", "revision", "path", "symbol"],
+      "properties": {
+        "profile": {"const": "gh20-sourcegraph-public-case-r3-v1"},
+        "source_lock": {"const": "benchmarks/real_world/corpus.json"},
+        "source_lock_git_blob": {"const": "c34f08548ab7e70c805dac5e3373c16a427ad32b"},
+        "source_lock_sha256": {"const": "7c4ecfd562d2e01079a955e8214afd4e9e1a408f73ed392d4606eecbc649f062"},
+        "source_record": {"const": "open-webui/open-webui#26924"},
+        "repository": {"const": "open-webui/open-webui"},
+        "revision": {"const": "0f8846b7fc8c210945366defbd1ed941b039a691"},
+        "path": {"const": "backend/open_webui/utils/security_headers.py"},
+        "symbol": {"const": "SecurityHeadersMiddleware"}
+      }
+    },
+    "operation": {"enum": ["index_revision_status", "reverse_reference", "call_chain"]},
+    "status": {"enum": ["available", "unavailable", "error"]},
+    "transport": {
+      "type": "object", "additionalProperties": false,
+      "required": ["http_status", "elapsed_seconds", "response_bytes", "truncated", "redirects"],
+      "properties": {
+        "http_status": {"type": ["integer", "null"], "minimum": 100, "maximum": 599},
+        "elapsed_seconds": {"type": "number", "minimum": 0, "maximum": 12},
+        "response_bytes": {"type": "integer", "minimum": 0, "maximum": 2097152},
+        "truncated": {"type": "boolean", "const": false},
+        "redirects": {"type": "integer", "minimum": 0, "maximum": 2}
+      }
+    },
+    "endpoint": {"const": "https://sourcegraph.com/.api/graphql"},
+    "request": {"type": "string", "minLength": 1},
+    "response_raw": {"type": ["string", "null"]},
+    "error": {"type": ["string", "null"]},
+    "provider_evidence": {
+      "type": ["object", "null"],
+      "required": ["kind", "binding", "evidence", "receipt", "validation"],
+      "properties": {
+        "kind": {"enum": ["changed_symbol", "reverse_reference", "call_chain", "cross_repo_consumer"]},
+        "binding": {"type": "object"},
+        "evidence": {"type": "array"},
+        "receipt": {"type": "object"},
+        "validation": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "provider_authenticated", "scorable"],
+          "properties": {
+            "status": {"const": "schema_validated_supplied_evidence"},
+            "provider_authenticated": {"const": false},
+            "scorable": {"const": false}
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "available"}}, "required": ["status"]}, "then": {"properties": {"provider_evidence": {"type": "object"}, "response_raw": {"type": "string"}, "error": {"type": "null"}}}},
+    {"if": {"properties": {"status": {"enum": ["unavailable", "error"]}}, "required": ["status"]}, "then": {"properties": {"provider_evidence": {"type": "null"}, "error": {"type": "string", "minLength": 1}}}}
+  ]
+}
