@@ -1558,7 +1558,7 @@ def test_destructuring_assignment_clears_partial_aliases(tmp_path: Path) -> None
         )
 
 
-def test_unknown_context_exit_does_not_export_exact_local_alias(tmp_path: Path) -> None:
+def test_context_exit_preserves_untouched_local_alias(tmp_path: Path) -> None:
     (tmp_path / "effects.py").write_text("def emit() -> None: pass\n", encoding="utf-8")
     source = (
         "from typing import Any\n"
@@ -1577,8 +1577,5 @@ def test_unknown_context_exit_does_not_export_exact_local_alias(tmp_path: Path) 
     after = [site for site in calls if site.line == 8]
     assert len(inside) == len(after) == 1
     assert inside[0].canonical_symbol and inside[0].canonical_symbol.endswith(".emit")
-    assert not (
-        after[0].status == CallResolutionStatus.EXACT
-        and after[0].canonical_symbol
-        and after[0].canonical_symbol.endswith(".emit")
-    )
+    assert after[0].status == CallResolutionStatus.EXACT
+    assert after[0].canonical_symbol and after[0].canonical_symbol.endswith(".emit")

@@ -577,7 +577,7 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v4-raising-snapshots-iteration-possible"
+        "conditional-elif-try-else-guaranteed-finally-v5-zero-trip-and-context-local-bindings"
     )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
@@ -3359,13 +3359,15 @@ class MypyAnalyzer:
         joined: dict[str, Any] = {}
         for name in sorted(common):
             targets: list[Any] = []
+            possible_only = False
             for environment in environments:
                 value = environment[name]
+                possible_only |= isinstance(value, _CallableUnion)
                 candidates = value.targets if isinstance(value, _CallableUnion) else (value,)
                 for candidate in candidates:
                     if candidate not in targets:
                         targets.append(candidate)
-            if len(targets) == 1:
+            if len(targets) == 1 and not possible_only:
                 joined[name] = targets[0]
             elif targets and len(targets) <= self.MAX_POINTS_TO_TARGETS:
                 joined[name] = _CallableUnion(tuple(targets))
@@ -6129,21 +6131,132 @@ class MypyAnalyzer:
                 string_environment.pop(name, None)
                 partial_environment.pop(name, None)
 
+        def alias_target_names(target: Any) -> set[str]:
+            """Identify names bound by a local assignment target."""
+            if isinstance(target, (TupleExpr, ListExpr)):
+                return {name for item in target.items for name in alias_target_names(item)}
+            if isinstance(target, StarExpr):
+                return alias_target_names(target.expr)
+            return {target.name} if isinstance(target, NameExpr) else set()
+
+        def clear_alias_name(name: str) -> None:
+            flow_environment.pop(name, None)
+            string_environment.pop(name, None)
+            deferred_environment.pop(name, None)
+            callable_environment.pop(name, None)
+            partial_environment.pop(name, None)
+            lambda_environment.pop(name, None)
+
         def clear_alias_target(target: Any) -> None:
             """Invalidate bounded local aliases overwritten by a binding target."""
-            if isinstance(target, (TupleExpr, ListExpr)):
-                for item in target.items:
-                    clear_alias_target(item)
-            elif isinstance(target, StarExpr):
-                clear_alias_target(target.expr)
-            elif isinstance(target, NameExpr):
-                name = target.name
-                flow_environment.pop(name, None)
-                string_environment.pop(name, None)
-                deferred_environment.pop(name, None)
-                callable_environment.pop(name, None)
-                partial_environment.pop(name, None)
-                lambda_environment.pop(name, None)
+            for name in alias_target_names(target):
+                clear_alias_name(name)
+
+        def context_bound_names(body: Any) -> set[str] | None:
+            """Collect reachable local writes without entering nested scope bodies."""
+            from types import GetSetDescriptorType, MemberDescriptorType
+
+            from mypy.nodes import AssignmentExpr, DelStmt, Node, OperatorAssignmentStmt, TempNode
+
+            names: set[str] = set()
+            pending: list[Any] = [body]
+            seen: set[int] = set()
+            item_count = 0
+            while pending:
+                item = pending.pop()
+                item_count += 1
+                if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                    )
+                    return None
+                if isinstance(item, (list, tuple)):
+                    pending.extend(item)
+                    continue
+                if not isinstance(item, Node) or id(item) in seen:
+                    continue
+                seen.add(id(item))
+                if len(seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                    )
+                    return None
+                if isinstance(item, AssignmentStmt) and not isinstance(item.rvalue, TempNode):
+                    for assignment_target in item.lvalues:
+                        names.update(alias_target_names(assignment_target))
+                elif isinstance(item, AssignmentExpr):
+                    names.update(alias_target_names(item.target))
+                elif isinstance(item, OperatorAssignmentStmt):
+                    names.update(alias_target_names(item.lvalue))
+                elif isinstance(item, DelStmt):
+                    names.update(alias_target_names(item.expr))
+                elif isinstance(item, ForStmt):
+                    if (
+                        not item.is_async
+                        and isinstance(item.expr, (ListExpr, TupleExpr))
+                        and not item.expr.items
+                    ):
+                        pending.extend((item.expr, item.else_body))
+                        continue
+                    names.update(alias_target_names(item.index))
+                elif isinstance(item, WithStmt):
+                    for context_target in item.target:
+                        names.update(alias_target_names(context_target))
+                elif isinstance(item, TryStmt):
+                    for exception_target in item.vars:
+                        names.update(alias_target_names(exception_target))
+                elif isinstance(item, (FuncDef, Decorator, ClassDef)):
+                    names.add(item.name)
+                elif isinstance(item, Import):
+                    names.update(alias or module.split(".")[0] for module, alias in item.ids)
+                elif isinstance(item, ImportFrom):
+                    names.update(alias or name for name, alias in item.names)
+                if isinstance(item, IfStmt):
+                    can_reach_else = True
+                    for expression, branch in zip(item.expr, item.body, strict=True):
+                        pending.append(expression)
+                        truth = self._literal_boolean(expression)
+                        if truth is not False:
+                            pending.append(branch)
+                        if truth is True:
+                            can_reach_else = False
+                            break
+                    if can_reach_else:
+                        pending.append(item.else_body)
+                    continue
+                if isinstance(item, WhileStmt) and self._literal_boolean(item.expr) is False:
+                    pending.extend((item.expr, item.else_body))
+                    continue
+                if isinstance(item, LambdaExpr):
+                    # A lambda's body and bindings belong to its deferred scope.
+                    continue
+                fields = set(getattr(item, "__dict__", {}))
+                for cls in type(item).__mro__:
+                    fields.update(
+                        attribute
+                        for attribute, descriptor in cls.__dict__.items()
+                        if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
+                    )
+                for attribute in fields:
+                    if attribute.startswith("__") or attribute in {
+                        "node",
+                        "info",
+                        "type",
+                        "unanalyzed_type",
+                        "analyzed",
+                        "original_def",
+                        "expanded",
+                        "original_decorators",
+                    }:
+                        continue
+                    if isinstance(item, FuncDef) and attribute == "body":
+                        continue
+                    if isinstance(item, ClassDef) and attribute in {"defs", "removed_statements"}:
+                        continue
+                    child = getattr(item, attribute, None)
+                    if isinstance(child, (Node, list, tuple)):
+                        pending.append(child)
+            return names
 
         def walk_node(n: Any) -> bool | None:
             """Recursively walk a mypy AST node with a bounded local environment."""
@@ -6792,10 +6905,20 @@ class MypyAnalyzer:
                     require_async=bool(n.is_async),
                 )
                 walk_node(n.expr)
-                clear_alias_target(n.index)
+                if (
+                    not n.is_async
+                    and isinstance(n.expr, (ListExpr, TupleExpr))
+                    and not n.expr.items
+                ):
+                    # The binder never executes on this proven zero-trip path.
+                    return walk_node(n.else_body) if n.else_body is not None else True
+                before_flow = dict(flow_environment)
+                before_strings = dict(string_environment)
+                before_deferred = dict(deferred_environment)
                 before_callables = dict(callable_environment)
                 before_partials = dict(partial_environment)
                 before_lambdas = dict(lambda_environment)
+                clear_alias_target(n.index)
                 possible_execution_depth[0] += 1
                 try:
                     walk_node(n.body)
@@ -6804,9 +6927,39 @@ class MypyAnalyzer:
                 after_callables = dict(callable_environment)
                 after_partials = dict(partial_environment)
                 after_lambdas = dict(lambda_environment)
-                callable_environment = self._join_callable_environments(
+                joined_callables = self._join_callable_environments(
                     [before_callables, after_callables]
                 )
+                unknown_binding = False
+                for name in sorted(before_callables.keys() | after_callables.keys()):
+                    if name in joined_callables:
+                        continue
+                    targets: list[Any] = []
+                    for environment in (before_callables, after_callables):
+                        alias_value = environment.get(name)
+                        candidates = (
+                            alias_value.targets
+                            if isinstance(alias_value, _CallableUnion)
+                            else (alias_value,)
+                            if alias_value is not None
+                            else ()
+                        )
+                        for candidate in candidates:
+                            if candidate not in targets:
+                                targets.append(candidate)
+                    if targets:
+                        unknown_binding = True
+                        if len(targets) <= self.MAX_POINTS_TO_TARGETS:
+                            # A missing path is unknown, so a known zero-trip or
+                            # positive-trip target is possible evidence only.
+                            joined_callables[name] = _CallableUnion(tuple(targets))
+                        else:
+                            self._record_analysis_limitation(
+                                "MAX_POINTS_TO_TARGETS",
+                                target_count=len(targets),
+                                limit=self.MAX_POINTS_TO_TARGETS,
+                            )
+                callable_environment = joined_callables
                 partial_environment = {
                     name: value
                     for name, value in before_partials.items()
@@ -6817,23 +6970,82 @@ class MypyAnalyzer:
                     for name, value in before_lambdas.items()
                     if after_lambdas.get(name) is value
                 }
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
+                unknown_binding |= (set(before_partials) | set(after_partials)) != set(
+                    partial_environment
+                ) or (set(before_lambdas) | set(after_lambdas)) != set(lambda_environment)
+                if unknown_binding:
+                    self._record_analysis_limitation("UNKNOWN_ITERATION_BINDING")
+                flow_environment = self._join_finite_environments([before_flow, flow_environment])
+                string_environment = {
+                    name: value
+                    for name, value in before_strings.items()
+                    if string_environment.get(name) == value
+                }
+                deferred_environment = {
+                    name: value
+                    for name, value in before_deferred.items()
+                    if deferred_environment.get(name) == value
+                }
+                if n.else_body is not None:
+                    # Break may bypass the else path. Keep only bindings that
+                    # agree with the pre-else state and retain possible targets.
+                    before_else_callables = dict(callable_environment)
+                    before_else_partials = dict(partial_environment)
+                    before_else_lambdas = dict(lambda_environment)
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.else_body)
+                    finally:
+                        possible_execution_depth[0] -= 1
+                    callable_environment = self._join_callable_environments(
+                        [before_else_callables, callable_environment]
+                    )
+                    partial_environment = {
+                        name: value
+                        for name, value in before_else_partials.items()
+                        if partial_environment.get(name) == value
+                    }
+                    lambda_environment = {
+                        name: value
+                        for name, value in before_else_lambdas.items()
+                        if lambda_environment.get(name) is value
+                    }
+                    flow_environment.clear()
+                    string_environment.clear()
+                    deferred_environment.clear()
 
             elif isinstance(n, WithStmt):
-                for expr in n.expr:
-                    walk_node(expr)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
+                for expression, context_target in zip(n.expr, n.target, strict=True):
+                    walk_node(expression)
+                    clear_alias_target(context_target)
+                written_names = context_bound_names(n.body)
+                before_alias_names = (
+                    set(callable_environment) | set(partial_environment) | set(lambda_environment)
+                )
                 walk_node(n.body)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
-                callable_environment.clear()
-                partial_environment.clear()
-                lambda_environment.clear()
+                if written_names is None:
+                    flow_environment.clear()
+                    string_environment.clear()
+                    deferred_environment.clear()
+                    callable_environment.clear()
+                    partial_environment.clear()
+                    lambda_environment.clear()
+                else:
+                    affected_aliases = written_names & (
+                        before_alias_names
+                        | set(callable_environment)
+                        | set(partial_environment)
+                        | set(lambda_environment)
+                    )
+                    if affected_aliases:
+                        self._record_analysis_limitation("UNKNOWN_CONTEXT_EXIT_BINDING")
+                    # A manager may suppress an exception before or after a
+                    # body assignment. Its final linear state is not proof of
+                    # that alias at the continuation, but untouched locals stay.
+                    for name in written_names:
+                        clear_alias_name(name)
+                    for context_target in n.target:
+                        clear_alias_target(context_target)
 
             elif isinstance(n, TryStmt):
                 # An exception may be raised before or after any assignment in the
