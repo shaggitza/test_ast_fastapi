@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - coverage.py dependency
 
 ### Added
+- **Reviewed exact effect preset rows**: added four filesystem, five Motor,
+  and five typed-S3 declarations with bounded source metadata. HTTPX module rows
+  remain held pending approval of the module-mutation guard. Requests module
+  helpers remain open.
 - **Mypy integration**: Added mypy's build API for type-aware dependency analysis
   - New `_get_module_dependencies_via_mypy()` method for full dependency graph extraction
   - New `_module_to_file_path()` helper for module resolution
