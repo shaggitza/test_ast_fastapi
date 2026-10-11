@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import pytest
+
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
@@ -74,7 +76,7 @@ def test_external_abstract_method_is_not_exact(tmp_path: Path) -> None:
     assert site.invocation is None
 
 
-def test_external_final_class_keeps_exact_dispatch(tmp_path: Path) -> None:
+def test_external_final_class_has_no_runtime_dispatch_proof(tmp_path: Path) -> None:
     site = _external_run_site(
         tmp_path,
         stub=("from typing import final\n@final\nclass Service:\n    def run(self) -> None: ...\n"),
@@ -83,8 +85,10 @@ def test_external_final_class_keeps_exact_dispatch(tmp_path: Path) -> None:
         ),
     )
 
-    assert site.status == CallResolutionStatus.EXACT
-    assert site.canonical_symbol == "api.Service.run"
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
 
 
 def test_shared_external_protocol_union_is_ambiguous_in_both_orders(tmp_path: Path) -> None:
@@ -126,7 +130,7 @@ def test_nonfinal_external_base_with_project_override_is_ambiguous(tmp_path: Pat
     assert site.invocation is None
 
 
-def test_external_final_method_keeps_exact_dispatch(tmp_path: Path) -> None:
+def test_external_final_method_has_no_runtime_dispatch_proof(tmp_path: Path) -> None:
     site = _external_run_site(
         tmp_path,
         stub=(
@@ -134,9 +138,10 @@ def test_external_final_method_keeps_exact_dispatch(tmp_path: Path) -> None:
         ),
         source="from api import Service\n\ndef handler(value: Service) -> None:\n    value.run()\n",
     )
-    assert site.status == CallResolutionStatus.EXACT
-    assert site.canonical_symbol == "api.Service.run"
-    assert site.invocation is not None
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
 
 
 def test_external_classmethod_through_open_instance_is_ambiguous(tmp_path: Path) -> None:
@@ -165,6 +170,58 @@ def test_external_staticmethod_shadowed_by_project_subclass_is_ambiguous(tmp_pat
             "def handler(value: Base) -> None:\n    value.run()\n"
         ),
     )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+@pytest.mark.parametrize("descriptor", ["staticmethod", "classmethod"])
+@pytest.mark.parametrize("final_class", [False, True])
+def test_final_external_descriptor_has_no_runtime_receiver_proof(
+    tmp_path: Path, descriptor: str, final_class: bool
+) -> None:
+    decorator = "@final\n" if final_class else ""
+    formal = "" if descriptor == "staticmethod" else "cls"
+    site = _external_run_site(
+        tmp_path,
+        stub=(
+            "from typing import final\n"
+            f"{decorator}class Service:\n"
+            f"    @final\n    @{descriptor}\n"
+            f"    def run({formal}) -> None: ...\n"
+        ),
+        source="from api import Service\n\ndef handler(value: Service) -> None:\n    value.run()\n",
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_project_final_annotation_has_no_runtime_receiver_proof(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    main = project / "main.py"
+    main.write_text(
+        "from typing import final\n"
+        "@final\nclass Service:\n    def run(self) -> None: pass\n"
+        "def handler(value: Service) -> None:\n    value.run()\n",
+        encoding="utf-8",
+    )
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=5),
+    )
+    dependencies = MypyAnalyzer(
+        project, module_root=project, no_site_packages=True
+    ).analyze_endpoint(endpoint)
+    sites = [
+        site for site in dependencies.resolved_call_sites if site.source_spelling == "value.run"
+    ]
+    assert len(sites) == 1
+    site = sites[0]
     assert site.status == CallResolutionStatus.AMBIGUOUS
     assert site.reason_code == "open_receiver_dispatch"
     assert site.canonical_symbol is None
