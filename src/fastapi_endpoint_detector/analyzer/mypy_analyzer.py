@@ -636,7 +636,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 12
+    EXECUTION_SUMMARY_VERSION = 13
     CALLBACK_PROVIDER_MODULES: ClassVar[frozenset[str]] = frozenset(
         {
             "asyncio.threads",
@@ -5395,12 +5395,6 @@ class MypyAnalyzer:
             candidates = tuple(sorted({item.fullname for item in receiver_infos if item.fullname}))
             resolutions: set[tuple[str, InvocationKind]] = set()
             dynamically_final = True
-            receiver_open_interface = any(
-                bool(getattr(info, "is_protocol", False))
-                or bool(getattr(info, "is_abstract", False))
-                or bool(getattr(info, "abstract_attributes", ()))
-                for info in receiver_infos
-            )
             for info in receiver_infos:
                 member = info.get(callee.name)
                 declaration = (
@@ -5423,16 +5417,7 @@ class MypyAnalyzer:
                     )
             if len(resolutions) == 1 and not incomplete:
                 resolved_symbol, invocation = next(iter(resolutions))
-                # Retain the existing external concrete-class behavior, but
-                # an open Protocol or abstract receiver cannot prove dispatch.
-                resolved_file = self._resolve_fullname_to_file(resolved_symbol)
-                if (
-                    resolved_file is None or resolved_file[1] not in self._project_modules
-                ) and not receiver_open_interface:
-                    dynamically_final = True
                 if source_exact_receiver:
-                    dynamically_final = True
-                if invocation != InvocationKind.INSTANCE_METHOD:
                     dynamically_final = True
                 if dynamically_final:
                     return (

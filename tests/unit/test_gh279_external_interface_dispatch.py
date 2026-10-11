@@ -108,3 +108,64 @@ def test_shared_external_protocol_union_is_ambiguous_in_both_orders(tmp_path: Pa
         assert site.status == CallResolutionStatus.AMBIGUOUS
         assert site.reason_code == "open_receiver_dispatch"
         assert site.canonical_symbol is None
+
+
+def test_nonfinal_external_base_with_project_override_is_ambiguous(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub="class Base:\n    def run(self) -> None: ...\n",
+        source=(
+            "from api import Base\n\n"
+            "class Child(Base):\n    def run(self) -> None: ...\n\n"
+            "def handler(value: Base) -> None:\n    value.run()\n"
+        ),
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_external_final_method_keeps_exact_dispatch(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub=(
+            "from typing import final\nclass Service:\n    @final\n    def run(self) -> None: ...\n"
+        ),
+        source="from api import Service\n\ndef handler(value: Service) -> None:\n    value.run()\n",
+    )
+    assert site.status == CallResolutionStatus.EXACT
+    assert site.canonical_symbol == "api.Service.run"
+    assert site.invocation is not None
+
+
+def test_external_classmethod_through_open_instance_is_ambiguous(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub="class Base:\n    @classmethod\n    def run(cls) -> None: ...\n",
+        source=(
+            "from api import Base\n\n"
+            "class Child(Base):\n    @classmethod\n    def run(cls) -> None: ...\n\n"
+            "def handler(value: Base) -> None:\n    value.run()\n"
+        ),
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_external_staticmethod_shadowed_by_project_subclass_is_ambiguous(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub="class Base:\n    @staticmethod\n    def run() -> None: ...\n",
+        source=(
+            "from api import Base\n\n"
+            "class Child(Base):\n    @staticmethod\n    def run() -> None: ...\n\n"
+            "def handler(value: Base) -> None:\n    value.run()\n"
+        ),
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
