@@ -565,20 +565,32 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
         "from fastapi import FastAPI\n\n"
         "app = FastAPI()\n\n"
         "@final\n"
+        "class SuppressingTransaction:\n"
+        "    def __enter__(self) -> SuppressingTransaction: return self\n"
+        "    def __exit__(self, exc_type, exc, tb) -> bool: return True\n\n"
+        "@final\n"
+        "class NonSuppressingTransaction:\n"
+        "    def __enter__(self) -> NonSuppressingTransaction: return self\n"
+        "    def __exit__(self, exc_type, exc, tb) -> bool: return False\n\n"
+        "@final\n"
         "class Session:\n"
-        "    def begin(self) -> None: pass\n"
+        "    def begin(self) -> NonSuppressingTransaction: return NonSuppressingTransaction()\n"
         "    def begin_nested(self) -> None: pass\n"
         "    def add(self, value: str) -> None: pass\n"
         "    def flush(self) -> None: pass\n"
         "    def commit(self) -> None: pass\n"
         "    def rollback(self) -> None: pass\n\n"
+        "@final\n"
+        "class SuppressingSession:\n"
+        "    def begin(self) -> SuppressingTransaction: return SuppressingTransaction()\n"
+        "    def add(self, value: str) -> None: pass\n\n"
         "class Other:\n"
         "    def flush(self) -> None: pass\n\n"
         "@final\n"
         "class AsyncSession:\n"
         "    def begin(self): return self\n"
         "    async def __aenter__(self): return self\n"
-        "    async def __aexit__(self, exc_type, exc, tb): pass\n"
+        "    async def __aexit__(self, exc_type, exc, tb): return True\n"
         "    async def add(self, value: str) -> None: pass\n\n"
         "class Holder:\n"
         "    def __init__(self) -> None:\n"
@@ -767,6 +779,29 @@ def _ordered_project(root: Path) -> tuple[Path, Path]:
                         "commit",
                         "rollback",
                     )
+                ]
+                + [
+                    {
+                        "id": "suppressing-session-begin",
+                        "symbol": "main.SuppressingSession.begin",
+                        "invocation": "instance_method",
+                        "operation": "begin",
+                        "channel": "sql",
+                        "behavior": {
+                            "timing": "context_enter",
+                            "transaction_scope": "transaction",
+                            "context_exit": "transaction_commit_rollback",
+                        },
+                    }
+                ]
+                + [
+                    {
+                        "id": "suppressing-session-add",
+                        "symbol": "main.SuppressingSession.add",
+                        "invocation": "instance_method",
+                        "operation": "stage",
+                        "channel": "sql",
+                    }
                 ]
                 + [
                     {
@@ -1063,6 +1098,118 @@ def test_ordered_paths_require_same_scope_receiver_and_straight_line(tmp_path: P
         assert "sql_transaction_path_report" in rendered or "sql ordered paths" in rendered
     for output_format in ("text", "markdown", "html"):
         assert "flushes" in get_formatter(output_format).format(configured).lower()
+
+
+def test_handled_and_suppressed_context_exceptions_remain_conditional(
+    tmp_path: Path,
+) -> None:
+    contracts, diff = _ordered_project(tmp_path)
+    source = tmp_path / "main.py"
+    source.write_text(
+        source.read_text(encoding="utf-8") + "\n@app.post('/caught-outside-context')\n"
+        "def caught_outside_context() -> None:\n"
+        "    session = Session()\n"
+        "    try:\n"
+        "        with session.begin():\n"
+        "            session.add('caught-outside')\n"
+        "            raise ValueError()\n"
+        "    except ValueError:\n"
+        "        pass\n\n"
+        "@app.post('/suppressed-sync-context')\n"
+        "def suppressed_sync_context() -> None:\n"
+        "    session = SuppressingSession()\n"
+        "    with session.begin():\n"
+        "        session.add('suppressed-sync')\n"
+        "        raise ValueError()\n\n"
+        "@app.post('/suppressed-async-context')\n"
+        "async def suppressed_async_context() -> None:\n"
+        "    session = AsyncSession()\n"
+        "    async with session.begin():\n"
+        "        await session.add('suppressed-async')\n"
+        "        raise ValueError()\n\n"
+        "@app.post('/handled-before-downstream-commit')\n"
+        "def handled_before_downstream_commit() -> None:\n"
+        "    session = Session()\n"
+        "    session.add('handled-before-commit')\n"
+        "    try:\n"
+        "        raise ValueError()\n"
+        "    except ValueError:\n"
+        "        pass\n"
+        "    session.commit()\n",
+        encoding="utf-8",
+    )
+
+    baseline = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(analysis=AnalysisConfig(effect_contracts=contracts)),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+    configured = ChangeMapper(
+        app_path=tmp_path,
+        config=Config(
+            analysis=AnalysisConfig(
+                effect_contracts=contracts,
+                sql_transaction_diagnostics=True,
+                sql_transaction_ordered_paths=True,
+            )
+        ),
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    paths = configured.sql_transaction_path_report
+    assert paths is not None
+    by_function = {item.function_name: item for item in paths.context_paths}
+    for name, exit_label in (
+        ("caught_outside_context", "commit_reachable"),
+        ("suppressed_sync_context", "commit_reachable"),
+        ("suppressed_async_context", "commit_reachable"),
+    ):
+        path = by_function[name]
+        assert path.normal_exit == exit_label
+        assert path.exceptional_exit == "rollback_reachable"
+        assert path.status == "conditional_on_context_exit"
+        assert path.persistence_status == "not_established"
+
+    handled_endpoint = next(
+        endpoint
+        for occurrence in configured.effect_contract_audit.occurrences
+        for endpoint in occurrence.endpoints
+        if endpoint.path == "/handled-before-downstream-commit"
+    )
+    handled_calls = [
+        occurrence
+        for occurrence in configured.effect_contract_audit.occurrences
+        if handled_endpoint.id in {endpoint.id for endpoint in occurrence.endpoints}
+        and occurrence.audit_status.value == "matched"
+    ]
+    handled_stage = next(item for item in handled_calls if item.source_spelling == "session.add")
+    handled_commit = next(
+        item for item in handled_calls if item.source_spelling == "session.commit"
+    )
+    assert handled_stage.contract_id == "add"
+    assert handled_commit.contract_id == "commit"
+    handled = [
+        item
+        for item in paths.ordered_paths
+        if item.function_name == "handled_before_downstream_commit"
+    ]
+    assert handled == []
+    assert any(
+        item.reason_code == "control_flow_unavailable"
+        and item.endpoint_id == handled_endpoint.id
+        and item.stage_occurrence_id == handled_stage.id
+        and item.boundary_occurrence_id == handled_commit.id
+        for item in paths.diagnostics
+    )
+    assert all(
+        item.persistence_status == "not_established"
+        for item in paths.ordered_paths + paths.context_paths
+    )
+    assert _candidate_projection(configured) == _candidate_projection(baseline)
+    assert configured.affected_endpoints == baseline.affected_endpoints
+    assert "durable_write" not in json.dumps(configured.model_dump(mode="json"))
 
 
 def test_savepoint_boundary_target_requires_exact_returned_transaction_binding(
