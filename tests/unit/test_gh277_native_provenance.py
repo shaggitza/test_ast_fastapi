@@ -200,6 +200,291 @@ def test_native_dependency_helper_diff_reaches_only_public_descendant_routes(
         assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
 
 
+@pytest.mark.parametrize("change", ["base", "inherited_helper"])
+def test_callable_instance_dependency_change_reaches_only_its_route(
+    tmp_path: Path, change: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import Depends, FastAPI\n"
+        "def v1_helper(): return 1\n"
+        "def v2_helper(): return 2\n"
+        "class V1:\n"
+        "    def __call__(self): return v1_helper()\n"
+        "class V2:\n"
+        "    def __call__(self): return v2_helper()\n"
+        "class Provider(V1): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(v1_helper)): return value\n"
+    )
+    if change == "base":
+        old_line = "class Provider(V1): pass"
+        new_line = "class Provider(V2): pass"
+    else:
+        old_line = "def v1_helper(): return 1"
+        new_line = "def v1_helper(): return 10"
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        f"--- a/main.py\n+++ b/main.py\n@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    expected = {"GET /items"}
+    if change == "inherited_helper":
+        expected.add("GET /unrelated")
+    candidates = {item.endpoint.identifier: item for item in report.candidate_endpoints}
+    assert set(candidates) == expected
+    for candidate in candidates.values():
+        assert candidate.endpoint.native_provenance is not None
+        assert candidate.endpoint.native_provenance.side == SnapshotSide.TARGET
+
+
+def test_callable_instance_ancestor_base_change_reaches_only_dependent_route(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from decoy import Parent as DecoyParent\n"
+        "from fastapi import Depends, FastAPI\n"
+        "def v1_helper(): return 1\n"
+        "def v2_helper(): return 2\n"
+        "class V1:\n"
+        "    def __call__(self): return v1_helper()\n"
+        "class V2:\n"
+        "    def __call__(self): return v2_helper()\n"
+        "class Parent(V1): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(v1_helper)): return value\n"
+    )
+    old_line, new_line = "class Parent(V1): pass", "class Parent(V2): pass"
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+        (root / "decoy.py").write_text(
+            "class V1: pass\nclass Parent(V1): pass\nclass Provider(Parent): pass\n",
+            encoding="utf-8",
+        )
+
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    assert changed_line == 9
+    assert before.splitlines()[changed_line - 1] == old_line
+    assert after.splitlines()[changed_line - 1] == new_line
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n+++ b/main.py\n"
+        f"@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+
+    target_main = target / "main.py"
+    report = ChangeMapper(
+        target_main,
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    candidates = {item.endpoint.identifier for item in report.candidate_endpoints}
+    affected = {item.endpoint.identifier for item in report.affected_endpoints}
+    assert candidates == {"GET /items"}
+    assert affected == {"GET /items"}
+    endpoint = next(
+        item
+        for item in ChangeMapper(target_main, secure_ast=True, use_cache=False).inventory.endpoints
+        if item.identifier == "GET /items"
+    )
+    owners = native_route_structural_owners(endpoint, target_main, {changed_line})
+    assert [(owner.qualified_binding, owner.owner_kind) for owner in owners] == [
+        ("main.Parent", "class_base")
+    ]
+    assert native_route_structural_owners(endpoint, target / "decoy.py", {2}) == ()
+
+
+@pytest.mark.parametrize(
+    ("old_line", "new_line"),
+    [
+        ("        return helper()", "        return 1"),
+        ("        return helper()", "        return unrelated_helper()"),
+    ],
+)
+def test_callable_instance_inherited_call_body_change_reaches_only_dependent_route(
+    tmp_path: Path, old_line: str, new_line: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import Depends, FastAPI\n"
+        "def helper(): return 1\n"
+        "def unrelated_helper(): return 2\n"
+        "class V1:\n"
+        "    def __call__(self):\n"
+        "        return helper()\n"
+        "class Parent(V1): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(unrelated_helper)): return value\n"
+    )
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+        (root / "decoy.py").write_text(
+            "def helper(): return 1\n"
+            "class V1:\n    def __call__(self): return helper()\n"
+            "class Provider(V1): pass\n",
+            encoding="utf-8",
+        )
+
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    assert before.splitlines()[changed_line - 1] == old_line
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n+++ b/main.py\n"
+        f"@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == {"GET /items"}
+    assert {item.endpoint.identifier for item in report.affected_endpoints} == {"GET /items"}
+
+
+@pytest.mark.parametrize(
+    ("old_line", "new_line"),
+    [
+        ("            dead_helper()", "            unrelated_helper()"),
+        ("        unused = lambda: dead_helper()", "        unused = lambda: unrelated_helper()"),
+        ("            return dead_helper()", "            return unrelated_helper()"),
+    ],
+)
+def test_callable_instance_unexecuted_inherited_body_edits_stay_unaffected(
+    tmp_path: Path, old_line: str, new_line: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import Depends, FastAPI\n"
+        "def helper(): return 1\n"
+        "def unrelated_helper(): return 2\n"
+        "def dead_helper(): return 3\n"
+        "class V1:\n"
+        "    def __call__(self):\n"
+        "        unused = lambda: dead_helper()\n"
+        "        def nested():\n"
+        "            return dead_helper()\n"
+        "        if False:\n"
+        "            dead_helper()\n"
+        "        return helper()\n"
+        "class Parent(V1): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(unrelated_helper)): return value\n"
+    )
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+        (root / "decoy.py").write_text(
+            "def dead_helper(): return 3\n"
+            "class V1:\n    def __call__(self): return dead_helper()\n"
+            "class Provider(V1): pass\n",
+            encoding="utf-8",
+        )
+
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    assert before.splitlines()[changed_line - 1] == old_line
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n+++ b/main.py\n"
+        f"@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert report.candidate_endpoints == []
+    assert report.affected_endpoints == []
+
+
+def test_callable_instance_with_unsupported_ancestor_chain_stays_conditional(
+    tmp_path: Path,
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "class V1:\n"
+        "    def __call__(self): return 1\n"
+        "class Extra: pass\n"
+        "class Parent(V1, Extra): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    dependency = provenance.registration.dependency_expressions[0]
+    assert dependency.confidence == "conditional"
+    assert dependency.callable_expressions == ()
+    assert not any(owner.owner_kind == "class_base" for owner in provenance.source_owners)
+
+
 @pytest.mark.parametrize(
     ("helper", "expected"),
     [
@@ -392,6 +677,35 @@ def test_dynamic_dependency_expression_is_retained_as_conditional(
     assert dependency.kind == "ambiguous"
     assert dependency.confidence == "conditional"
     assert native_route_structural_owners(endpoint, app_file, {1}) == ()
+
+
+@pytest.mark.parametrize(
+    "provider_setup",
+    [
+        "provider = make_provider()\n",
+        "provider = Provider()\nif FLAG: provider = make_provider()\n",
+    ],
+)
+def test_callable_instance_dependency_keeps_dynamic_or_conditional_binding_low(
+    tmp_path: Path, provider_setup: str
+) -> None:
+    app_file = tmp_path / "main.py"
+    app_file.write_text(
+        "from fastapi import Depends, FastAPI\n"
+        "class Provider:\n"
+        "    def __call__(self): return 1\n"
+        + provider_setup
+        + "app = FastAPI()\n"
+        + "@app.get('/items')\n"
+        + "def items(value=Depends(provider)): return value\n",
+        encoding="utf-8",
+    )
+    endpoint = SecureASTExtractor(app_file).extract_endpoints()[0]
+    provenance = endpoint.native_provenance
+    assert provenance is not None
+    dependency = provenance.registration.dependency_expressions[0]
+    assert dependency.confidence == "conditional"
+    assert dependency.callable_expressions == ()
 
 
 def test_dependency_binding_alias_keyword_and_shadowing_are_conservative(tmp_path: Path) -> None:
