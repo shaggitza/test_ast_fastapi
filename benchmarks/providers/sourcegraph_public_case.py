@@ -44,9 +44,11 @@ def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
         raise PublicCaseProtocolError("unsupported protocol version")
     if value["case"] != FROZEN_CASE_PROFILE:
         raise PublicCaseProtocolError("case identity differs from frozen profile")
-    if value["operation"] not in _OPERATIONS:
+    operation = value["operation"]
+    if not isinstance(operation, str) or operation not in _OPERATIONS:
         raise PublicCaseProtocolError("unsupported provider operation")
-    if value["status"] not in _STATUSES:
+    result_status = value["status"]
+    if not isinstance(result_status, str) or result_status not in _STATUSES:
         raise PublicCaseProtocolError("unsupported result status")
     if not isinstance(value["request"], str) or not value["request"]:
         raise PublicCaseProtocolError("exact request is required")
@@ -67,6 +69,9 @@ def validate_result(value: object) -> dict[str, Any]:  # noqa: PLR0912
     elapsed = transport["elapsed_seconds"]
     size = transport["response_bytes"]
     redirects = transport["redirects"]
+    http_status = transport["http_status"]
+    if http_status is not None and (type(http_status) is not int or not 100 <= http_status <= 599):
+        raise PublicCaseProtocolError("transport limits are violated")
     if (
         isinstance(elapsed, bool)
         or not isinstance(elapsed, (int, float))

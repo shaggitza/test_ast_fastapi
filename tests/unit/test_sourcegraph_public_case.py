@@ -4,6 +4,7 @@ import ast
 import json
 from pathlib import Path
 
+import benchmarks.providers.sourcegraph_public_case as protocol
 import pytest
 from benchmarks.providers.sourcegraph_public_case import (
     FROZEN_CASE_PROFILE,
@@ -42,6 +43,13 @@ def test_anonymous_auth_error_stays_unavailable_not_zero_hits() -> None:
     assert validated["status"] == "unavailable"
     assert validated["provider_evidence"] is None
     assert validated["error"] == "not_authenticated"
+
+
+def test_protocol_module_is_loaded_from_this_candidate_checkout() -> None:
+    expected = (
+        Path(__file__).resolve().parents[2] / "benchmarks/providers/sourcegraph_public_case.py"
+    )
+    assert Path(protocol.__file__).resolve() == expected
 
 
 def test_recorded_public_case_artifact_matches_protocol() -> None:
@@ -91,6 +99,31 @@ def test_protocol_rejects_case_drift_and_budget_overrun() -> None:
     assert isinstance(transport, dict)
     with pytest.raises(PublicCaseProtocolError, match="transport limits"):
         validate_result(result(transport={**transport, "response_bytes": 2_097_153}))
+
+
+@pytest.mark.parametrize("field", ["operation", "status"])
+@pytest.mark.parametrize("invalid", [["available"], {"value": "available"}])
+def test_protocol_rejects_non_string_membership_values(field: str, invalid: object) -> None:
+    with pytest.raises(PublicCaseProtocolError):
+        validate_result(result(**{field: invalid}))
+
+
+@pytest.mark.parametrize(
+    "http_status",
+    [[200], {"value": 200}, "200", True, 99, 600],
+)
+def test_protocol_rejects_invalid_http_status(http_status: object) -> None:
+    transport = result()["transport"]
+    assert isinstance(transport, dict)
+    with pytest.raises(PublicCaseProtocolError, match="transport limits"):
+        validate_result(result(transport={**transport, "http_status": http_status}))
+
+
+@pytest.mark.parametrize("http_status", [None, 100, 200, 599])
+def test_protocol_accepts_schema_valid_http_status(http_status: object) -> None:
+    transport = result()["transport"]
+    assert isinstance(transport, dict)
+    validate_result(result(transport={**transport, "http_status": http_status}))
 
 
 def test_result_protocol_has_no_network_or_provider_imports() -> None:
