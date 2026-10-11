@@ -78,6 +78,7 @@ def _write_raw_graph(path: Path) -> None:
         "hyperedges": [],
         "nodes": [
             {
+                "_origin": "ast",
                 "id": "endpoint",
                 "label": "endpoint",
                 "file_type": "code",
@@ -85,6 +86,7 @@ def _write_raw_graph(path: Path) -> None:
                 "source_location": "L1",
             },
             {
+                "_origin": "ast",
                 "id": "db_provider",
                 "label": "db_provider",
                 "file_type": "code",
@@ -92,6 +94,7 @@ def _write_raw_graph(path: Path) -> None:
                 "source_location": "L1",
             },
             {
+                "_origin": "ast",
                 "id": "changed_helper",
                 "label": "changed_helper",
                 "file_type": "code",
@@ -101,6 +104,7 @@ def _write_raw_graph(path: Path) -> None:
         ],
         "edges": [
             {
+                "_origin": "ast",
                 "source": "db_provider",
                 "target": "changed_helper",
                 "relation": "calls",

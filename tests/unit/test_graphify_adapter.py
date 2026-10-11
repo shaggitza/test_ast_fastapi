@@ -181,12 +181,15 @@ def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_
     )
     assert snapshot.graph_schema_version == 2
     assert snapshot.graph_sha256 == hashlib.sha256(RAW_FIXTURE.read_bytes()).hexdigest()
-    assert snapshot.directed is True
+    assert snapshot.directed is False
     assert snapshot.multigraph is False
     assert snapshot.edges[0].orientation == "caller-to-callee"
+    assert snapshot.nodes[0].producer_origin == "ast"
+    assert snapshot.edges[0].producer_origin == "ast"
     assert snapshot.edges[1].orientation == "importer-to-imported"
     assert snapshot.edges[2].orientation == "subclass-to-base"
-    assert snapshot.edges[3].orientation == "referencer-to-referenced"
+    assert snapshot.edges[3].orientation == "unknown"
+    assert snapshot.edges[3].traversable is False
     assert [edge.extractor_strength for edge in snapshot.edges] == [
         "EXTRACTED",
         "INFERRED",
@@ -196,6 +199,185 @@ def test_loads_explicit_raw_schema_without_promoting_line_markers_to_ranges(tmp_
     assert snapshot.edges[0].span == GraphifySourceSpan(
         Path("app.py"), 4, 4, hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
     )
+
+
+def test_source_grounded_synthetic_raw_records_allow_unknown_edge_lines(tmp_path: Path) -> None:
+    """Represent pinned constructors; this is synthetic, not a producer run."""
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    # Pinned extract.py's import/reference constructors omit source_location.
+    payload["edges"][1]["relation"] = "imports"
+    payload["edges"][1].pop("source_location")
+    payload["edges"][3].pop("source_location")
+    graph = tmp_path / "source-grounded-synthetic-raw.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    import_edge, reference_edge = snapshot.edges[1], snapshot.edges[3]
+    assert import_edge.producer_origin == "ast"
+    assert import_edge.orientation == "importer-to-imported"
+    assert import_edge.span is None
+    assert import_edge.traversable is False
+    assert reference_edge.producer_origin == "ast"
+    assert reference_edge.orientation == "unknown"
+    assert reference_edge.span is None
+    assert reference_edge.traversable is False
+
+
+@pytest.mark.parametrize("marker", ["missing", None])
+def test_raw_null_or_missing_node_marker_keeps_checked_source_without_span(
+    tmp_path: Path, marker: str | None
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    node = payload["nodes"][1]
+    if marker == "missing":
+        node.pop("source_location")
+    else:
+        node["source_location"] = None
+    graph = tmp_path / "raw-node-no-marker.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    retained = snapshot.nodes[1]
+    assert retained.source_file == Path("app.py")
+    assert retained.source_sha256 == hashlib.sha256((project / "app.py").read_bytes()).hexdigest()
+    assert retained.span is None
+
+
+@pytest.mark.parametrize("collection", ["nodes", "links"])
+def test_node_link_v1_rejects_raw_origin_marker(tmp_path: Path, collection: str) -> None:
+    project = _project(tmp_path)
+    payload = _payload()
+    record = payload[collection][0]
+    record["_origin"] = "ast"
+    graph = tmp_path / "v1-raw-origin.json"
+    _write_payload(graph, payload)
+    with pytest.raises(GraphifyAdapterError, match="_origin"):
+        load_graphify_snapshot(graph, project_root=project, side="target")
+
+
+@pytest.mark.parametrize(
+    ("specifier", "module_id"),
+    [
+        ("requests", "requests"),
+        ("@scope/package", "package"),
+        ("pydantic-settings", "pydantic_settings"),
+    ],
+)
+def test_source_grounded_external_import_stub_is_opaque_and_nontraversable(
+    tmp_path: Path, specifier: str, module_id: str
+) -> None:
+    """Mirror the pinned bare/scoped import constructor, without producer execution."""
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    payload["nodes"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "file_type": "code",
+            "id": module_id,
+            "label": specifier,
+            "source_file": specifier,
+        }
+    )
+    payload["edges"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "relation": "imports",
+            "source": "app_module",
+            "source_file": "app.py",
+            "target": module_id,
+        }
+    )
+    graph = tmp_path / "external-import-stub.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+    stub = next(node for node in snapshot.nodes if node.node_id == module_id)
+    edge = snapshot.edges[-1]
+    assert stub.source_file is None
+    assert stub.source_sha256 is None
+    assert stub.span is None
+    assert stub.unverified_source_file == specifier
+    assert edge.span is None
+    assert edge.traversable is False
+
+
+@pytest.mark.parametrize(
+    ("specifier", "node_id"),
+    [("../outside.py", "outside.py"), ("/tmp/evil.py", "evil.py"), ("requests", "other")],
+)
+def test_external_stub_exception_does_not_cover_bad_or_unmatched_paths(
+    tmp_path: Path, specifier: str, node_id: str
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    payload["nodes"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "file_type": "code",
+            "id": node_id,
+            "label": specifier,
+            "source_file": specifier,
+        }
+    )
+    payload["edges"].append(
+        {
+            "_origin": "ast",
+            "confidence": "EXTRACTED",
+            "relation": "imports",
+            "source": "app_module",
+            "source_file": "app.py",
+            "target": node_id,
+        }
+    )
+    graph = tmp_path / "not-an-external-stub.json"
+    _write_payload(graph, payload)
+    with pytest.raises(GraphifyAdapterError):
+        load_graphify_snapshot(
+            graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda value: value["nodes"][0].pop("_origin"), "_origin"),
+        (lambda value: value["edges"][0].update({"_origin": "semantic"}), "_origin"),
+        (lambda value: value["edges"][0].update({"source_location": "L3-L4"}), "line-only"),
+        (lambda value: value["edges"][0].update({"confidence": "HIGH"}), "confidence"),
+        (lambda value: value["edges"][0].pop("source_file"), "source_file"),
+    ],
+    ids=[
+        "missing-origin",
+        "wrong-origin",
+        "range-is-not-a-line",
+        "quality-is-not-strength",
+        "missing-source-path",
+    ],
+)
+def test_source_grounded_raw_schema_malformed_records_fail_closed(
+    tmp_path: Path, mutate: Any, message: str
+) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    mutate(payload)
+    graph = tmp_path / "malformed-source-grounded-raw.json"
+    _write_payload(graph, payload)
+
+    with pytest.raises(GraphifyAdapterError, match=message):
+        load_graphify_snapshot(
+            graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+        )
 
 
 def test_raw_context_only_edge_occurrences_have_stable_distinct_identities(
@@ -223,6 +405,40 @@ def test_raw_context_only_edge_occurrences_have_stable_distinct_identities(
     assert [edge.edge_key for edge in snapshot.edges] == [None, None]
 
 
+def test_raw_schema_retains_unknown_direction_and_duplicate_physical_edges(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    unknown = dict(payload["edges"][0], relation="contains", confidence="EXTRACTED")
+    payload["edges"] = [unknown, dict(unknown)]
+    graph = tmp_path / "raw-unknown-duplicates.json"
+    _write_payload(graph, payload)
+
+    snapshot = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    )
+
+    assert len(snapshot.edges) == 2
+    assert snapshot.edges[0] == snapshot.edges[1]
+    assert snapshot.edges[0].orientation == "unknown"
+    assert snapshot.edges[0].extractor_strength == "EXTRACTED"
+    assert snapshot.edges[0].traversable is False
+
+
+def test_raw_references_are_retained_without_direction_promotion(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    payload = json.loads(RAW_FIXTURE.read_text(encoding="utf-8"))
+    payload["edges"] = [dict(payload["edges"][0], relation="references")]
+    graph = tmp_path / "raw-reference.json"
+    _write_payload(graph, payload)
+
+    edge = load_graphify_snapshot(
+        graph, project_root=project, side="target", schema=GRAPHIFY_RAW_SCHEMA
+    ).edges[0]
+    assert edge.relation == "references"
+    assert edge.orientation == "unknown"
+    assert edge.traversable is False
+
+
 def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
     tmp_path: Path,
 ) -> None:
@@ -244,10 +460,6 @@ def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
         (lambda value: value["edges"][0].update({"context": ["invalid"]}), "context"),
         (lambda value: value["edges"][0].update({"source_file": "../app.py"}), "confined"),
         (lambda value: value["edges"][0].update({"target": "not-present"}), "unknown node"),
-        (
-            lambda value: value["edges"].append(dict(value["edges"][0])),
-            "identical raw edge occurrence",
-        ),
     ],
     ids=[
         "negative-token-counter",
@@ -258,7 +470,6 @@ def test_raw_schema_requires_explicit_version_and_rejects_unknown_selectors(
         "malformed-context",
         "path-traversal",
         "missing-target",
-        "duplicate-edge",
     ],
 )
 def test_raw_schema_negative_controls(tmp_path: Path, mutate: Any, message: str) -> None:

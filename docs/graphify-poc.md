@@ -27,6 +27,12 @@ The expected producer metadata is pinned as:
 | exact version output | `graphify 0.9.30` |
 | adapter schema | `1` |
 
+An additive offline selector, `graphify-raw-0.9.30-v1` (normalized schema
+version `2`), accepts the pinned raw `--no-cluster` document. It does not alter
+the v1 contract above or establish directedness. Its deliberately restricted
+direction and provenance rules are documented in
+[`graphify-0.9.30-raw-schema.md`](graphify-0.9.30-raw-schema.md).
+
 These are **expected provenance metadata**, not proof that an imported file was
 created by that executable. The future sandbox gate must attest the installed
 artifact and invocation before passing its output to this importer. The adapter
@@ -99,7 +105,9 @@ project, source, and receipt path failures are normalized to
 ## Current decision and remaining gates
 
 **Decision: BUILD the offline adapter foundation; do not ADOPT or invoke the
-backend. Keep #110 open.**
+backend. Keep #110 open.** The raw schema selector is a format-compatibility
+addition only; the trusted execution, calibration, and corpus gates remain
+open.
 
 Before an ADOPT or HYBRID decision, later work must still:
 
