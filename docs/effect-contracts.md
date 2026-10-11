@@ -164,13 +164,34 @@ method names are intentionally absent.
 
 Each family has an independent identity and semantic hash. Filesystem receiver
 origins, exact HTTP verb tables, and composite typed-S3 `(Bucket, Key)` identities
-are version `2.0.0`; MongoDB and Redis remain `1.0.0`. HTTP contracts preserve
+were version `2.0.0`; the reviewed additions advance filesystem and typed S3 to
+`3.0.0` and MongoDB to `1.3.0`. HTTP remains `2.0.0` pending approval of the
+module-mutation guard. Redis remains `1.0.0`.
+HTTP contracts preserve
 `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS` as structured
 contract semantics while finite URLs remain hashed resource evidence. Typed S3
-contracts fail closed unless both bucket and key are finite. The v1 changelog and
-known exclusions are frozen in `benchmarks/results/effect-presets-v1/README.md`.
+object get, head, put, and delete rows require both finite bucket and key values;
+bucket-level list/create/delete rows identify the bucket. Copy-object records
+`CopySource` as value evidence while identifying the destination by bucket and
+key; the source resource is not separately modeled. The v1 changelog and known
+exclusions are frozen in `benchmarks/results/effect-presets-v1/README.md`.
 Multiple presets are not silently merged because the current provenance model has
 one authoritative contract source per analysis.
+
+The reviewed follow-up adds four filesystem declarations, five Motor
+declarations, and five typed-S3 declarations. The seven candidate module-level
+HTTPX declarations have source AST and selector checks in the unit suite, but
+remain out of the bundled preset pending independent approval of the mutation
+guard.
+Motor and typed-S3 rows retain their resolver-derived package versions and source
+hash metadata. Their source evidence identifies the reviewed declaration owner,
+signature, and selector; it does not establish canonical runtime behavior or
+support outside those exact declarations. Static exact-symbol resolution does
+not detect runtime module rebinding or mutation. Requests module-level helpers
+remain unsupported pending resolver coverage for that behavior. Redis and typed
+SQS remain in the bundled presets. Issue #97 remains open for broader
+compatibility ranges, Requests module helpers, Kafka, framework movement, and
+real-world evaluation.
 
 ## Configuration
 
