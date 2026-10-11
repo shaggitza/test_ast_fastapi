@@ -1,0 +1,28 @@
+{
+  "protocol_version": 1,
+  "case": {
+    "profile": "gh20-sourcegraph-public-case-r3-v1",
+    "source_lock": "benchmarks/real_world/corpus.json",
+    "source_lock_git_blob": "c34f08548ab7e70c805dac5e3373c16a427ad32b",
+    "source_lock_sha256": "7c4ecfd562d2e01079a955e8214afd4e9e1a408f73ed392d4606eecbc649f062",
+    "source_record": "open-webui/open-webui#26924",
+    "repository": "open-webui/open-webui",
+    "revision": "0f8846b7fc8c210945366defbd1ed941b039a691",
+    "path": "backend/open_webui/utils/security_headers.py",
+    "symbol": "SecurityHeadersMiddleware"
+  },
+  "operation": "index_revision_status",
+  "status": "unavailable",
+  "transport": {
+    "http_status": 200,
+    "elapsed_seconds": 0.322068,
+    "response_bytes": 112,
+    "truncated": false,
+    "redirects": 0
+  },
+  "endpoint": "https://sourcegraph.com/.api/graphql",
+  "request": "{\"query\":\"query { repository(name: \\\"github.com/open-webui/open-webui\\\") { name commit(rev: \\\"0f8846b7fc8c210945366defbd1ed941b039a691\\\") { oid } codeIntelSummary { __typename } } }\"}",
+  "response_raw": "{\"errors\":[{\"message\":\"not authenticated\",\"path\":[\"repository\",\"codeIntelSummary\"]}],\"data\":{\"repository\":null}}",
+  "error": "not_authenticated",
+  "provider_evidence": null
+}
