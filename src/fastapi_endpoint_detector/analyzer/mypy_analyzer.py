@@ -548,6 +548,7 @@ class _PartialCallable:
     args: tuple[Any, ...]
     arg_kinds: tuple[Any, ...]
     arg_names: tuple[str | None, ...]
+    placeholder_positions: tuple[int, ...] = ()
     # Callable actuals are captured when functools.partial is constructed.  The
     # AST expressions above are retained for Python's positional/keyword merge,
     # but must never be re-evaluated in the later invocation environment.
@@ -555,6 +556,18 @@ class _PartialCallable:
         tuple[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]], ...
     ] = ()
     bound_strings: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+@dataclass(frozen=True)
+class _PartialMerge:
+    """One bounded effective partial invocation, including filled hole slots."""
+
+    args: tuple[Any, ...] = ()
+    arg_kinds: tuple[Any, ...] = ()
+    arg_names: tuple[str | None, ...] = ()
+    fixed_positional_slots: tuple[int, ...] = ()
+    invocation_positional_slots: tuple[int, ...] = ()
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -586,7 +599,7 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v6-zero-trip-context-nested-loop-exits"
+        "conditional-elif-try-else-guaranteed-finally-v7-partial-holes-exposure-identities"
     )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
@@ -602,7 +615,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 7
+    EXECUTION_SUMMARY_VERSION = 8
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -3986,6 +3999,8 @@ class MypyAnalyzer:
             imported = self._explicit_import_fullname(expression, import_map)
             raw_fullname = imported or getattr(expression, "fullname", "")
             global_fullname = raw_fullname if isinstance(raw_fullname, str) else ""
+            if imported == "functools.Placeholder":
+                return _FinitePointsTo(("functools.Placeholder",))
             return (
                 self._finite_global_value(global_fullname, budget)
                 if "." in global_fullname
@@ -3993,6 +4008,8 @@ class MypyAnalyzer:
             )
         if isinstance(expression, MemberExpr):
             imported = self._explicit_import_fullname(expression, import_map)
+            if imported == "functools.Placeholder":
+                return _FinitePointsTo(("functools.Placeholder",))
             if imported is not None:
                 global_value = self._finite_global_value(imported, budget)
                 if global_value is not None:
@@ -5314,6 +5331,236 @@ class MypyAnalyzer:
                 arguments=self._call_argument_evidence(call),
             )
 
+    @staticmethod
+    def _merge_partial_invocation(
+        stored_args: tuple[Any, ...],
+        stored_kinds: tuple[Any, ...],
+        stored_names: tuple[str | None, ...],
+        placeholder_positions: tuple[int, ...],
+        invocation_args: tuple[Any, ...],
+        invocation_kinds: tuple[Any, ...],
+        invocation_names: tuple[str | None, ...],
+        positional_formal_names: tuple[str, ...],
+    ) -> _PartialMerge:
+        """Fill source-proven positional holes before appending new actuals."""
+        from mypy.nodes import ARG_NAMED, ARG_POS, ARG_STAR, ARG_STAR2
+
+        if not (
+            len(stored_args) == len(stored_kinds) == len(stored_names)
+            and len(invocation_args) == len(invocation_kinds) == len(invocation_names)
+        ):
+            return _PartialMerge(reason="PARTIAL_ARGUMENT_SHAPE_MISMATCH")
+        if len(stored_args) + len(invocation_args) > 256:
+            return _PartialMerge(reason="MAX_PARTIAL_ARGUMENTS")
+        if any(kind in (ARG_STAR, ARG_STAR2) for kind in (*stored_kinds, *invocation_kinds)):
+            return _PartialMerge(reason="UNRESOLVED_PARTIAL_STAR_ARGUMENTS")
+
+        stored_positional: list[tuple[Any, Any, str | None]] = []
+        stored_keywords: list[tuple[Any, Any, str | None]] = []
+        invocation_positional: list[tuple[Any, Any, str | None]] = []
+        invocation_keywords: list[tuple[Any, Any, str | None]] = []
+        for args, kinds, names, positional, keywords in (
+            (stored_args, stored_kinds, stored_names, stored_positional, stored_keywords),
+            (
+                invocation_args,
+                invocation_kinds,
+                invocation_names,
+                invocation_positional,
+                invocation_keywords,
+            ),
+        ):
+            for arg, kind, name in zip(args, kinds, names, strict=True):
+                if kind == ARG_POS and name is None:
+                    positional.append((arg, kind, name))
+                elif kind == ARG_NAMED and name is not None:
+                    keywords.append((arg, kind, name))
+                else:
+                    return _PartialMerge(reason="UNSUPPORTED_PARTIAL_ARGUMENT_KIND")
+
+        holes = placeholder_positions
+        if tuple(sorted(set(holes))) != holes or any(
+            position < 0 or position >= len(stored_positional) for position in holes
+        ):
+            return _PartialMerge(reason="INVALID_PARTIAL_PLACEHOLDER_MAP")
+        if len(invocation_positional) < len(holes):
+            return _PartialMerge(reason="UNFILLED_PARTIAL_PLACEHOLDERS")
+
+        hole_set = set(holes)
+        filled_positional: list[tuple[Any, Any, str | None]] = []
+        fixed_slots: list[int] = []
+        invocation_slots: list[int] = []
+        next_actual = 0
+        for slot, stored in enumerate(stored_positional):
+            if slot in hole_set:
+                filled_positional.append(invocation_positional[next_actual])
+                invocation_slots.append(slot)
+                next_actual += 1
+            else:
+                filled_positional.append(stored)
+                fixed_slots.append(slot)
+        for extra_index, actual in enumerate(invocation_positional[next_actual:]):
+            filled_positional.append(actual)
+            invocation_slots.append(len(stored_positional) + extra_index)
+
+        overridden = {name for _arg, _kind, name in invocation_keywords}
+        effective_keywords = [item for item in stored_keywords if item[2] not in overridden]
+        effective_keywords.extend(invocation_keywords)
+        keyword_names = {name for _arg, _kind, name in effective_keywords}
+        if len(keyword_names) != len(effective_keywords):
+            return _PartialMerge(reason="INVALID_PARTIAL_ARGUMENTS")
+        if len(filled_positional) > len(positional_formal_names):
+            return _PartialMerge(reason="UNSUPPORTED_PARTIAL_SIGNATURE")
+        if any(
+            positional_formal_names[slot] in keyword_names
+            for slot in (*fixed_slots, *invocation_slots)
+        ):
+            return _PartialMerge(reason="INVALID_PARTIAL_ARGUMENTS")
+
+        merged = [*filled_positional, *effective_keywords]
+        return _PartialMerge(
+            args=tuple(item[0] for item in merged),
+            arg_kinds=tuple(item[1] for item in merged),
+            arg_names=tuple(item[2] for item in merged),
+            fixed_positional_slots=tuple(fixed_slots),
+            invocation_positional_slots=tuple(invocation_slots),
+        )
+
+    def _partial_placeholder_state(
+        self,
+        expression: Any,
+        environment: dict[str, _FinitePointsTo],
+        import_map: dict[str, str],
+        budget: list[int],
+    ) -> bool | None:
+        """Distinguish the source singleton from proven concrete stored values."""
+        from mypy.nodes import (
+            BytesExpr,
+            ComplexExpr,
+            DictExpr,
+            EllipsisExpr,
+            FloatExpr,
+            IntExpr,
+            ListExpr,
+            NameExpr,
+            SetExpr,
+            StrExpr,
+            TupleExpr,
+        )
+        from mypy.types import Instance, get_proper_type
+
+        value = self._finite_expression_value(expression, environment, import_map, (), budget)
+        if value is not None:
+            if value.types == ("functools.Placeholder",):
+                return True
+            if "functools.Placeholder" in value.types:
+                return None
+            return False
+        if isinstance(
+            expression,
+            (
+                BytesExpr,
+                ComplexExpr,
+                DictExpr,
+                EllipsisExpr,
+                FloatExpr,
+                IntExpr,
+                ListExpr,
+                SetExpr,
+                StrExpr,
+                TupleExpr,
+            ),
+        ):
+            return False
+        if isinstance(expression, NameExpr) and expression.name in {"None", "True", "False"}:
+            return False
+        if self._callable_declaration(getattr(expression, "node", None)) is not None:
+            return False
+        proper = get_proper_type(self._get_type_from_node(expression))
+        if isinstance(proper, Instance) and proper.type.fullname in {
+            "builtins.bool",
+            "builtins.bytes",
+            "builtins.complex",
+            "builtins.dict",
+            "builtins.float",
+            "builtins.frozenset",
+            "builtins.int",
+            "builtins.list",
+            "builtins.set",
+            "builtins.str",
+            "builtins.tuple",
+        }:
+            return False
+        return None
+
+    @staticmethod
+    def _exposed_partial_names(root: Any, *, max_nodes: int = 4096) -> tuple[set[str], bool]:
+        """Collect local roots exposed through bounded argument expressions."""
+        from itertools import chain
+
+        from mypy.nodes import (
+            BytesExpr,
+            CallExpr,
+            ComplexExpr,
+            ConditionalExpr,
+            DictExpr,
+            EllipsisExpr,
+            FloatExpr,
+            IndexExpr,
+            IntExpr,
+            ListExpr,
+            MemberExpr,
+            NameExpr,
+            SetExpr,
+            StarExpr,
+            StrExpr,
+            TupleExpr,
+        )
+
+        if max_nodes < 1:
+            return set(), False
+        names: set[str] = set()
+        seen: set[int] = set()
+        pending = [root]
+        while pending:
+            item = pending.pop()
+            if item is None or id(item) in seen:
+                continue
+            seen.add(id(item))
+            if len(seen) > max_nodes:
+                return names, False
+            children: Any = ()
+            if isinstance(item, NameExpr):
+                names.add(item.name)
+            elif isinstance(item, MemberExpr):
+                children = (item.expr,)
+            elif isinstance(item, IndexExpr):
+                children = (item.base, item.index)
+            elif isinstance(item, (TupleExpr, ListExpr, SetExpr)):
+                children = item.items
+            elif isinstance(item, DictExpr):
+                children = chain.from_iterable(item.items)
+            elif isinstance(item, StarExpr):
+                children = (item.expr,)
+            elif isinstance(item, CallExpr):
+                children = chain(
+                    item.args,
+                    (item.callee.expr,) if isinstance(item.callee, MemberExpr) else (),
+                )
+            elif isinstance(item, ConditionalExpr):
+                children = (item.if_expr, item.else_expr)
+            elif isinstance(
+                item, (BytesExpr, ComplexExpr, EllipsisExpr, FloatExpr, IntExpr, StrExpr)
+            ):
+                continue
+            else:
+                return names, False
+            for child in children:
+                if child is not None:
+                    pending.append(child)
+                    if len(seen) + len(pending) > max_nodes:
+                        return names, False
+        return names, True
+
     def _trace_references(self, *args: Any, **kwargs: Any) -> None:
         """Keep source and endpoint context scoped across recursive traces."""
         saved = (
@@ -5841,72 +6088,82 @@ class MypyAnalyzer:
                         positional_formals = [
                             item for item in partial_arguments if item.kind in (ARG_POS, ARG_OPT)
                         ]
-                    positional_partial_parameters = (
-                        {
-                            positional_formals[index].variable.name
-                            for index, kind in enumerate(partial_alias.arg_kinds)
-                            if kind == ARG_POS and index < len(positional_formals)
-                        }
-                        if partial_alias is not None and partial_function is not None
-                        else set()
-                    )
                     invocation_positional_parameters: set[str] = set()
                     invocation_parameters = set(invocation_keywords)
-                    if partial_function is not None:
-                        partial_positional_count = (
-                            sum(kind == ARG_POS for kind in partial_alias.arg_kinds)
-                            if partial_alias is not None
-                            else 0
-                        )
-                        positional_formals = positional_formals[partial_positional_count:]
-                        invocation_positional_count = 0
-                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
-                            if kind == ARG_POS and name is None:
-                                if invocation_positional_count < len(positional_formals):
-                                    parameter_name = positional_formals[
-                                        invocation_positional_count
-                                    ].variable.name
-                                    invocation_parameters.add(parameter_name)
-                                    invocation_positional_parameters.add(parameter_name)
-                                invocation_positional_count += 1
-                    stored_keyword_parameters: set[str] = set()
-                    if partial_alias is not None and partial_function is not None:
-                        for kind, name in zip(
-                            partial_alias.arg_kinds,
-                            partial_alias.arg_names,
-                            strict=True,
-                        ):
-                            if kind == ARG_NAMED and name is not None:
-                                stored_keyword_parameters.add(name)
-                    invalid_partial_duplicate = bool(
-                        partial_alias is not None
-                        and (
-                            any(
-                                parameter in invocation_keywords
-                                and parameter in positional_partial_parameters
-                                for parameter, _captured in partial_alias.bound_callables
-                            )
-                            or bool(stored_keyword_parameters & invocation_positional_parameters)
-                        )
-                    )
                     if partial_alias is not None:
                         from types import SimpleNamespace as _CallShape
 
-                        kept_bound = [
-                            (expression, kind, name)
-                            for expression, kind, name in zip(
-                                partial_alias.args,
-                                partial_alias.arg_kinds,
-                                partial_alias.arg_names,
-                                strict=True,
-                            )
-                            if name is None or name not in invocation_keywords
-                        ]
-                        binding_call = _CallShape(
-                            args=[*(item[0] for item in kept_bound), *call.args],
-                            arg_kinds=[*(item[1] for item in kept_bound), *call.arg_kinds],
-                            arg_names=[*(item[2] for item in kept_bound), *call.arg_names],
+                        merge = self._merge_partial_invocation(
+                            partial_alias.args,
+                            partial_alias.arg_kinds,
+                            partial_alias.arg_names,
+                            partial_alias.placeholder_positions,
+                            tuple(call.args),
+                            tuple(call.arg_kinds),
+                            tuple(call.arg_names),
+                            tuple(item.variable.name for item in positional_formals),
                         )
+                        partial_invocation_reason = merge.reason
+                        if partial_invocation_reason is None:
+                            if partial_function is None or any(
+                                item.kind in (ARG_STAR, ARG_STAR2) for item in partial_arguments
+                            ):
+                                partial_invocation_reason = "UNSUPPORTED_PARTIAL_SIGNATURE"
+                            else:
+                                effective_keywords = {
+                                    name
+                                    for kind, name in zip(
+                                        merge.arg_kinds, merge.arg_names, strict=True
+                                    )
+                                    if kind == ARG_NAMED and name is not None
+                                }
+                                accepted_keywords = {
+                                    item.variable.name
+                                    for item in partial_arguments
+                                    if not item.pos_only
+                                }
+                                supplied_positionals = len(merge.fixed_positional_slots) + len(
+                                    merge.invocation_positional_slots
+                                )
+                                missing_required_positionals = any(
+                                    item.kind == ARG_POS
+                                    and index >= supplied_positionals
+                                    and item.variable.name not in effective_keywords
+                                    for index, item in enumerate(positional_formals)
+                                )
+                                missing_required_keywords = any(
+                                    item.kind == ARG_NAMED
+                                    and item.variable.name not in effective_keywords
+                                    for item in partial_arguments
+                                )
+                                if (
+                                    not effective_keywords <= accepted_keywords
+                                    or missing_required_positionals
+                                    or missing_required_keywords
+                                ):
+                                    partial_invocation_reason = "INVALID_PARTIAL_ARGUMENTS"
+                        if partial_invocation_reason is not None:
+                            deps.add_analysis_limitation(
+                                AnalysisLimitation(
+                                    file_path=current_file,
+                                    call_line=call.line,
+                                    cap=partial_invocation_reason,
+                                    call_column=call.column,
+                                )
+                            )
+                            callable_aliases = ()
+                            traced = True
+                        else:
+                            invocation_positional_parameters = {
+                                positional_formals[index].variable.name
+                                for index in merge.invocation_positional_slots
+                            }
+                            invocation_parameters.update(invocation_positional_parameters)
+                            binding_call = _CallShape(
+                                args=list(merge.args),
+                                arg_kinds=list(merge.arg_kinds),
+                                arg_names=list(merge.arg_names),
+                            )
                     for declaration, bound_receiver in callable_aliases:
                         alias_fullname, alias_invocation = declaration
                         if (
@@ -5914,7 +6171,6 @@ class MypyAnalyzer:
                             and call_site.status != CallResolutionStatus.EXACT
                             and alias_invocation == InvocationKind.FUNCTION
                             and not callable_alias_is_possible
-                            and not invalid_partial_duplicate
                         ):
                             deps.add_resolved_call_site(
                                 call_site.model_copy(
@@ -5975,16 +6231,7 @@ class MypyAnalyzer:
                             )
                             and id(call) not in awaited_call_ids
                         )
-                        if invalid_partial_duplicate:
-                            deps.add_analysis_limitation(
-                                AnalysisLimitation(
-                                    file_path=current_file,
-                                    call_line=call.line,
-                                    cap="INVALID_PARTIAL_ARGUMENTS",
-                                    call_column=call.column,
-                                )
-                            )
-                        elif not alias_is_unawaited_coroutine:
+                        if not alias_is_unawaited_coroutine:
                             resolve_and_trace(
                                 alias_fullname,
                                 call.line,
@@ -6302,6 +6549,29 @@ class MypyAnalyzer:
                     exposed_names.update(deferred_environment)
                     exposed_names.update(callable_environment)
                     exposed_names.update(partial_environment)
+            if partial_environment:
+                names, partial_exposure_complete = self._exposed_partial_names(call)
+                partial_exposed_names = exposed_names | names
+                if not partial_exposure_complete:
+                    partial_environment.clear()
+                    deps.add_analysis_limitation(
+                        AnalysisLimitation(
+                            file_path=current_file,
+                            call_line=call.line,
+                            cap="PARTIAL_EXPOSURE_SHAPE_UNSUPPORTED",
+                            limit=4096,
+                            call_column=call.column,
+                        )
+                    )
+                else:
+                    exposed_partial_ids = {
+                        id(partial_environment[name])
+                        for name in partial_exposed_names
+                        if name in partial_environment
+                    }
+                    for name, partial in list(partial_environment.items()):
+                        if name in partial_exposed_names or id(partial) in exposed_partial_ids:
+                            partial_environment.pop(name, None)
             for name in exposed_names:
                 flow_environment.pop(name, None)
                 deferred_environment.pop(name, None)
@@ -6710,6 +6980,78 @@ class MypyAnalyzer:
                                     "CALLABLE_UNION_PARTIAL", limit=len(target_value.targets)
                                 )
                                 target_value = None
+                            placeholder_positions: list[int] = []
+                            partial_shape_reason: str | None = None
+                            if (
+                                n.rvalue.arg_kinds[0] != ARG_POS
+                                or n.rvalue.arg_names[0] is not None
+                            ):
+                                partial_shape_reason = "INVALID_PARTIAL_ARGUMENTS"
+                            elif (
+                                isinstance(partial_target, NameExpr)
+                                and partial_target.name in partial_environment
+                            ) or (
+                                isinstance(partial_target, CallExpr)
+                                and self._explicit_import_fullname(
+                                    partial_target.callee, import_map
+                                )
+                                == "functools.partial"
+                            ):
+                                partial_shape_reason = "NESTED_PARTIAL_COMPOSITION_UNSUPPORTED"
+                            elif len(n.rvalue.args) - 1 > 256:
+                                partial_shape_reason = "MAX_PARTIAL_ARGUMENTS"
+                            else:
+                                stored_slot = 0
+                                for expression, kind, name in zip(
+                                    n.rvalue.args[1:],
+                                    n.rvalue.arg_kinds[1:],
+                                    n.rvalue.arg_names[1:],
+                                    strict=True,
+                                ):
+                                    if kind in (ARG_STAR, ARG_STAR2):
+                                        partial_shape_reason = "UNRESOLVED_PARTIAL_STAR_ARGUMENTS"
+                                        break
+                                    if kind not in (ARG_POS, ARG_NAMED):
+                                        partial_shape_reason = "UNSUPPORTED_PARTIAL_ARGUMENT_KIND"
+                                        break
+                                    if isinstance(expression, NameExpr) and (
+                                        expression.name in callable_environment
+                                        or expression.name in lambda_environment
+                                    ):
+                                        placeholder_state: bool | None = False
+                                    elif (
+                                        self._finite_string_values(expression, string_environment)
+                                        is not None
+                                    ):
+                                        placeholder_state = False
+                                    else:
+                                        placeholder_state = self._partial_placeholder_state(
+                                            expression, flow_environment, import_map, finite_budget
+                                        )
+                                    if placeholder_state is None:
+                                        partial_shape_reason = (
+                                            "UNRESOLVED_PARTIAL_PLACEHOLDER_ARGUMENTS"
+                                        )
+                                        break
+                                    if placeholder_state:
+                                        if kind != ARG_POS or name is not None:
+                                            partial_shape_reason = (
+                                                "INVALID_PARTIAL_PLACEHOLDER_KEYWORD"
+                                            )
+                                            break
+                                        placeholder_positions.append(stored_slot)
+                                    if kind == ARG_POS:
+                                        stored_slot += 1
+                            if partial_shape_reason is not None:
+                                target_value = None
+                                deps.add_analysis_limitation(
+                                    AnalysisLimitation(
+                                        file_path=current_file,
+                                        call_line=n.rvalue.line,
+                                        cap=partial_shape_reason,
+                                        call_column=n.rvalue.column,
+                                    )
+                                )
                             if target_value is not None:
                                 bound_callables: list[
                                     tuple[
@@ -6734,12 +7076,15 @@ class MypyAnalyzer:
                                         for item in parameters
                                         if not item.pos_only
                                     }
+                                    captured_slot = -1
                                     for expression, kind, name in zip(
                                         n.rvalue.args[1:],
                                         n.rvalue.arg_kinds[1:],
                                         n.rvalue.arg_names[1:],
                                         strict=True,
                                     ):
+                                        if kind == ARG_POS:
+                                            captured_slot += 1
                                         parameter = None
                                         if (
                                             kind == ARG_POS
@@ -6749,6 +7094,11 @@ class MypyAnalyzer:
                                             parameter = positional_parameters.pop(0)
                                         elif kind == ARG_NAMED and name in keyword_parameters:
                                             parameter = keyword_parameters[name]
+                                        if (
+                                            kind == ARG_POS
+                                            and captured_slot in placeholder_positions
+                                        ):
+                                            continue
                                         callable_actual: (
                                             tuple[
                                                 tuple[str, InvocationKind],
@@ -6807,6 +7157,7 @@ class MypyAnalyzer:
                                     args=tuple(n.rvalue.args[1:]),
                                     arg_kinds=tuple(n.rvalue.arg_kinds[1:]),
                                     arg_names=tuple(n.rvalue.arg_names[1:]),
+                                    placeholder_positions=tuple(placeholder_positions),
                                     bound_callables=tuple(bound_callables),
                                     bound_strings=tuple(bound_strings),
                                 )
