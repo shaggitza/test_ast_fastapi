@@ -60,6 +60,7 @@ from fastapi_endpoint_detector.analyzer.sql_transaction_paths import (
 )
 from fastapi_endpoint_detector.analyzer.typed_graph_bridge import (
     build_shadow_graph,
+    compare_shadow_side,
     query_changed_lines,
 )
 from fastapi_endpoint_detector.config import Config
@@ -105,6 +106,7 @@ if TYPE_CHECKING:
         SourceEvidenceSpan,
     )
     from fastapi_endpoint_detector.analyzer.source_inventory import SourceFile, SourceInventory
+    from fastapi_endpoint_detector.analyzer.typed_reverse_graph import GraphSide
     from fastapi_endpoint_detector.models.diff import ChangedByteSpan, DiffFile
     from fastapi_endpoint_detector.models.effect_contract import LoadedEffectContracts
     from fastapi_endpoint_detector.models.effect_contract_audit import (
@@ -647,7 +649,8 @@ class ChangeMapper:
         self._resource_coupling_graph: ResourceCouplingGraph | None = None
         self._sql_transaction_report: SQLTransactionReport | None = None
         self._sql_transaction_path_report: SQLTransactionPathReport | None = None
-        self._typed_graph_shadow: tuple[tuple[str, Any, Any], ...] = ()
+        self._typed_graph_shadow: tuple[tuple[GraphSide, Any, Any], ...] = ()
+        self._typed_graph_shadow_comparison: tuple[Any, ...] = ()
         self._mypy_analyzer: MypyAnalyzer | None = None
         self._baseline_mypy_analyzer: MypyAnalyzer | None = None
         self._effect_analyzer = EffectAnalyzer(target_project_root)
@@ -2221,6 +2224,7 @@ class ChangeMapper:
         self._baseline_failure = None
         # This private opt-in diagnostic is per-run state, never stale report data.
         self._typed_graph_shadow = ()
+        self._typed_graph_shadow_comparison = ()
 
         def report_progress(current: int, total: int, desc: str) -> None:
             if progress_callback:
@@ -2447,6 +2451,15 @@ class ChangeMapper:
         filtered_affected = [
             item for item in materialized if _CONFIDENCE_SCORE[item.confidence] >= threshold
         ]
+        try:
+            shadow_results: tuple[tuple[GraphSide, Any, Any], ...] = self._typed_graph_shadow
+            self._typed_graph_shadow_comparison = tuple(
+                compare_shadow_side(side, graph, query, materialized)
+                for side, graph, query in shadow_results
+            )
+        except Exception:
+            # Descriptive comparison is also opt-in and cannot affect report production.
+            self._typed_graph_shadow_comparison = ()
         orphan_changes = [
             orphan
             for evidence in orphan_evidence.values()
@@ -2570,6 +2583,7 @@ class ChangeMapper:
     ) -> None:
         """Run a diagnostic graph query while legacy mapper evidence stays authoritative."""
         self._typed_graph_shadow = ()
+        self._typed_graph_shadow_comparison = ()
         if not self.typed_graph_shadow:
             return
         try:
@@ -2577,6 +2591,7 @@ class ChangeMapper:
         except Exception:
             # The shadow is unvalidated and must never prevent the authoritative report.
             self._typed_graph_shadow = ()
+            self._typed_graph_shadow_comparison = ()
 
     def _collect_typed_graph_shadow(
         self,
@@ -2584,7 +2599,7 @@ class ChangeMapper:
         has_removals: bool,
     ) -> None:
         """Build target/baseline diagnostics; caller isolates all ordinary failures."""
-        shadow: list[tuple[str, Any, Any]] = []
+        shadow: list[tuple[GraphSide, Any, Any]] = []
         target_changes = [
             (item.path.as_posix(), line)
             for item in diff_files
@@ -2609,7 +2624,7 @@ class ChangeMapper:
             shadow.append(("target", graph, result))
         if has_removals and self.baseline_app_path is not None and self._baseline_failure is None:
             baseline_changes = [
-                (item.path.as_posix(), line)
+                ((item.source_path or item.path).as_posix(), line)
                 for item in diff_files
                 for line in DiffParser.get_changed_line_numbers(item)[1]
             ]

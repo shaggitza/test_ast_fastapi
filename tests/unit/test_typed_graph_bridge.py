@@ -1,5 +1,7 @@
 """Production bridge checks against the analyzer's retained ordinary mypy build."""
 
+import subprocess
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -99,11 +101,22 @@ def test_public_mapper_invokes_snapshot_graph_without_replacing_legacy_report(
         "from fastapi import FastAPI\n"
         "app = FastAPI()\n"
         "def helper() -> int: return 1\n"
+        "@app.get('/other')\n"
         "@app.get('/')\n"
         "def handler() -> int: return helper()\n",
         encoding="utf-8",
     )
-    mapper = ChangeMapper(app, secure_ast=True, use_cache=False, typed_graph_shadow=True)
+    baseline_root = tmp_path / "baseline"
+    baseline_root.mkdir()
+    baseline_app = baseline_root / "app.py"
+    baseline_app.write_text(app.read_text(encoding="utf-8").replace("return 1", "return 0"))
+    mapper = ChangeMapper(
+        app,
+        secure_ast=True,
+        use_cache=False,
+        baseline_app_path=baseline_app,
+        typed_graph_shadow=True,
+    )
     diff = (
         "diff --git a/app.py b/app.py\n"
         "--- a/app.py\n"
@@ -115,12 +128,120 @@ def test_public_mapper_invokes_snapshot_graph_without_replacing_legacy_report(
 
     report = mapper.analyze_diff(diff)
 
-    assert len(mapper._typed_graph_shadow) == 1
-    side, graph, query = mapper._typed_graph_shadow[0]
-    assert side == "target"
-    assert any(edge.caller == "app.handler" and edge.callee == "app.helper" for edge in graph.edges)
-    assert any(item.occurrence.symbol == "app.handler" for item in query.evidence)
+    assert [entry[0] for entry in mapper._typed_graph_shadow] == ["target", "baseline"]
+    _, target_graph, target_query = mapper._typed_graph_shadow[0]
+    assert any(
+        edge.caller == "app.handler" and edge.callee == "app.helper" for edge in target_graph.edges
+    )
+    assert any(item.occurrence.symbol == "app.handler" for item in target_query.evidence)
+    target_comparison, baseline_comparison = mapper._typed_graph_shadow_comparison
+    assert target_comparison.side == "target"
+    assert baseline_comparison.side == "baseline"
+    assert len(target_comparison.graph_occurrence_ids) == 2
+    assert len(baseline_comparison.graph_occurrence_ids) == 2
+    assert target_comparison.direct_evidence
+    assert baseline_comparison.direct_evidence
+    assert all(
+        (
+            row.caller_span.module,
+            row.caller_span.start_line,
+            row.caller_span.start_column,
+            row.caller_span.end_line,
+            row.caller_span.end_column,
+        )
+        == ("app", 6, 29, 6, 37)
+        for row in target_comparison.direct_evidence
+    )
+    assert all(
+        row.changed_span is not None and row.changed_span.start_line == 3
+        for row in target_comparison.direct_evidence
+    )
+    assert all(
+        row.changed_span is not None and row.changed_span.start_line == 3
+        for row in baseline_comparison.direct_evidence
+    )
+    assert "not a parity oracle" in target_comparison.comparison_scope
     assert report.candidate_endpoints == report.affected_endpoints
+
+
+def test_public_git_rename_keeps_side_bound_direct_occurrences(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    app_source = (
+        "from fastapi import FastAPI\nfrom routes import shared\napp = FastAPI()\n"
+        "@app.get('/second')\n@app.get('/first')\n"
+        "def handler() -> int: return shared()\n"
+    )
+    (repo / "app.py").write_text(app_source, encoding="utf-8")
+    helper_source = (
+        "def stable_one() -> int: return 1\n"
+        "def stable_two() -> int: return 2\n"
+        "def shared() -> int: return 1\n"
+        "def stable_three() -> int: return 3\n"
+        "def stable_four() -> int: return 4\n"
+        "def stable_five() -> int: return 5\n"
+        "def stable_six() -> int: return 6\n"
+        "def stable_seven() -> int: return 7\n"
+    )
+    (repo / "routes.py").write_text(helper_source, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "test@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "GH107 fixture"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "app.py", "routes.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline"], check=True)
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    archive = subprocess.run(
+        ["git", "-C", str(repo), "archive", "HEAD"], check=True, capture_output=True
+    )
+    archive_path = tmp_path / "baseline.tar"
+    archive_path.write_bytes(archive.stdout)
+    with tarfile.open(archive_path) as bundle:
+        bundle.extractall(baseline, filter="data")
+    (repo / "app.py").write_text(
+        app_source.replace("from routes", "from handlers"),
+        encoding="utf-8",
+    )
+    (repo / "routes.py").rename(repo / "handlers.py")
+    (repo / "handlers.py").write_text(
+        helper_source.replace("shared() -> int: return 1", "shared() -> int: return 2"),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    diff = subprocess.run(
+        ["git", "-C", str(repo), "diff", "--cached", "--find-renames", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert "rename from routes.py" in diff and "rename to handlers.py" in diff
+
+    mapper = ChangeMapper(
+        repo / "app.py",
+        secure_ast=True,
+        use_cache=False,
+        baseline_app_path=baseline / "app.py",
+        typed_graph_shadow=True,
+    )
+    report = mapper.analyze_diff(diff)
+    assert report.candidate_endpoints == report.affected_endpoints
+    comparisons = {item.side: item for item in mapper._typed_graph_shadow_comparison}
+    assert set(comparisons) == {"target", "baseline"}
+    assert len(comparisons["target"].graph_occurrence_ids) == 2
+    assert len(comparisons["baseline"].graph_occurrence_ids) == 2
+    assert comparisons["target"].direct_evidence
+    assert comparisons["baseline"].direct_evidence
+    assert {row.changed_span.module for row in comparisons["target"].direct_evidence} == {
+        "handlers"
+    }
+    assert {row.changed_span.module for row in comparisons["baseline"].direct_evidence} == {
+        "routes"
+    }
+    assert all(row.caller_span.module == "app" for row in comparisons["target"].direct_evidence)
+    assert all(row.caller_span.module == "app" for row in comparisons["baseline"].direct_evidence)
 
 
 def _public_mapper_fixture(tmp_path: Path, **kwargs: object) -> tuple[ChangeMapper, str]:
@@ -232,6 +353,7 @@ def test_shadow_baseline_failure_isolated_and_does_not_retain_target_partial(
     assert calls == 2
     assert report.candidate_endpoints == report.affected_endpoints
     assert mapper._typed_graph_shadow == ()
+    assert mapper._typed_graph_shadow_comparison == ()
 
 
 @pytest.mark.parametrize("failing_side", ["target", "baseline"])
