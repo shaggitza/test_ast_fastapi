@@ -1,19 +1,25 @@
-"""Versioned immutable-source bundle and freeze lease for the Python review broker.
+"""Versioned source bundle and descriptor-sealed runtime for the Python broker.
 
 This module is an integration seam. It does not launch a broker or authorize a
 campaign. Callers must hold :class:`FreezeLease` from prepare until escrow finalization.
-The filesystem checks detect accidental and concurrent mutation; they are not a
-same-UID security boundary. Deployment still requires a trusted, attested runtime.
+The ZIP snapshot is write-sealed before child imports, so broker-owned Python
+bytes come from a stable descriptor. The cooperative filesystem lease remains
+race detection, not a same-UID security boundary. Deployment still requires a
+trusted, attested interpreter/toolchain.
 """
 
 from __future__ import annotations
 
+import ast
 import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
+import subprocess
+import sys
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -25,6 +31,63 @@ RECEIPT_SCHEMA = "benchmarks/real_world/production_v2/broker-freeze-receipt-sche
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _MAX_FILE = 32 * 1024 * 1024
 _MANIFEST = "bundle-manifest-v1.json"
+
+
+def derive_source_closure(source_root: Path, entrypoint: str) -> tuple[str, ...]:  # noqa: PLR0912
+    """Return the complete statically resolvable local Python import closure.
+
+    Dynamic imports, star imports, and extension loading are rejected. Local
+    modules are added transitively. The child runs isolated, so non-standard
+    dependencies must be included in the bundle; standard-library imports come
+    from the interpreter identified by the pinned toolchain digest.
+    """
+    entrypoint = _relative(entrypoint)
+    pending = [entrypoint]
+    seen: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        raw = _read_regular(source_root / name)
+        try:
+            tree = ast.parse(raw, filename=name)
+        except (SyntaxError, ValueError) as exc:
+            raise BundleError("source closure contains invalid Python") from exc
+        package = name.rsplit("/", 1)[0].replace("/", ".") if "/" in name else ""
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                if any(alias.name == "*" for alias in node.names):
+                    raise BundleError("star imports are not allowed in sealed source closure")
+                base = node.module or ""
+                if node.level:
+                    parts = package.split(".") if package else []
+                    if node.level > len(parts) + 1:
+                        raise BundleError("relative import escapes source root")
+                    base = ".".join(parts[: len(parts) - node.level + 1] + ([base] if base else []))
+                modules = [base] if base else []
+                modules.extend(f"{base}.{alias.name}" for alias in node.names if base)
+            elif isinstance(node, ast.Call) and (
+                (isinstance(node.func, ast.Name) and node.func.id in {"__import__", "exec", "eval"})
+                or (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr
+                    in {"import_module", "find_spec", "load_module", "CDLL", "PyDLL"}
+                )
+            ):
+                raise BundleError("dynamic import or code loading prevents source closure proof")
+            else:
+                continue
+            for module in modules:
+                candidate = module.replace(".", "/") + ".py"
+                package_init = module.replace(".", "/") + "/__init__.py"
+                if (source_root / candidate).is_file() or (source_root / package_init).is_file():
+                    pending.append(
+                        candidate if (source_root / candidate).is_file() else package_init
+                    )
+    return tuple(sorted(seen))
 
 
 class BundleError(RuntimeError):
@@ -134,6 +197,7 @@ def materialize_bundle(
     *,
     profile_sha256: str,
     toolchain_sha256: str,
+    entrypoint: str | None = None,
 ) -> Bundle:
     """Copy an explicit, finite transitive Python source closure into a new directory.
 
@@ -148,6 +212,10 @@ def materialize_bundle(
     if not source_files or len(set(source_files)) != len(source_files):
         raise BundleError("source closure must be nonempty and unique")
     selected = sorted(_relative(item) for item in source_files)
+    if entrypoint is not None:
+        closure = derive_source_closure(source_root, entrypoint)
+        if tuple(selected) != closure:
+            raise BundleError("source files differ from statically derived import closure")
     sources = {item: source_root / item for item in selected}
     captured = {item: _read_regular(path) for item, path in sources.items()}
     file_hashes = {item: _sha(raw) for item, raw in captured.items()}
@@ -157,6 +225,8 @@ def materialize_bundle(
         "profile_sha256": profile_sha256,
         "toolchain_sha256": toolchain_sha256,
         "files": file_hashes,
+        "entrypoint": entrypoint,
+        "closure_sha256": _sha(_canonical(list(selected))),
     }
     raw_manifest = _canonical(manifest)
     try:
@@ -198,6 +268,8 @@ def verify_bundle(bundle: Bundle) -> None:
         "profile_sha256": bundle.profile_sha256,
         "toolchain_sha256": bundle.toolchain_sha256,
         "files": bundle.files,
+        "entrypoint": manifest.get("entrypoint"),
+        "closure_sha256": _sha(_canonical(sorted(bundle.files))),
     }
     if manifest != expected or set(bundle.files) != set(bundle.sources):
         raise BundleError("bundle manifest identity mismatch")
@@ -469,7 +541,7 @@ def acquire_launch_lease(
     manifest = _json(raw_manifest)
     if (not isinstance(manifest, dict)
             or set(manifest) != {"schema_version", "protocol", "profile_sha256",
-                                 "toolchain_sha256", "files"}
+                                 "toolchain_sha256", "files", "entrypoint", "closure_sha256"}
             or manifest.get("schema_version") != 1
             or manifest.get("protocol") != PROTOCOL
             or not isinstance(manifest.get("files"), dict)):
@@ -498,7 +570,9 @@ def acquire_launch_lease(
             or profile_value.get("protocol") != LAUNCH_PROFILE_PROTOCOL
             or profile_value.get("toolchain_sha256") != toolchain_sha256
             or profile_value.get("production_profile_sha256") != bundle.profile_sha256
-            or profile_value.get("entrypoint") not in bundle.files):
+            or profile_value.get("entrypoint") not in bundle.files
+            or manifest.get("entrypoint") != profile_value.get("entrypoint")
+            or manifest.get("closure_sha256") != _sha(_canonical(sorted(bundle.files)))):
         raise BundleError("launch profile is not the exact new versioned bundle profile")
     if receipt.runtime_attestation_sha256 != runtime_attestation_sha256:
         raise BundleError("runtime attestation differs from receipt")
@@ -517,3 +591,81 @@ def acquire_launch_lease(
         toolchain_sha256=toolchain_sha256,
     )
     return LaunchLeaseHandle(lease)
+
+
+def _sealed_bundle_fd(bundle: Bundle) -> int:
+    """Build an immutable, descriptor-backed ZIP snapshot for the child import path."""
+    if not hasattr(os, "memfd_create"):
+        raise BundleError("sealed memfd runtime boundary is unavailable")
+    bundle.verify()
+    manifest = _json(_read_regular(bundle.root / _MANIFEST))
+    entrypoint = manifest.get("entrypoint")
+    if not isinstance(entrypoint, str) or entrypoint not in bundle.files:
+        raise BundleError("bundle has no committed sealed entrypoint")
+    fd = os.memfd_create("ground-truth-broker-bundle", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        with os.fdopen(os.dup(fd), "w+b") as stream, zipfile.ZipFile(
+            stream, "w", zipfile.ZIP_DEFLATED
+        ) as archive:
+            for name in sorted(bundle.files):
+                raw = _read_regular(bundle.root / name)
+                if _sha(raw) != bundle.files[name]:
+                    raise BundleError("bundle changed before sealed snapshot creation")
+                archive.writestr(name, raw)
+        os.fsync(fd)
+        seals = (fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL)
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, seals)
+        if fcntl.fcntl(fd, fcntl.F_GET_SEALS) & seals != seals:
+            raise BundleError("sealed runtime snapshot did not acquire all write seals")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def launch_with_escrow_lease(
+    *,
+    lease: LaunchLeaseHandle,
+    bundle: Bundle,
+    argv: tuple[str, ...] = (),
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen[bytes]:
+    """Launch only from a sealed ZIP descriptor and retain the lease in child.
+
+    This generic entrypoint is a source-closure primitive. Operational broker
+    profiles still must provide an entrypoint which implements the complete
+    validated escrow protocol; this function never falls back to checkout code.
+    """
+    if lease.phase != "prepared":
+        raise BundleError("launch requires a prepared, held escrow lease")
+    lease.lease.check(
+        runtime_attestation_sha256=lease.lease.receipt.runtime_attestation_sha256,
+        binding_sha256=lease.lease.receipt.binding_sha256,
+        launch_profile_sha256=lease.lease.receipt.launch_profile_sha256,
+        toolchain_sha256=lease.lease.receipt.toolchain_sha256,
+    )
+    sealed_fd = _sealed_bundle_fd(bundle)
+    manifest = _json(_read_regular(bundle.root / _MANIFEST))
+    entrypoint = manifest["entrypoint"]
+    module = entrypoint[:-3].replace("/", ".")
+    bootstrap = (
+        f"import runpy,sys;sys.path.insert(0,'/proc/self/fd/{sealed_fd}');"
+        f"runpy.run_module({module!r},run_name='__main__')"
+    )
+    child_env = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
+    if env:
+        child_env.update(env)
+    try:
+        process = subprocess.Popen(
+            [sys.executable, "-I", "-c", bootstrap, *argv],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            close_fds=True,
+            pass_fds=(sealed_fd, *lease.pass_fds()),
+            env=child_env,
+            start_new_session=True,
+        )
+    finally:
+        os.close(sealed_fd)
+    return process

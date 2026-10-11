@@ -27,6 +27,7 @@ def make_bundle(tmp_path: Path) -> bundle_v1.Bundle:
         ("broker/__init__.py", "broker/worker.py"),
         profile_sha256=digest(b"profile-v2"),
         toolchain_sha256=digest(b"python-3.12-lock"),
+        entrypoint="broker/__init__.py",
     )
 
 
@@ -71,6 +72,60 @@ def test_bundle_is_materialized_without_checkout_import_dependency(tmp_path: Pat
     assert bundle.root.joinpath("broker/worker.py").read_bytes() == b"def serve(): return True\n"
     assert bundle.root.joinpath("broker/worker.py").stat().st_mode & 0o777 == 0o400
     bundle.verify()
+
+
+def test_closure_rejects_dynamic_transitive_imports(tmp_path: Path) -> None:
+    source = tmp_path / "checkout"
+    (source / "pkg").mkdir(parents=True)
+    (source / "pkg/__init__.py").write_text("from .worker import run\n")
+    (source / "pkg/worker.py").write_text(
+        "import importlib\nimportlib.import_module('pkg.hidden')\n"
+    )
+    (source / "pkg/hidden.py").write_text("pass\n")
+    with pytest.raises(bundle_v1.BundleError, match="dynamic import"):
+        bundle_v1.derive_source_closure(source, "pkg/__init__.py")
+
+
+def test_sealed_zip_launcher_executes_only_descriptor_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "checkout"
+    source.mkdir()
+    entry = source / "entry.py"
+    entry.write_text("print('sealed-entrypoint')\n")
+    profile_sha = digest(b"profile")
+    toolchain_sha = digest(b"python-toolchain")
+    bundle = bundle_v1.materialize_bundle(
+        source, tmp_path / "sealed", ("entry.py",),
+        profile_sha256=profile_sha, toolchain_sha256=toolchain_sha,
+        entrypoint="entry.py",
+    )
+    binding_sha = digest(b"binding")
+    runtime_sha = digest(b"runtime")
+    receipt_value = bundle_v1.FreezeReceipt(
+        runtime_attestation_sha256=runtime_sha,
+        bundle_sha256=bundle.digest,
+        binding_sha256=binding_sha,
+        launch_profile_sha256=profile_sha,
+        toolchain_sha256=toolchain_sha,
+    )
+    lease = bundle_v1.FreezeLease(tmp_path / "lease.lock", bundle, receipt_value).acquire(
+        runtime_attestation_sha256=runtime_sha,
+        binding_sha256=binding_sha,
+        launch_profile_sha256=profile_sha,
+        toolchain_sha256=toolchain_sha,
+    )
+    handle = bundle_v1.LaunchLeaseHandle(lease)
+    child = bundle_v1.launch_with_escrow_lease(lease=handle, bundle=bundle)
+    stdout, _ = child.communicate(timeout=5)
+    assert child.returncode == 0
+    assert stdout == b"sealed-entrypoint\n"
+    assert handle.phase == "prepared"
+    handle.mark_ready(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
+                                   launch_profile_sha256=profile_sha))
+    handle.mark_claimed(**identities(bundle, runtime_sha256=runtime_sha, binding_sha256=binding_sha,
+                                     launch_profile_sha256=profile_sha))
+    handle.mark_escrow_finalized(**identities(bundle, runtime_sha256=runtime_sha,
+                                              binding_sha256=binding_sha,
+                                              launch_profile_sha256=profile_sha))
 
 
 @pytest.mark.parametrize("target", ["source", "sealed", "manifest"])
@@ -221,6 +276,7 @@ def test_acquire_launch_lease_reads_receipt_and_retains_lock_through_finalize(
         ("broker/__init__.py", "broker/worker.py"),
         profile_sha256=profile_value["production_profile_sha256"],
         toolchain_sha256=bundle.toolchain_sha256,
+        entrypoint="broker/__init__.py",
     )
     receipt_value["bundle_manifest_path"] = str(bundle.root / "bundle-manifest-v1.json")
     receipt_value["bundle_sha256"] = bundle.digest
