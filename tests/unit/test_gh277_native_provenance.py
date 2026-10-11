@@ -330,6 +330,135 @@ def test_callable_instance_ancestor_base_change_reaches_only_dependent_route(
     assert native_route_structural_owners(endpoint, target / "decoy.py", {2}) == ()
 
 
+@pytest.mark.parametrize(
+    ("old_line", "new_line"),
+    [
+        ("        return helper()", "        return 1"),
+        ("        return helper()", "        return unrelated_helper()"),
+    ],
+)
+def test_callable_instance_inherited_call_body_change_reaches_only_dependent_route(
+    tmp_path: Path, old_line: str, new_line: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import Depends, FastAPI\n"
+        "def helper(): return 1\n"
+        "def unrelated_helper(): return 2\n"
+        "class V1:\n"
+        "    def __call__(self):\n"
+        "        return helper()\n"
+        "class Parent(V1): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(unrelated_helper)): return value\n"
+    )
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+        (root / "decoy.py").write_text(
+            "def helper(): return 1\n"
+            "class V1:\n    def __call__(self): return helper()\n"
+            "class Provider(V1): pass\n",
+            encoding="utf-8",
+        )
+
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    assert before.splitlines()[changed_line - 1] == old_line
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n+++ b/main.py\n"
+        f"@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert {item.endpoint.identifier for item in report.candidate_endpoints} == {"GET /items"}
+    assert {item.endpoint.identifier for item in report.affected_endpoints} == {"GET /items"}
+
+
+@pytest.mark.parametrize(
+    ("old_line", "new_line"),
+    [
+        ("            dead_helper()", "            unrelated_helper()"),
+        ("        unused = lambda: dead_helper()", "        unused = lambda: unrelated_helper()"),
+        ("            return dead_helper()", "            return unrelated_helper()"),
+    ],
+)
+def test_callable_instance_unexecuted_inherited_body_edits_stay_unaffected(
+    tmp_path: Path, old_line: str, new_line: str
+) -> None:
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    before = (
+        "from fastapi import Depends, FastAPI\n"
+        "def helper(): return 1\n"
+        "def unrelated_helper(): return 2\n"
+        "def dead_helper(): return 3\n"
+        "class V1:\n"
+        "    def __call__(self):\n"
+        "        unused = lambda: dead_helper()\n"
+        "        def nested():\n"
+        "            return dead_helper()\n"
+        "        if False:\n"
+        "            dead_helper()\n"
+        "        return helper()\n"
+        "class Parent(V1): pass\n"
+        "class Provider(Parent): pass\n"
+        "provider = Provider()\n"
+        "app = FastAPI()\n"
+        "@app.get('/items')\n"
+        "def items(value=Depends(provider)): return value\n"
+        "@app.get('/unrelated')\n"
+        "def unrelated(value=Depends(unrelated_helper)): return value\n"
+    )
+    after = before.replace(old_line, new_line)
+    assert after != before
+    for root, source in ((baseline, before), (target, after)):
+        root.mkdir()
+        (root / "main.py").write_text(source, encoding="utf-8")
+        (root / "decoy.py").write_text(
+            "def dead_helper(): return 3\n"
+            "class V1:\n    def __call__(self): return dead_helper()\n"
+            "class Provider(V1): pass\n",
+            encoding="utf-8",
+        )
+
+    changed_line = next(
+        number for number, line in enumerate(after.splitlines(), start=1) if line == new_line
+    )
+    assert before.splitlines()[changed_line - 1] == old_line
+    diff = (
+        "diff --git a/main.py b/main.py\n"
+        "--- a/main.py\n+++ b/main.py\n"
+        f"@@ -{changed_line},1 +{changed_line},1 @@\n"
+        f"-{old_line}\n+{new_line}\n"
+    )
+    report = ChangeMapper(
+        target / "main.py",
+        baseline_app_path=baseline / "main.py",
+        secure_ast=True,
+        use_cache=False,
+    ).analyze_diff(diff)
+
+    assert report.candidate_endpoints == []
+    assert report.affected_endpoints == []
+
+
 def test_callable_instance_with_unsupported_ancestor_chain_stays_conditional(
     tmp_path: Path,
 ) -> None:

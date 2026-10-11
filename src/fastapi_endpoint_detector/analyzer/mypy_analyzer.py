@@ -1836,8 +1836,19 @@ class MypyAnalyzer:
                 qualified = (
                     fullname[len(module) + 1 :]
                     if fullname.startswith(f"{module}.")
+                    else fullname[len(module.rsplit(".", 1)[-1]) + 1 :]
+                    if fullname.startswith(f"{module.rsplit('.', 1)[-1]}.")
                     else fullname.rsplit(".", 1)[-1]
                 )
+                if qualified.endswith(".__call__"):
+                    # Mypy may expose an inherited method as if it were a
+                    # member of the provider class. Resolve the implementation
+                    # from the bounded source AST instead, so the typed seed is
+                    # attached to its actual declaring class and source body.
+                    effective_method = self._effective_dependency_call_method(file_path, qualified)
+                    if effective_method is None:
+                        continue
+                    qualified = effective_method
                 result = (
                     self._find_func_in_tree(
                         self._trees.get(module),
@@ -1847,19 +1858,6 @@ class MypyAnalyzer:
                     if self._trees.get(module) is not None
                     else None
                 )
-                if result is None and qualified.endswith(".__call__"):
-                    effective_method = self._effective_dependency_call_method(file_path, qualified)
-                    if effective_method is not None:
-                        qualified = effective_method
-                        result = (
-                            self._find_func_in_tree(
-                                self._trees.get(module),
-                                "__call__",
-                                qualified_name=qualified,
-                            )
-                            if self._trees.get(module) is not None
-                            else None
-                        )
                 if result is None or result[1] != qualified:
                     continue
                 key = f"{module}.{result[1]}"
