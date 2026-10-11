@@ -170,8 +170,10 @@ class PackageApplicability(_StrictModel):
     def validate_scope(self) -> PackageApplicability:
         if (self.distribution is None) != (self.version is None):
             raise ValueError("distribution and version must be provided together")
-        if self.distribution is None and self.python is None:
-            raise ValueError("package applicability requires a distribution or Python range")
+        if self.distribution is None and self.python is None and not self.source_hashes:
+            raise ValueError(
+                "package applicability requires a distribution, Python range, or source hash pin"
+            )
         if any(
             not path
             or path.startswith("/")
