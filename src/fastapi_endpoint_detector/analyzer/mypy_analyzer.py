@@ -4014,6 +4014,127 @@ class MypyAnalyzer:
             and self._explicit_import_fullname(expression.callee, import_map) == "functools.partial"
         )
 
+    def _partial_argument_captures(
+        self,
+        call: Any,
+        environment: dict[str, _PartialValue],
+        import_map: dict[str, str],
+        *,
+        max_nodes: int = 4096,
+    ) -> tuple[bool, bool, bool, bool]:
+        """Find partial captures in bounded eager argument expression shapes."""
+        from itertools import chain
+
+        from mypy.nodes import (
+            AssignmentExpr,
+            AwaitExpr,
+            BytesExpr,
+            CallExpr,
+            CastExpr,
+            ComparisonExpr,
+            ComplexExpr,
+            ConditionalExpr,
+            DictExpr,
+            DictionaryComprehension,
+            EllipsisExpr,
+            FloatExpr,
+            GeneratorExpr,
+            IndexExpr,
+            IntExpr,
+            LambdaExpr,
+            ListComprehension,
+            ListExpr,
+            MemberExpr,
+            NameExpr,
+            OpExpr,
+            SetComprehension,
+            SetExpr,
+            SliceExpr,
+            StarExpr,
+            StrExpr,
+            TupleExpr,
+            TypeApplication,
+            UnaryExpr,
+            YieldExpr,
+            YieldFromExpr,
+        )
+
+        inline = False
+        tracked = False
+        nested_tracked = False
+        seen: set[int] = set()
+        pending = [(expression, True) for expression in call.args]
+        if max_nodes < 1 or len(pending) > max_nodes:
+            return inline, tracked, nested_tracked, False
+        while pending:
+            expression, direct = pending.pop()
+            if expression is None or id(expression) in seen:
+                continue
+            seen.add(id(expression))
+            if len(seen) > max_nodes:
+                return inline, tracked, nested_tracked, False
+            children: Any = ()
+            if isinstance(expression, NameExpr):
+                if expression.name in environment:
+                    tracked = True
+                    nested_tracked |= not direct
+            elif isinstance(expression, CallExpr):
+                inline |= self._is_explicit_partial_call(expression, import_map)
+                children = expression.args
+            elif isinstance(expression, MemberExpr):
+                children = (expression.expr,)
+            elif isinstance(expression, IndexExpr):
+                children = (expression.base, expression.index)
+            elif isinstance(expression, (TupleExpr, ListExpr, SetExpr)):
+                children = expression.items
+            elif isinstance(expression, DictExpr):
+                children = chain.from_iterable(expression.items)
+            elif isinstance(expression, StarExpr):
+                children = (expression.expr,)
+            elif isinstance(expression, ConditionalExpr):
+                children = (expression.if_expr, expression.else_expr)
+            elif isinstance(
+                expression,
+                (AwaitExpr, CastExpr, TypeApplication, UnaryExpr, YieldExpr, YieldFromExpr),
+            ):
+                children = (expression.expr,)
+            elif isinstance(expression, AssignmentExpr):
+                children = (expression.value,)
+            elif isinstance(expression, OpExpr):
+                children = (expression.left, expression.right)
+            elif isinstance(expression, ComparisonExpr):
+                children = expression.operands
+            elif isinstance(expression, SliceExpr):
+                children = (expression.begin_index, expression.end_index, expression.stride)
+            elif isinstance(expression, (ListComprehension, SetComprehension)):
+                children = (expression.generator,)
+            elif isinstance(expression, GeneratorExpr):
+                children = chain(
+                    (expression.left_expr,),
+                    expression.sequences,
+                    chain.from_iterable(expression.condlists),
+                )
+            elif isinstance(expression, DictionaryComprehension):
+                children = chain(
+                    (expression.key, expression.value),
+                    expression.sequences,
+                    chain.from_iterable(expression.condlists),
+                )
+            elif isinstance(
+                expression,
+                (BytesExpr, ComplexExpr, EllipsisExpr, FloatExpr, IntExpr, LambdaExpr, StrExpr),
+            ):
+                # A lambda's body is deferred and is not an eager partial capture.
+                continue
+            else:
+                return inline, tracked, nested_tracked, False
+            for child in children:
+                if child is not None:
+                    pending.append((child, False))
+                    if len(seen) + len(pending) > max_nodes:
+                        return inline, tracked, nested_tracked, False
+        return inline, tracked, nested_tracked, True
+
     def _bind_partial_arguments(
         self,
         function: Any,
@@ -4034,27 +4155,26 @@ class MypyAnalyzer:
             NameExpr,
         )
 
-        inline_partial = any(
-            self._is_explicit_partial_call(expression, caller_imports or {})
-            for expression in call.args
+        inline_partial, tracked_partial, nested_partial, shape_complete = (
+            self._partial_argument_captures(call, caller_environment, caller_imports or {})
         )
-        tracked_partial = any(
-            isinstance(expression, NameExpr) and expression.name in caller_environment
-            for expression in call.args
-        )
-        hidden_partial = bool(caller_environment) and any(
-            kind in (ARG_STAR, ARG_STAR2) for kind in call.arg_kinds
-        )
+        expanded = any(kind in (ARG_STAR, ARG_STAR2) for kind in call.arg_kinds)
+        hidden_partial = bool(caller_environment) and expanded
+        unknown_partial_shape = not shape_complete
 
         def unresolved_binding() -> None:
             if inline_partial:
                 self._record_analysis_limitation("INLINE_PARTIAL_ARGUMENT_UNSUPPORTED")
+            elif unknown_partial_shape:
+                self._record_analysis_limitation(
+                    "PARTIAL_ARGUMENT_EXPOSURE_SHAPE_UNSUPPORTED", limit=4096
+                )
             elif tracked_partial or hidden_partial:
                 self._record_analysis_limitation("UNRESOLVED_PARTIAL_ARGUMENTS")
 
         # Detect inline captures before unsupported formal signatures can
         # discard them; the raw constructor AST is not a captured partial.
-        if inline_partial:
+        if inline_partial or nested_partial or unknown_partial_shape:
             unresolved_binding()
             return None
         arguments = list(getattr(self._actual_function(function), "arguments", ()))

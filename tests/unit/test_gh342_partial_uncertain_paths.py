@@ -138,3 +138,39 @@ def test_inline_partial_into_variadic_signature_reports_capture_limit(tmp_path: 
         and item.call_line == 9
         for item in report.analysis_limitations
     )
+
+
+def test_partial_constructor_in_starred_list_has_caller_limitation(tmp_path: Path) -> None:
+    mapper = _mapper(
+        tmp_path,
+        "def forward(*args):\n    return invoke(*args)\n"
+        "@app.get('/star-list')\ndef star_list():\n"
+        "    return forward(*[partial(first)])\n",
+    )
+    report = mapper.analyze_diff(_diff(2))
+    assert report.candidate_endpoints == []
+    assert report.analysis_completeness == "partial"
+    assert any(
+        item.cap == "INLINE_PARTIAL_ARGUMENT_UNSUPPORTED"
+        and item.file_path == str(tmp_path / "main.py")
+        and item.call_line == 9
+        for item in report.analysis_limitations
+    )
+
+
+def test_partial_constructor_in_expanded_dict_has_caller_limitation(tmp_path: Path) -> None:
+    mapper = _mapper(
+        tmp_path,
+        "def forward(**kwargs):\n    return invoke(**kwargs)\n"
+        "@app.get('/star-dict')\ndef star_dict():\n"
+        "    return forward(**{'callback': partial(first)})\n",
+    )
+    report = mapper.analyze_diff(_diff(2))
+    assert report.candidate_endpoints == []
+    assert report.analysis_completeness == "partial"
+    assert any(
+        item.cap == "INLINE_PARTIAL_ARGUMENT_UNSUPPORTED"
+        and item.file_path == str(tmp_path / "main.py")
+        and item.call_line == 9
+        for item in report.analysis_limitations
+    )
