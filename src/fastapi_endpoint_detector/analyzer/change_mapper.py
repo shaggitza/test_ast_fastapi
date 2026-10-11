@@ -2388,6 +2388,7 @@ class ChangeMapper:
                 AnalysisLimitationReport(
                     file_path=item.file_path,
                     call_line=item.call_line,
+                    call_column=item.call_column,
                     cap=item.cap,
                     target_count=item.target_count,
                     limit=item.limit,
@@ -2441,6 +2442,7 @@ class ChangeMapper:
                     AnalysisLimitationReport(
                         file_path=item.file_path,
                         call_line=item.call_line,
+                        call_column=item.call_column,
                         cap=item.cap,
                         target_count=item.target_count,
                         limit=item.limit,
@@ -2451,7 +2453,14 @@ class ChangeMapper:
             # source records when both snapshots hit the same bound.
             analysis_limitations = list(
                 {
-                    (item.file_path, item.call_line, item.cap, item.target_count, item.limit): item
+                    (
+                        item.file_path,
+                        item.call_line,
+                        item.call_column,
+                        item.cap,
+                        item.target_count,
+                        item.limit,
+                    ): item
                     for item in analysis_limitations
                 }.values()
             )
