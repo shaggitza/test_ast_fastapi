@@ -15,6 +15,12 @@ from benchmarks.gh97_motor_binding.run import (
 )
 from click.testing import CliRunner
 
+from fastapi_endpoint_detector.analyzer import effect_contract_auditor
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import (
+    AnalysisLimitation,
+    EndpointDependencies,
+    MypyAnalyzer,
+)
 from fastapi_endpoint_detector.cli import cli
 
 
@@ -609,3 +615,43 @@ def test_audit_cache_cold_and_warm_json_are_identical(tmp_path: Path) -> None:
     assert cold.exit_code == 0, cold.output
     assert warm.exit_code == 0, warm.output
     assert json.loads(cold.output) == json.loads(warm.output)
+
+
+@pytest.mark.parametrize("state", ["analysis_incomplete", "analysis_limitations", "build_failed"])
+def test_public_contract_audit_rejects_limited_call_corpus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str
+) -> None:
+    app, contracts = _project(tmp_path)
+
+    def limited_dependencies(_self: MypyAnalyzer, endpoint: object) -> EndpointDependencies:
+        dependencies = EndpointDependencies("GET /", ["GET"], "/")
+        if state == "analysis_limitations":
+            dependencies.analysis_limitations = [
+                AnalysisLimitation(str(app), 1, "MAX_AST_WALK_NODES", limit=1)
+            ]
+        else:
+            setattr(dependencies, state, True)
+        return dependencies
+
+    def unexpected_audit(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the public CLI passed a limited call corpus to the auditor")
+
+    monkeypatch.setattr(MypyAnalyzer, "analyze_endpoints", lambda _self, _endpoints, **_kwargs: {})
+    monkeypatch.setattr(MypyAnalyzer, "get_endpoint_dependencies", limited_dependencies)
+    monkeypatch.setattr(effect_contract_auditor, "audit_effect_contracts", unexpected_audit)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "audit-effect-contracts",
+            "--app",
+            str(app),
+            "--contracts",
+            str(contracts),
+            "--format",
+            "json",
+            "--no-cache",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "complete contract coverage unavailable" in result.output
+    assert "Effect contract audit complete" not in result.output
