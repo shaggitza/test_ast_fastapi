@@ -14,6 +14,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
     FiniteValueStatus,
     InvocationKind,
+    LoadedEffectContracts,
     ResolvedCallSite,
     ResourceIdentityEvidence,
     load_effect_contracts,
@@ -35,7 +36,7 @@ from fastapi_endpoint_detector.models.endpoint import (
 )
 
 
-def _loaded(path: Path):
+def _loaded(path: Path) -> LoadedEffectContracts:
     document = {
         "schema_version": 1,
         "preset": {
@@ -113,13 +114,13 @@ def _site(
 
 def _audit(
     root: Path,
-    rows,
+    rows: list[tuple[Endpoint, list[ResolvedCallSite]]],
     *,
-    loaded=None,
+    loaded: LoadedEffectContracts | None = None,
     track_transitive: bool = True,
     max_depth: int = 10,
     cache_enabled: bool = True,
-):
+) -> EffectContractAudit:
     endpoints = [endpoint for endpoint, _sites in rows]
     return audit_effect_contracts(
         loaded or _loaded(root / "effects.yaml"),
@@ -442,6 +443,87 @@ def test_composite_resource_cartesian_overflow_is_unavailable(tmp_path: Path) ->
     assert identity.status == FiniteValueStatus.UNAVAILABLE
     assert identity.value_hashes == ()
     assert identity.reason_code == "composite_resource_limit_exceeded"
+
+
+@pytest.mark.parametrize(
+    ("preset", "symbol", "invocation", "contract_id", "negative_symbol"),
+    [
+        (
+            "mongodb-v1",
+            "pymongo.synchronous.collection.Collection.insert_many",
+            InvocationKind.INSTANCE_METHOD,
+            "pymongo-insert-many",
+            "project.Collection.update_one",
+        ),
+        (
+            "filesystem-v1",
+            "pathlib.Path.touch",
+            InvocationKind.INSTANCE_METHOD,
+            "pathlib-touch",
+            "project.files.remove",
+        ),
+        (
+            "object-storage-v1",
+            "mypy_boto3_s3.client.S3Client.put_object",
+            InvocationKind.INSTANCE_METHOD,
+            "typed-s3-put-object",
+            "project.S3.put_object",
+        ),
+    ],
+)
+def test_bundled_presets_match_only_exact_qualified_symbols(
+    tmp_path: Path,
+    preset: str,
+    symbol: str,
+    invocation: InvocationKind,
+    contract_id: str,
+    negative_symbol: str,
+) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    exact = _site(
+        tmp_path,
+        column=2,
+        symbol=symbol,
+        invocation=invocation,
+        spelling=symbol.rsplit(".", maxsplit=1)[-1],
+    )
+    unrelated = _site(
+        tmp_path,
+        column=30,
+        symbol=negative_symbol,
+        invocation=invocation,
+        spelling=negative_symbol.rsplit(".", maxsplit=1)[-1],
+    )
+
+    audit = _audit(
+        tmp_path,
+        [(endpoint, [unrelated, exact])],
+        loaded=load_effect_preset(preset),
+    )
+
+    assert audit.summary.matched_calls == 1
+    assert audit.summary.unmatched_calls == 1
+    matched = [item for item in audit.occurrences if item.contract_id is not None]
+    assert [item.contract_id for item in matched] == [contract_id]
+
+
+def test_held_httpx_module_helper_candidate_is_not_bundled(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    site = _site(
+        tmp_path,
+        column=2,
+        symbol="httpx._api.post",
+        invocation=InvocationKind.FUNCTION,
+        spelling="post",
+    )
+    audit = _audit(
+        tmp_path,
+        [(endpoint, [site])],
+        loaded=load_effect_preset("http-clients-v1"),
+    )
+
+    assert audit.summary.matched_calls == 0
+    assert not any(item.contract_id == "httpx-api-post" for item in audit.occurrences)
 
 
 def test_exact_matching_is_symbol_and_invocation_only(tmp_path: Path) -> None:
