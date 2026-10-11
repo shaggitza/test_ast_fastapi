@@ -1,17 +1,32 @@
 """Narrow contract checks for the exact Motor source-only probe result."""
 
+import hashlib
 import json
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
-from benchmarks.gh97_motor_binding.run import verified_product_path, verify_artifact_hash
+from benchmarks.gh97_motor_binding.run import (
+    checkout_revision,
+    verified_product_path,
+    verify_artifact_hash,
+    verify_committed_sources,
+    verify_no_dirty_tracked_files,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
-RESULT = ROOT / "benchmarks/gh97_motor_binding/result.json"
+HISTORICAL_RESULT = ROOT / "benchmarks/gh97_motor_binding/historical-source-only-v1.json"
 
 
-def test_motor_probe_is_pinned_and_reports_no_fabricated_positive_binding() -> None:
-    result = json.loads(RESULT.read_text())
+def test_historical_motor_probe_is_pinned_and_preserves_original_finding() -> None:
+    raw = HISTORICAL_RESULT.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == (
+        "cabcfb198491c16788146f4983d650de5189238a99514e4d23194662fd0113e8"
+    )
+    result = json.loads(raw)
 
     assert result["probe_id"] == "gh97-motor-typed-binding-v1"
     assert result["python"] == "3.11.16"
@@ -45,11 +60,11 @@ def test_motor_probe_is_pinned_and_reports_no_fabricated_positive_binding() -> N
         "resolved_but_unmatched": 2,
         "unsupported_or_ambiguous_resolution": 3,
     }
-    assert not any(row["audit_status"] == "matched" for row in result["occurrences"])
+    assert result["extracted_python_source_hashes"]
 
 
 def test_same_name_and_wrapper_controls_remain_unmatched() -> None:
-    result = json.loads(RESULT.read_text())
+    result = json.loads(HISTORICAL_RESULT.read_text())
     rows = {row["source_spelling"]: row for row in result["occurrences"]}
 
     assert rows["decoy.insert_one"]["canonical_symbol"].endswith("Decoy.insert_one")
@@ -58,16 +73,74 @@ def test_same_name_and_wrapper_controls_remain_unmatched() -> None:
     assert rows["wrapped.insert_one"]["audit_status"] == "unmatched"
 
 
-def test_motor_collection_operations_abstain_when_receiver_is_dynamic() -> None:
-    result = json.loads(RESULT.read_text())
+def test_live_motor_probe_binds_real_vendor_stub_declarations() -> None:
+    artifacts = os.environ.get("GH97_MOTOR_ARTIFACT_DIR", "/tmp/gh97-wheel-audit")
+    if not Path(artifacts).is_dir():
+        pytest.skip("pinned Motor and PyMongo artifacts are unavailable")
+    with tempfile.TemporaryDirectory(prefix="gh97-motor-test-") as temp:
+        output = Path(temp) / "live-result.json"
+        repo = ROOT
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(repo / "src")
+        subprocess.run(
+            [
+                sys.executable,
+                str(repo / "benchmarks/gh97_motor_binding/run.py"),
+                "--artifacts",
+                artifacts,
+                "--output",
+                str(output),
+            ],
+            check=True,
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        result = json.loads(output.read_text())
     rows = {row["source_spelling"]: row for row in result["occurrences"]}
 
     for operation in ("insert_one", "update_one", "delete_one"):
         row = rows[f"collection.{operation}"]
-        assert row["resolver_status"] == "unresolved"
-        assert row["canonical_symbol"] is None
-        assert row["reason_code"] == "dynamic_receiver"
-        assert row["audit_status"] == "unresolved"
+        assert row["resolver_status"] == "exact"
+        assert row["canonical_symbol"] == f"motor.core.AgnosticCollection.{operation}"
+        assert row["audit_status"] == "matched"
+    assert result["classification"] == {
+        "all_calls": 8,
+        "exact_resolution_and_audit_binding": 5,
+        "resolved_but_unmatched": 2,
+        "unsupported_or_ambiguous_resolution": 1,
+    }
+    assert rows["unknown_collection.insert_one"]["resolver_status"] == "unresolved"
+    assert rows["unknown_collection.insert_one"]["reason_code"] == "dynamic_receiver"
+    assert rows["unknown_collection.insert_one"]["audit_status"] == "unresolved"
+    invalid_calls = [
+        row
+        for row in result["occurrences"]
+        if row["source_spelling"] == "collection.insert_one" and not row["arguments"]
+    ]
+    assert len(invalid_calls) == 1
+    assert invalid_calls[0]["resolver_status"] == "exact"
+    diagnostics = result["fixture_diagnostics"]
+    assert any('Missing positional argument "document"' in error for error in diagnostics)
+    assert any('Unexpected keyword argument "mystery"' in error for error in diagnostics)
+    source_hashes = result["extracted_typed_source_hashes"]["motor"]
+    assert "motor/__init__.py" in source_hashes
+    assert "motor/motor_asyncio.pyi" in source_hashes
+    assert "motor/core.pyi" in source_hashes
+    assert "motor/py.typed" in source_hashes
+    assert result["verified_target_evidence"]["package_versions"]["motor"] == "3.6.0"
+    assert (
+        result["verified_target_evidence"]["package_metadata_hashes"][
+            "motor-3.6.0.dist-info/METADATA"
+        ]
+        == "sha256:dce8b401625d673eed6b2c0c66d9d196a13de0649c0788da8b3e2a72edb2965d"
+    )
+    assert (
+        result["verified_target_evidence"]["mypy_source_hashes"]["motor/__init__.py"]
+        == source_hashes["motor/__init__.py"]
+    )
+    assert result["verified_target_evidence"]["audit_evidence_hash"].startswith("sha256:")
 
 
 def test_motor_probe_rejects_modified_artifact_bytes(tmp_path: Path) -> None:
@@ -85,3 +158,81 @@ def test_motor_probe_rejects_product_module_outside_expected_checkout(tmp_path: 
             "fastapi_endpoint_detector.models.endpoint",
             "src/fastapi_endpoint_detector/models/endpoint.py",
         )
+
+
+def test_motor_report_source_pins_require_the_exact_producer_commit(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    source = tmp_path / "analyzer.py"
+    source.write_bytes(b"verified source\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "analyzer.py"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Probe Test",
+            "-c",
+            "user.email=probe@example.invalid",
+            "commit",
+            "-m",
+            "source",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    revision = checkout_revision(tmp_path)
+    verify_committed_sources(tmp_path, revision, (source,))
+    source.write_bytes(b"different source\n")
+    with pytest.raises(ValueError, match="source differs from producer revision"):
+        verify_committed_sources(tmp_path, revision, (source,))
+    source.write_bytes(b"verified source\n")
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Probe Test",
+            "-c",
+            "user.email=probe@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "new revision",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    with pytest.raises(ValueError, match="revision changed"):
+        verify_committed_sources(tmp_path, revision, (source,))
+
+
+def test_motor_report_rejects_any_dirty_tracked_product_source(tmp_path: Path) -> None:
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True)
+    product_source = tmp_path / "models/effect_contract_audit.py"
+    product_source.parent.mkdir()
+    product_source.write_bytes(b"committed report model validation\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Probe Test",
+            "-c",
+            "user.email=probe@example.invalid",
+            "commit",
+            "-m",
+            "source",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    # Generated output is untracked and remains allowed.
+    (tmp_path / "live-result.json").write_text("{}\n")
+    verify_no_dirty_tracked_files(tmp_path)
+    product_source.write_bytes(b"modified report model validation\n")
+    with pytest.raises(ValueError, match="dirty tracked files"):
+        verify_no_dirty_tracked_files(tmp_path)

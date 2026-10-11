@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from typing import TYPE_CHECKING
 
@@ -51,6 +52,13 @@ def _project(root: Path) -> tuple[Path, Path]:
                         "operation": "write",
                         "channel": "custom",
                         "resource": {"kind": "argument", "index": 0},
+                        "package": {
+                            "python": ">=3.0,<4",
+                            "source_hashes": {
+                                "helpers.py": "sha256:"
+                                + hashlib.sha256((root / "helpers.py").read_bytes()).hexdigest()
+                            },
+                        },
                     }
                 ],
             },
@@ -110,6 +118,11 @@ def test_contract_evidence_decorates_existing_candidates_without_changing_impact
     assert evidence[0].status == "declared_reachable"
     assert evidence[0].change_to_call_flow == "not_established"
     assert evidence[0].resource_identity_status == "unavailable"
+    assert evidence[0].package_applicability == "source_pins_evaluated"
+    assert (
+        evidence[0].package_applicability
+        == configured.effect_contract_audit.scope.package_applicability
+    )
     assert evidence[0].config_hash == configured.effect_contract_audit.provenance.config_hash
     assert all(
         item.producer.value != "effect_contract"

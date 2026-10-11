@@ -57,7 +57,7 @@ def _matches(relative: str, patterns: tuple[str, ...]) -> bool:
 
 
 def _module_name(relative: Path, package_prefix: str) -> str:
-    stem = relative.with_suffix("") if relative.suffix == ".py" else relative
+    stem = relative.with_suffix("") if relative.suffix in {".py", ".pyi"} else relative
     parts = list(stem.parts)
     if parts and parts[-1] == "__init__":
         parts.pop()

@@ -581,3 +581,71 @@ def test_consumed_generator_summary_round_trips_through_cache(tmp_path: Path) ->
     assert expected.references_lines_low_only("worker.py", {1})
     assert actual.references_lines_low_only("worker.py", {1})
     assert actual.call_stacks == expected.call_stacks
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "sum((changed() for _ in range(1)), start=0)",
+        "sum((changed() for _ in range(1)), 0)",
+        "min((changed() for _ in range(1)), default=0)",
+        "max((changed() for _ in range(1)), key=abs, default=0)",
+        "dict((str(changed()), 1) for _ in range(1))",
+        "dict(((str(changed()), 1) for _ in range(1)), extra=2)",
+        "deque((changed() for _ in range(1)), maxlen=0)",
+        "deque(iterable=(changed() for _ in range(1)), maxlen=0)",
+        "deque((changed() for _ in range(1)), 0)",
+    ],
+)
+def test_exact_eager_consumer_supported_argument_shapes(tmp_path: Path, expression: str) -> None:
+    (tmp_path / "worker.py").write_text("def changed() -> int:\n    return 1\n")
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from worker import changed\nfrom collections import deque\n\n"
+        f"def handler():\n    return {expression}\n"
+    )
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=4))
+    assert deps.references_symbol_at_line("worker.py", 1) is not None
+    assert deps.references_lines_low_only("worker.py", {1})
+    assert not deps.analysis_incomplete
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "sum(iterable=(changed() for _ in range(1)), start=0)",
+        "sum((changed() for _ in range(1)), 0, start=1)",
+        "min((changed() for _ in range(1)), 0, default=0)",
+        "max((changed() for _ in range(1)), unknown=True)",
+        "dict(iterable=(changed() for _ in range(1)))",
+        "dict((changed() for _ in range(1)), {})",
+        "deque((changed() for _ in range(1)), 0, maxlen=1)",
+        "deque((changed() for _ in range(1)), unsupported=True)",
+    ],
+)
+def test_nonconsuming_or_invalid_consumer_arguments_defer_body(
+    tmp_path: Path, expression: str
+) -> None:
+    (tmp_path / "worker.py").write_text("def changed() -> int:\n    return 1\n")
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from worker import changed\nfrom collections import deque\n\n"
+        f"def handler():\n    return {expression}\n"
+    )
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=4))
+    assert deps.references_symbol_at_line("worker.py", 1) is None
+
+
+def test_unknown_splat_consumer_arguments_record_limitation(tmp_path: Path) -> None:
+    _write_generator_project(tmp_path)
+    main = tmp_path / "main.py"
+    main.write_text(
+        "from streams import sync_stream\n\ndef handler(options):\n"
+        "    return sum(sync_stream(), **options)\n"
+    )
+    deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=3))
+    assert deps.references_symbol_at_line("worker.py", 1) is None
+    assert deps.analysis_incomplete
+    assert any(
+        item.cap == "UNRESOLVED_GENERATOR_CONSUMER_ARGUMENTS" for item in deps.analysis_limitations
+    )
