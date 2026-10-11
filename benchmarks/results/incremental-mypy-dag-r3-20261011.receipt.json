@@ -1,0 +1,121 @@
+{
+  "exit_code": 0,
+  "raw_artifact": "incremental-mypy-dag-r3-20261011.raw.json",
+  "raw_sha256": "3e37254eba3b7fd099244dbf0905c2fcb6d2f569dde2a9aedfa1f9a76bd2b2cc",
+  "raw_bytes": 733538,
+  "stderr_bytes": 0,
+  "run_id": "31094b55-4687-4b94-837b-86a4bffd5560",
+  "source": {
+    "argv": [
+      "/tmp/test-ast-gh283-medium-measurement-r2-20261011/.venv/bin/python",
+      "benchmarks/incremental_mypy_dag.py",
+      "--modules",
+      "96",
+      "--samples",
+      "5"
+    ],
+    "git_revision": "18693940702afa4ee0efbccd3f72e3d4596e38ce",
+    "git_worktree_status": "",
+    "implementation_source": [
+      {
+        "path": "/tmp/test-ast-gh283-medium-measurement-r2-20261011/benchmarks/incremental_mypy_dag.py",
+        "sha256": "ef0516b37b90bdf9549b97c56e9ea5fd2bd57e1f1007a7587ad1cc8e9451cd6a"
+      },
+      {
+        "path": "src/fastapi_endpoint_detector/analyzer/mypy_incremental.py",
+        "sha256": "04c1f34a0e2ace82d84986a344d3460487e05336498c59e08aaab72d613a7893"
+      },
+      {
+        "path": "src/fastapi_endpoint_detector/models/endpoint.py",
+        "sha256": "a797ca78d294c3570c7ff3a064dae9092aafbc7c35ab0ce77568611c49b7e302"
+      },
+      {
+        "path": "pyproject.toml",
+        "sha256": "927af29f692440023921f821cbc8ae2907a03b64d29054d6bd62dbfd6e55d5a9"
+      }
+    ],
+    "modules": 96,
+    "python_target": "3.11",
+    "samples": 5,
+    "uv_lock_sha256": "9bb538756a2916851038f328cefefa078b66a23d203471c1e3b932a1ac2732fe"
+  },
+  "python": "3.12.14",
+  "mypy": "1.19.1",
+  "phase_sample_counts": {
+    "cold_build": 5,
+    "fallback_full_rebuild": 5,
+    "incremental_update": 5,
+    "no_change_reuse": 5,
+    "signature_update_with_dependency_invalidation": 5
+  },
+  "seconds": {
+    "cold_build": {
+      "max": 14.335748780053109,
+      "p50": 8.777494329027832,
+      "p95": 14.335748780053109,
+      "samples": [
+        10.129704149439931,
+        7.941148931160569,
+        8.777494329027832,
+        14.335748780053109,
+        6.834438357967883
+      ]
+    },
+    "fallback_full_rebuild": {
+      "max": 10.712793501093984,
+      "p50": 8.69939645100385,
+      "p95": 10.712793501093984,
+      "samples": [
+        10.712793501093984,
+        8.69939645100385,
+        9.757435109931976,
+        7.385231766849756,
+        5.084215539973229
+      ]
+    },
+    "incremental_update": {
+      "max": 0.35974644403904676,
+      "p50": 0.18025902658700943,
+      "p95": 0.35974644403904676,
+      "samples": [
+        0.18025902658700943,
+        0.2069332068786025,
+        0.35974644403904676,
+        0.040467957966029644,
+        0.10484389681369066
+      ]
+    },
+    "no_change_reuse": {
+      "max": 0.2954248790629208,
+      "p50": 0.10888416925445199,
+      "p95": 0.2954248790629208,
+      "samples": [
+        0.2954248790629208,
+        0.10888416925445199,
+        0.12393439281731844,
+        0.02517842687666416,
+        0.08545823907479644
+      ]
+    },
+    "signature_update_with_dependency_invalidation": {
+      "max": 0.3681790246628225,
+      "p50": 0.2380737140774727,
+      "p95": 0.3681790246628225,
+      "samples": [
+        0.3681790246628225,
+        0.2380737140774727,
+        0.3033665493130684,
+        0.15460729273036122,
+        0.11683740513399243
+      ]
+    }
+  },
+  "all_update_phases_match_independent_cold_build": true,
+  "runtime_gate": {
+    "gh283_medium_project_acceptance": "not_established_by_synthetic_fixture",
+    "measured_incremental_p95_seconds": 0.35974644403904676,
+    "passed_for_trusted_synthetic_provider_only": true,
+    "threshold_seconds": 30.0
+  },
+  "scope": "trusted generated fixture only; not a host-project corpus score"
+}

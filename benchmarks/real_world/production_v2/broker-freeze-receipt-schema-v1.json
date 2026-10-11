@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ground-truth-python-broker-freeze-receipt-v1",
+  "title": "Receipt binding the versioned Python broker bundle and launch freeze",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "protocol",
+    "runtime_attestation_path",
+    "runtime_attestation_sha256",
+    "bundle_manifest_path",
+    "bundle_sha256",
+    "binding_path",
+    "binding_sha256",
+    "launch_profile_path",
+    "launch_profile_protocol",
+    "launch_profile_sha256",
+    "toolchain_sha256",
+    "lease_path",
+    "hold_until"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "protocol": {"const": "ground-truth-python-broker-freeze-receipt-v1"},
+    "runtime_attestation_path": {"type": "string", "format": "uri-reference", "pattern": "^/"},
+    "runtime_attestation_sha256": {"$ref": "#/$defs/sha256"},
+    "bundle_manifest_path": {"type": "string", "format": "uri-reference", "pattern": "^/"},
+    "bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "binding_path": {"type": "string", "format": "uri-reference", "pattern": "^/"},
+    "binding_sha256": {"$ref": "#/$defs/sha256"},
+    "launch_profile_path": {"type": "string", "format": "uri-reference", "pattern": "^/"},
+    "launch_profile_protocol": {"const": "ground-truth-python-broker-launch-profile-v2"},
+    "launch_profile_sha256": {"$ref": "#/$defs/sha256"},
+    "toolchain_sha256": {"$ref": "#/$defs/sha256"},
+    "lease_path": {"type": "string", "format": "uri-reference", "pattern": "^/"},
+    "hold_until": {"const": "escrow_finalized"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
