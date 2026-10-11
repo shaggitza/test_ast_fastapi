@@ -50,8 +50,10 @@ def _contract_hash(contract: EffectContract) -> str:
     if isinstance(package, dict) and not package.get("source_hashes"):
         package.pop("source_hashes", None)
     behavior = payload.get("behavior")
-    if isinstance(behavior, dict) and behavior.get("stage_receiver_from_yield") is False:
-        behavior.pop("stage_receiver_from_yield")
+    if isinstance(behavior, dict):
+        for field in ("stage_receiver_from_yield", "transaction_target_from_receiver"):
+            if behavior.get(field) is False:
+                behavior.pop(field)
     canonical_bytes = json.dumps(
         payload,
         ensure_ascii=False,
