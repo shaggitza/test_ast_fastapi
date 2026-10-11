@@ -2731,15 +2731,13 @@ class MypyAnalyzer:
 
         def scoped_import_aliases(
             tree: ast.Module, module_name: str
-        ) -> tuple[dict[str, str], dict[tuple[str, int], frozenset[str]]]:
-            """Find unambiguous function-local module imports for write detection.
-
-            These aliases are deliberately used only to recognize mutation targets;
-            lexical shadow checks still prevent unrelated same-named parameters
-            from being mistaken for imported modules.
-            """
+        ) -> tuple[
+            dict[str, str],
+            dict[tuple[str, int], dict[str, str]],
+        ]:
+            """Find function-local imports without merging their lexical identities."""
             aliases: dict[str, str] = {}
-            aliases_by_scope: dict[tuple[str, int], frozenset[str]] = {}
+            aliases_by_scope: dict[tuple[str, int], dict[str, str]] = {}
             package = module_name.rpartition(".")[0].split(".") if "." in module_name else []
 
             class Imports(ast.NodeVisitor):
@@ -2790,11 +2788,11 @@ class MypyAnalyzer:
                     scanner = LocalImports()
                     for statement in node.body:
                         scanner.visit(statement)
+                    scope = (node.name, node.lineno)
+                    aliases_by_scope[scope] = found
                     for local, imported in found.items():
-                        aliases_by_scope[(node.name, node.lineno)] = frozenset(found)
-                        if local not in module_aliases(tree.body, module_name):
-                            prior = aliases.get(local)
-                            aliases[local] = imported if prior in {None, imported} else "*"
+                        prior = aliases.get(local)
+                        aliases[local] = imported if prior in {None, imported} else "*"
 
                     for child in node.body:
                         if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -2866,8 +2864,11 @@ class MypyAnalyzer:
                 self.shadowed: set[str] = set()
                 self.by_node: dict[int, frozenset[str]] = {}
                 self.local_imports_by_node: dict[int, frozenset[str]] = {}
-                self.local_imports_by_scope: dict[tuple[str, int], frozenset[str]] = {}
+                self.local_aliases_by_node: dict[int, dict[str, str]] = {}
+                self.class_local_store_targets: set[int] = set()
+                self.local_imports_by_scope: dict[tuple[str, int], dict[str, str]] = {}
                 self._current_local_imports: frozenset[str] = frozenset()
+                self._current_local_aliases: dict[str, str] = {}
                 self.unsupported_nonlocal = False
                 self.unsupported_module_alias = False
                 self.aliases = aliases
@@ -2877,6 +2878,7 @@ class MypyAnalyzer:
                 self.local_imports_by_node[id(node)] = getattr(
                     self, "_current_local_imports", frozenset()
                 )
+                self.local_aliases_by_node[id(node)] = dict(self._current_local_aliases)
                 return super().visit(node)
 
             def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -2887,7 +2889,7 @@ class MypyAnalyzer:
 
             def _visit_function_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
                 self.by_node[id(node)] = frozenset(self.shadowed)
-                local_imports = local_imports_by_scope.get((node.name, node.lineno), frozenset())
+                local_aliases = local_imports_by_scope.get((node.name, node.lineno), {})
                 local_names: set[str] = {
                     arg.arg
                     for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
@@ -2967,24 +2969,36 @@ class MypyAnalyzer:
                 local_names.difference_update(global_names)
                 if self_nonlocal[0]:
                     self.unsupported_nonlocal = True
+                inherited_aliases = {
+                    name: imported
+                    for name, imported in self._current_local_aliases.items()
+                    if name not in local_names and name not in global_names
+                }
+                visible_aliases = {**inherited_aliases, **local_aliases}
+                visible_imports = frozenset(visible_aliases)
                 previous = self.shadowed
                 previous_imports: frozenset[str] = self._current_local_imports
+                previous_aliases = self._current_local_aliases
                 self.shadowed = (previous - global_names) | local_names
                 for statement in node.body:
-                    self._current_local_imports = local_imports
+                    self._current_local_imports = visible_imports
+                    self._current_local_aliases = visible_aliases
                     self.visit(statement)
                     self.shadowed = (previous - global_names) | local_names
                 self.shadowed = previous
                 self._current_local_imports = previous_imports
+                self._current_local_aliases = previous_aliases
 
             def visit_ClassDef(self, node: ast.ClassDef) -> None:
                 self.by_node[id(node)] = frozenset(self.shadowed)
                 local_names: set[str] = set()
+                scope_owner = [self]
 
                 class ClassBindings(ast.NodeVisitor):
                     def visit_Name(self, child: ast.Name) -> None:
                         if isinstance(child.ctx, ast.Store):
                             local_names.add(child.id)
+                            scope_owner[0].class_local_store_targets.add(id(child))
 
                     def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
                         # A bare annotation does not create a class namespace
@@ -3029,11 +3043,7 @@ class MypyAnalyzer:
                     def visit_GeneratorExp(self, child: ast.GeneratorExp) -> None:
                         return
 
-                class_bindings = ClassBindings()
-                for statement in node.body:
-                    class_bindings.visit(statement)
                 previous = self.shadowed
-                self.shadowed = previous | local_names
                 if any(
                     isinstance(child, (ast.Assign, ast.AnnAssign))
                     and child.value is not None
@@ -3042,11 +3052,20 @@ class MypyAnalyzer:
                     for child in ast.walk(statement)
                 ):
                     self.unsupported_module_alias = True
+                seen_class_names: set[str] = set()
                 for statement in node.body:
                     if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                         self.shadowed = previous
+                    collected_names = set(local_names)
+                    local_names.clear()
+                    ClassBindings().visit(statement)
+                    seen_class_names.update(local_names)
+                    local_names.clear()
+                    local_names.update(collected_names)
+                    # Class bodies use LOAD_NAME: a name falls back to globals
+                    # until an earlier statement has created a class value.
                     self.visit(statement)
-                    self.shadowed = previous | local_names
+                    self.shadowed = previous | seen_class_names
                 self.shadowed = previous
 
             def _visit_comprehension(
@@ -3093,12 +3112,18 @@ class MypyAnalyzer:
                 self._visit_comprehension(node, node.generators, [node.elt])
 
         def is_shadowed(node: ast.AST, target: ast.expr, scopes: ScopeBindings) -> bool:
+            if id(target) in scopes.class_local_store_targets:
+                return True
             root = target
             while isinstance(root, (ast.Attribute, ast.Subscript)):
                 root = root.value
             return isinstance(root, ast.Name) and root.id in scopes.by_node.get(
                 id(node), frozenset()
             )
+
+        def aliases_at_node(node: ast.AST, scopes: ScopeBindings) -> dict[str, str]:
+            """Overlay imports bound by this function on module-level imports."""
+            return {**aliases, **scopes.local_aliases_by_node.get(id(node), {})}
 
         for module_name in sorted(self._project_modules):
             path = self._module_to_path.get(module_name)
@@ -3120,7 +3145,6 @@ class MypyAnalyzer:
                 break
             aliases = module_aliases(tree.body, module_name)
             local_module_aliases, local_imports_by_scope = scoped_import_aliases(tree, module_name)
-            mutation_aliases = {**aliases, **local_module_aliases}
             imported_names = {
                 item.asname or item.name.split(".")[0]
                 for statement in tree.body
@@ -3146,7 +3170,7 @@ class MypyAnalyzer:
                     while stack:
                         candidate = stack.pop()
                         if not isinstance(candidate, ast.Name) and target_is_mutation(
-                            candidate, aliases, imported_names
+                            candidate, aliases_at_node(node, scopes), imported_names
                         ):
                             found_mutation = True
                             break
@@ -3171,12 +3195,20 @@ class MypyAnalyzer:
                         and target_root.id
                         in scopes.local_imports_by_node.get(id(node), frozenset())
                     )
+                    if isinstance(
+                        target, ast.Name
+                    ) and target.id in scopes.local_imports_by_node.get(id(node), frozenset()):
+                        # Rebinding a function-local import name changes only
+                        # that local binding; it does not mutate the module.
+                        continue
                     if is_shadowed(node, target, scopes) and not local_import_target:
                         continue
                     stack = [target]
                     while stack:
                         candidate = stack.pop()
-                        if target_is_mutation(candidate, mutation_aliases, imported_names):
+                        if target_is_mutation(
+                            candidate, aliases_at_node(node, scopes), imported_names
+                        ):
                             found_mutation = True
                             break
                         if isinstance(candidate, (ast.Tuple, ast.List)):
@@ -3186,8 +3218,9 @@ class MypyAnalyzer:
                 if found_mutation:
                     break
                 if isinstance(node, ast.Call):
+                    node_aliases = aliases_at_node(node, scopes)
                     dynamic_name = node.func.id if isinstance(node.func, ast.Name) else ""
-                    dynamic_fullname = aliases.get(dynamic_name, "")
+                    dynamic_fullname = node_aliases.get(dynamic_name, "")
                     if dynamic_name in {"exec", "eval"} or dynamic_fullname in {
                         "builtins.exec",
                         "builtins.eval",
@@ -3200,7 +3233,7 @@ class MypyAnalyzer:
                                 is not None
                                 and declaration[0] == fullname
                             )
-                            for module in aliases.values()
+                            for module in node_aliases.values()
                         ):
                             found_mutation = True
                             break
@@ -3208,9 +3241,9 @@ class MypyAnalyzer:
                     # the local proof: that code can rebind its attributes.
                     if any(
                         not is_shadowed(node, argument, scopes)
-                        and (argument_path := imported_path(argument, aliases)) is not None
+                        and (argument_path := imported_path(argument, node_aliases)) is not None
                         and argument_path != "*"
-                        and argument_path in aliases.values()
+                        and argument_path in node_aliases.values()
                         and (module_identity := self._resolve_fullname_to_file(argument_path))
                         is not None
                         and module_identity[1] == argument_path
@@ -3227,7 +3260,7 @@ class MypyAnalyzer:
                         receiver = (
                             None
                             if is_shadowed(node, node.args[0], scopes)
-                            else imported_path(node.args[0], aliases)
+                            else imported_path(node.args[0], node_aliases)
                         )
                         attribute = node.args[1]
                         if receiver == "*" or (receiver and fullname.startswith(f"{receiver}.")):

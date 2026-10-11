@@ -125,6 +125,24 @@ def test_shadowed_parameter_write_does_not_mutate_imported_module(tmp_path: Path
     assert handler_call.canonical_symbol == "httpx._api.get"
 
 
+def test_shadowed_function_value_write_does_not_mutate_imported_module(tmp_path: Path) -> None:
+    """A function-local value is independent of the module import alias."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def unrelated(replacement: object) -> None:\n"
+        "    client = object()\n"
+        "    client.get = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.EXACT
+    assert handler_call.canonical_symbol == "httpx._api.get"
+
+
 def test_shadowed_class_binding_write_does_not_mutate_imported_module(tmp_path: Path) -> None:
     """A class namespace binding is independent of the module import alias."""
     app = tmp_path / "app"
@@ -258,6 +276,102 @@ def test_function_local_module_import_write_abstains(tmp_path: Path) -> None:
     assert handler_call.canonical_symbol is None
 
 
+def test_same_name_function_local_import_write_abstains(tmp_path: Path) -> None:
+    """A same-spelled local import still identifies the shared module object."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def mutate(replacement: object) -> None:\n"
+        "    import httpx as client\n"
+        "    client.get = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.AMBIGUOUS
+    assert handler_call.canonical_symbol is None
+    assert handler_call.reason_code == "mutated_imported_callable"
+
+
+def test_same_name_local_import_write_abstains_before_and_after(tmp_path: Path) -> None:
+    """Both sides of a source-visible local import write lose exact ownership."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def handler(url: str, replacement: object) -> None:\n"
+        "    client.get(url)\n"
+        "    def mutate() -> None:\n"
+        "        import httpx as client\n"
+        "        client.get = replacement\n"
+        "    client.get(url)\n",
+    )
+    handler_calls = [site for site in sites if site.source_spelling == "client.get"]
+    assert len(handler_calls) == 2
+    assert all(site.status == CallResolutionStatus.AMBIGUOUS for site in handler_calls)
+    assert all(site.canonical_symbol is None for site in handler_calls)
+    assert all(site.reason_code == "mutated_imported_callable" for site in handler_calls)
+
+
+def test_nested_function_mutation_uses_captured_local_module_import(tmp_path: Path) -> None:
+    """A nested function can mutate through its enclosing function's import."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def outer(replacement: object) -> None:\n"
+        "    import httpx as client\n"
+        "    def mutate() -> None:\n"
+        "        client.get = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.AMBIGUOUS
+    assert handler_call.canonical_symbol is None
+    assert handler_call.reason_code == "mutated_imported_callable"
+
+
+def test_different_same_name_local_module_does_not_poison_httpx(tmp_path: Path) -> None:
+    """A same-spelled import of another module has a distinct target identity."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def mutate(replacement: object) -> None:\n"
+        "    import json as client\n"
+        "    client.dumps = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.EXACT
+    assert handler_call.canonical_symbol == "httpx._api.get"
+
+
+def test_same_name_local_import_from_callable_is_not_module_write(tmp_path: Path) -> None:
+    """A local callable alias is distinct from the module-level module alias."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def mutate(replacement: object) -> None:\n"
+        "    from httpx import get as client\n"
+        "    client = replacement\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.EXACT
+    assert handler_call.canonical_symbol == "httpx._api.get"
+
+
 def test_local_import_name_does_not_capture_unrelated_parameter(tmp_path: Path) -> None:
     """A local import alias is active only in the function that imports it."""
     app = tmp_path / "app"
@@ -293,6 +407,42 @@ def test_annotation_only_class_name_does_not_shadow_module_lookup(tmp_path: Path
     handler_call = next(site for site in sites if site.source_spelling == "client.get")
     assert handler_call.status == CallResolutionStatus.AMBIGUOUS
     assert handler_call.canonical_symbol is None
+
+
+def test_class_attribute_write_before_later_binding_mutates_global(tmp_path: Path) -> None:
+    """A class name falls back to its global until a class value is assigned."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "class Holder:\n"
+        "    client.get = object()\n"
+        "    client = object()\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.AMBIGUOUS
+    assert handler_call.canonical_symbol is None
+
+
+def test_class_attribute_write_after_binding_is_class_local(tmp_path: Path) -> None:
+    """A prior class value shadows the global for later class statements."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "class Holder:\n"
+        "    client = object()\n"
+        "    client.get = object()\n"
+        "def handler(url: str) -> None:\n"
+        "    client.get(url)\n",
+    )
+    handler_call = next(site for site in sites if site.source_spelling == "client.get")
+    assert handler_call.status == CallResolutionStatus.EXACT
+    assert handler_call.canonical_symbol == "httpx._api.get"
 
 
 def test_class_value_and_unmutated_local_import_keep_scope(tmp_path: Path) -> None:
