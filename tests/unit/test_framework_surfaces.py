@@ -1248,6 +1248,31 @@ def test_untrusted_extra_lifespan_decorator_does_not_split_phases(tmp_path: Path
     )
 
 
+def test_lower_replacing_lifespan_decorator_does_not_report_stale_callback_effects(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.py").write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n\n"
+        "def replace(fn): return other\n\n"
+        "@asynccontextmanager\n"
+        "@replace\n"
+        "async def lifespan(app):\n"
+        "    await initialize()\n"
+        "    yield\n\n"
+        "app = FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+
+    inventory = _extract(tmp_path)
+
+    assert inventory.endpoints == []
+    assert inventory.status == InventoryStatus.CONDITIONAL
+    assert any(
+        "trusted contextlib.asynccontextmanager" in item.reason for item in inventory.limitations
+    )
+
+
 def test_lifespan_with_conditional_yield_fails_closed(tmp_path: Path) -> None:
     (tmp_path / "main.py").write_text(
         "from contextlib import asynccontextmanager\n"
