@@ -22,6 +22,7 @@ import sys
 import tempfile
 import tokenize
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import compat32
@@ -33,6 +34,14 @@ from typing import Any, ClassVar, Literal, Protocol, cast
 
 from packaging.utils import canonicalize_name
 
+from fastapi_endpoint_detector.analyzer.typed_cache_admission import (
+    CONSUMER_PROFILE,
+    CacheAdmissionError,
+    LocalTypedCachePolicy,
+    external_snapshots_unchanged,
+    prepare_cache_run,
+    remove_run,
+)
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
@@ -539,6 +548,7 @@ class _PartialCallable:
     args: tuple[Any, ...]
     arg_kinds: tuple[Any, ...]
     arg_names: tuple[str | None, ...]
+    placeholder_positions: tuple[int, ...] = ()
     # Callable actuals are captured when functools.partial is constructed.  The
     # AST expressions above are retained for Python's positional/keyword merge,
     # but must never be re-evaluated in the later invocation environment.
@@ -546,6 +556,18 @@ class _PartialCallable:
         tuple[str, tuple[tuple[str, InvocationKind], _FinitePointsTo | None]], ...
     ] = ()
     bound_strings: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+
+@dataclass(frozen=True)
+class _PartialMerge:
+    """One bounded effective partial invocation, including filled hole slots."""
+
+    args: tuple[Any, ...] = ()
+    arg_kinds: tuple[Any, ...] = ()
+    arg_names: tuple[str | None, ...] = ()
+    fixed_positional_slots: tuple[int, ...] = ()
+    invocation_positional_slots: tuple[int, ...] = ()
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -577,7 +599,7 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-elif-try-else-guaranteed-finally-v4-raising-snapshots-iteration-possible"
+        "conditional-elif-try-else-guaranteed-finally-v7-partial-holes-exposure-identities"
     )
     MAX_CALL_SPAN_SOURCE_BYTES = 2_000_000
     MAX_CALL_SPAN_SOURCE_NODES = 100_000
@@ -593,7 +615,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 7
+    EXECUTION_SUMMARY_VERSION = 8
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -621,6 +643,7 @@ class MypyAnalyzer:
         source_inventory: SourceInventory | None = None,
         no_site_packages: bool = False,
         target_platform: str | None = None,
+        typed_cache_policy: LocalTypedCachePolicy | None = None,
     ) -> None:
         """Initialize the mypy analyzer."""
         inventory_root = (
@@ -643,6 +666,8 @@ class MypyAnalyzer:
         # Ordinary analysis keeps mypy's historical environment discovery.
         self.no_site_packages = no_site_packages
         self.target_platform = target_platform
+        self.typed_cache_policy = typed_cache_policy or LocalTypedCachePolicy.disabled()
+        self.cache_admission_observation: dict[str, object] | None = None
         self._endpoint_deps: dict[str, EndpointDependencies] = {}
         self._active_endpoint_dependencies: EndpointDependencies | None = None
         self._active_source_file = str(self.source_root)
@@ -896,6 +921,7 @@ class MypyAnalyzer:
         from mypy.fscache import FileSystemCache
         from mypy.modulefinder import BuildSource
         from mypy.options import Options
+        from mypy.util import decode_python_encoding
 
         blocked_local_modules = self._unselected_local_modules()
         if self.source_inventory is not None:
@@ -919,8 +945,26 @@ class MypyAnalyzer:
             if self._expected_source_fingerprint is not None
             else self._source_records()
         )
+        cache_plan = None
+        external_source_bytes: dict[str, bytes] = {}
+        source_texts: dict[str, str] = {}
+        project_paths: dict[str, str] = {}
+        source_hashes: dict[str, str] = {}
+        if self.typed_cache_policy.enabled:
+            try:
+                project_paths = {module: str(path.resolve()) for path, module, _ in source_records}
+                source_hashes = {module: digest for _path, module, digest in source_records}
+                for path, _module, digest in source_records:
+                    snapshot = self._source_record_snapshots.get(str(path.resolve()))
+                    if snapshot is None or hashlib.sha256(snapshot).hexdigest() != digest:
+                        raise CacheAdmissionError("project source snapshot is unavailable or stale")
+                    source_texts[str(path.resolve())] = decode_python_encoding(snapshot)
+            except (CacheAdmissionError, OSError, ValueError):
+                source_texts.clear()
+
         for py_file, module_name, _digest in source_records:
-            sources.append(BuildSource(path=str(py_file), module=module_name))
+            source_text = source_texts.get(str(py_file.resolve()))
+            sources.append(BuildSource(path=str(py_file), module=module_name, text=source_text))
             self._module_to_path[module_name] = str(py_file)
 
         # Configure mypy for full analysis with AST retention
@@ -937,8 +981,8 @@ class MypyAnalyzer:
         blocked_local_paths: set[str] | None = None
         if self.source_inventory is not None:
             blocked_local_paths = set()
-            for module_name, covers_children, path, is_stub in blocked_local_modules:
-                blocked_local_paths.add(path)
+            for module_name, covers_children, blocked_path, is_stub in blocked_local_modules:
+                blocked_local_paths.add(blocked_path)
                 # Preserve normal typed imports for installed dependencies,
                 # while preventing mypy from traversing local files rejected
                 # by inventory include, exclude, or depth policy.
@@ -955,6 +999,31 @@ class MypyAnalyzer:
         options.incremental = False
         options.check_untyped_defs = True
         options.export_types = True  # Critical for type information!
+        # Keep all inventory and hermetic options in every retained cold build.
+        # Warm diagnostics may mutate only the original working options.
+        original_options = deepcopy(options)
+        if self.typed_cache_policy.enabled and source_texts:
+            try:
+                cache_plan, external_source_bytes = prepare_cache_run(
+                    self.typed_cache_policy,
+                    project_root=self.source_root,
+                    module_root=self.module_root,
+                    project_sources=project_paths,
+                    source_hashes=source_hashes,
+                    options=options,
+                    mypy_version=self._resolver_version,
+                    source_texts=source_texts,
+                )
+            except (CacheAdmissionError, OSError, ValueError) as exc:
+                cache_plan = None
+                self.cache_admission_observation = {
+                    "disposition": "cold_fallback",
+                    "reason": str(exc),
+                }
+        if cache_plan is not None:
+            options.incremental = True
+            options.cache_map = cache_plan.cache_map
+            options.cache_dir = str(cache_plan.run_root / "output")
 
         original_path = sys.path.copy()
         original_mypypath = os.environ.pop("MYPYPATH", None) if self.no_site_packages else None
@@ -963,6 +1032,7 @@ class MypyAnalyzer:
 
         try:
             fscache: FileSystemCache
+            cold_fscache: FileSystemCache
             if self.no_site_packages and sys.platform != "win32":
                 # mypy 1.19.1 unconditionally adds /usr/local/lib/mypy to its
                 # typeshed search paths on POSIX. Hide that one ambient fallback
@@ -1012,16 +1082,136 @@ class MypyAnalyzer:
                             raise FileNotFoundError(path)
                         return super().hash_digest(path)
 
+                # Keep a separate empty cache for any full cold fallback.
+                cold_fscache = HermeticFileSystemCache()
                 fscache = HermeticFileSystemCache()
             else:
+                cold_fscache = FileSystemCache()
                 fscache = FileSystemCache()
-            self._build_result = mypy_build(
-                sources=sources,
-                options=options,
-                fscache=fscache,
-                # mypy otherwise adds the process cwd even with no-site-packages.
-                alt_lib_path=str(self.module_root) if self.no_site_packages else None,
-            )
+            if cache_plan is not None and external_source_bytes:
+                base_fscache = fscache
+
+                class SnapshotFileSystemCache(FileSystemCache):
+                    def read(self, path: str) -> bytes:
+                        snapshot = external_source_bytes.get(str(Path(path).resolve()))
+                        return snapshot if snapshot is not None else base_fscache.read(path)
+
+                    def hash_digest(self, path: str) -> str:
+                        snapshot = external_source_bytes.get(str(Path(path).resolve()))
+                        if snapshot is not None:
+                            return hashlib.sha1(snapshot).hexdigest()
+                        return base_fscache.hash_digest(path)
+
+                    def stat_or_none(self, path: str) -> os.stat_result | None:
+                        return base_fscache.stat_or_none(path)
+
+                    def listdir(self, path: str) -> list[str]:
+                        return base_fscache.listdir(path)
+
+                fscache = SnapshotFileSystemCache()
+            warm_fallback = False
+            proof_failed = False
+            try:
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=options,
+                    fscache=fscache,
+                    # mypy otherwise adds the process cwd even with no-site-packages.
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                if cache_plan is not None:
+                    hit_modules = {
+                        module
+                        for module in cache_plan.admitted_modules
+                        if module in self._build_result.graph
+                        and getattr(self._build_result.graph[module], "tree", None) is not None
+                        and module not in self._build_result.manager.rechecked_modules
+                    }
+                    graph_source_hashes_match = hit_modules == set(
+                        cache_plan.admitted_modules
+                    ) and all(
+                        isinstance(cache_plan.expected_graph.get(module), str)
+                        and getattr(self._build_result.graph[module], "meta_source_hash", None)
+                        == cache_plan.expected_graph[module]
+                        for module in cache_plan.admitted_modules
+                    )
+                    roots_fresh = set(self._module_to_path) <= set(
+                        self._build_result.manager.rechecked_modules
+                    )
+                    cache_inputs_intact = all(
+                        hashlib.sha256(Path(cache_path).read_bytes()).hexdigest() == digest
+                        for cache_path, digest in (cache_plan.artifact_hashes or {}).items()
+                    )
+                    external_sources_unchanged = external_snapshots_unchanged(external_source_bytes)
+                    self.cache_admission_observation = {
+                        "scope": "local_synthetic_diagnostic_only",
+                        "consumer_profile": CONSUMER_PROFILE,
+                        "cache_hit_modules": sorted(hit_modules),
+                        "graph_source_hashes_match": graph_source_hashes_match,
+                        "graph_source_hashes": {
+                            module: getattr(
+                                self._build_result.graph[module], "meta_source_hash", None
+                            )
+                            for module in hit_modules
+                        },
+                        "manifest_source_hashes": {
+                            module: cache_plan.expected_graph.get(module) for module in hit_modules
+                        },
+                        "cache_artifact_sha256": sorted(
+                            (cache_plan.artifact_hashes or {}).values()
+                        ),
+                        "roots_fresh": roots_fresh,
+                        "cache_inputs_intact": cache_inputs_intact,
+                        "external_sources_unchanged": external_sources_unchanged,
+                        "warm_rechecked_modules": sorted(
+                            self._build_result.manager.rechecked_modules
+                        ),
+                        "trust_id": cache_plan.trust_id,
+                        "manifest_sha256": cache_plan.manifest_sha256,
+                    }
+                    proof_failed = (
+                        not hit_modules
+                        or not graph_source_hashes_match
+                        or not roots_fresh
+                        or not cache_inputs_intact
+                        or not external_sources_unchanged
+                    )
+            except Exception as warm_error:
+                # The boundary covers both mypy_build and every warm proof read
+                # and validation. BaseException cancellation propagates through
+                # the outer finally, which closes the staged descriptors.
+                if cache_plan is None:
+                    raise
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=original_options,
+                    fscache=cold_fscache,
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                warm_fallback = True
+                self.cache_admission_observation = {
+                    "scope": "local_synthetic_diagnostic_only",
+                    "consumer_profile": CONSUMER_PROFILE,
+                    "disposition": "cold_fallback",
+                    "reason": "warm_build_or_proof_exception",
+                    "exception_type": type(warm_error).__name__,
+                }
+            if cache_plan is not None and not warm_fallback:
+                # The paired v2 identity/report/runtime protocol is not enabled
+                # in this tranche. Keep the successful read as a private
+                # diagnostic and expose only the legacy full-cold result.
+                self._build_result = mypy_build(
+                    sources=sources,
+                    options=original_options,
+                    fscache=cold_fscache,
+                    alt_lib_path=str(self.module_root) if self.no_site_packages else None,
+                )
+                assert self.cache_admission_observation is not None
+                self.cache_admission_observation["fallback"] = (
+                    "cache_proof_failed"
+                    if proof_failed
+                    else "v2_identity_report_runtime_protocol_not_enabled"
+                )
             self._verified_mypy_source_hashes = {}
             self._verified_package_source_hashes = {}
             self._verified_package_versions = {}
@@ -1326,6 +1516,7 @@ class MypyAnalyzer:
             self._built_source_fingerprint = self._expected_source_fingerprint
 
         finally:
+            remove_run(cache_plan)
             sys.path = original_path
             if self.no_site_packages and original_mypypath is not None:
                 os.environ["MYPYPATH"] = original_mypypath
@@ -3359,13 +3550,15 @@ class MypyAnalyzer:
         joined: dict[str, Any] = {}
         for name in sorted(common):
             targets: list[Any] = []
+            possible_only = False
             for environment in environments:
                 value = environment[name]
+                possible_only |= isinstance(value, _CallableUnion)
                 candidates = value.targets if isinstance(value, _CallableUnion) else (value,)
                 for candidate in candidates:
                     if candidate not in targets:
                         targets.append(candidate)
-            if len(targets) == 1:
+            if len(targets) == 1 and not possible_only:
                 joined[name] = targets[0]
             elif targets and len(targets) <= self.MAX_POINTS_TO_TARGETS:
                 joined[name] = _CallableUnion(tuple(targets))
@@ -3806,6 +3999,8 @@ class MypyAnalyzer:
             imported = self._explicit_import_fullname(expression, import_map)
             raw_fullname = imported or getattr(expression, "fullname", "")
             global_fullname = raw_fullname if isinstance(raw_fullname, str) else ""
+            if imported == "functools.Placeholder":
+                return _FinitePointsTo(("functools.Placeholder",))
             return (
                 self._finite_global_value(global_fullname, budget)
                 if "." in global_fullname
@@ -3813,6 +4008,8 @@ class MypyAnalyzer:
             )
         if isinstance(expression, MemberExpr):
             imported = self._explicit_import_fullname(expression, import_map)
+            if imported == "functools.Placeholder":
+                return _FinitePointsTo(("functools.Placeholder",))
             if imported is not None:
                 global_value = self._finite_global_value(imported, budget)
                 if global_value is not None:
@@ -5134,6 +5331,236 @@ class MypyAnalyzer:
                 arguments=self._call_argument_evidence(call),
             )
 
+    @staticmethod
+    def _merge_partial_invocation(
+        stored_args: tuple[Any, ...],
+        stored_kinds: tuple[Any, ...],
+        stored_names: tuple[str | None, ...],
+        placeholder_positions: tuple[int, ...],
+        invocation_args: tuple[Any, ...],
+        invocation_kinds: tuple[Any, ...],
+        invocation_names: tuple[str | None, ...],
+        positional_formal_names: tuple[str, ...],
+    ) -> _PartialMerge:
+        """Fill source-proven positional holes before appending new actuals."""
+        from mypy.nodes import ARG_NAMED, ARG_POS, ARG_STAR, ARG_STAR2
+
+        if not (
+            len(stored_args) == len(stored_kinds) == len(stored_names)
+            and len(invocation_args) == len(invocation_kinds) == len(invocation_names)
+        ):
+            return _PartialMerge(reason="PARTIAL_ARGUMENT_SHAPE_MISMATCH")
+        if len(stored_args) + len(invocation_args) > 256:
+            return _PartialMerge(reason="MAX_PARTIAL_ARGUMENTS")
+        if any(kind in (ARG_STAR, ARG_STAR2) for kind in (*stored_kinds, *invocation_kinds)):
+            return _PartialMerge(reason="UNRESOLVED_PARTIAL_STAR_ARGUMENTS")
+
+        stored_positional: list[tuple[Any, Any, str | None]] = []
+        stored_keywords: list[tuple[Any, Any, str | None]] = []
+        invocation_positional: list[tuple[Any, Any, str | None]] = []
+        invocation_keywords: list[tuple[Any, Any, str | None]] = []
+        for args, kinds, names, positional, keywords in (
+            (stored_args, stored_kinds, stored_names, stored_positional, stored_keywords),
+            (
+                invocation_args,
+                invocation_kinds,
+                invocation_names,
+                invocation_positional,
+                invocation_keywords,
+            ),
+        ):
+            for arg, kind, name in zip(args, kinds, names, strict=True):
+                if kind == ARG_POS and name is None:
+                    positional.append((arg, kind, name))
+                elif kind == ARG_NAMED and name is not None:
+                    keywords.append((arg, kind, name))
+                else:
+                    return _PartialMerge(reason="UNSUPPORTED_PARTIAL_ARGUMENT_KIND")
+
+        holes = placeholder_positions
+        if tuple(sorted(set(holes))) != holes or any(
+            position < 0 or position >= len(stored_positional) for position in holes
+        ):
+            return _PartialMerge(reason="INVALID_PARTIAL_PLACEHOLDER_MAP")
+        if len(invocation_positional) < len(holes):
+            return _PartialMerge(reason="UNFILLED_PARTIAL_PLACEHOLDERS")
+
+        hole_set = set(holes)
+        filled_positional: list[tuple[Any, Any, str | None]] = []
+        fixed_slots: list[int] = []
+        invocation_slots: list[int] = []
+        next_actual = 0
+        for slot, stored in enumerate(stored_positional):
+            if slot in hole_set:
+                filled_positional.append(invocation_positional[next_actual])
+                invocation_slots.append(slot)
+                next_actual += 1
+            else:
+                filled_positional.append(stored)
+                fixed_slots.append(slot)
+        for extra_index, actual in enumerate(invocation_positional[next_actual:]):
+            filled_positional.append(actual)
+            invocation_slots.append(len(stored_positional) + extra_index)
+
+        overridden = {name for _arg, _kind, name in invocation_keywords}
+        effective_keywords = [item for item in stored_keywords if item[2] not in overridden]
+        effective_keywords.extend(invocation_keywords)
+        keyword_names = {name for _arg, _kind, name in effective_keywords}
+        if len(keyword_names) != len(effective_keywords):
+            return _PartialMerge(reason="INVALID_PARTIAL_ARGUMENTS")
+        if len(filled_positional) > len(positional_formal_names):
+            return _PartialMerge(reason="UNSUPPORTED_PARTIAL_SIGNATURE")
+        if any(
+            positional_formal_names[slot] in keyword_names
+            for slot in (*fixed_slots, *invocation_slots)
+        ):
+            return _PartialMerge(reason="INVALID_PARTIAL_ARGUMENTS")
+
+        merged = [*filled_positional, *effective_keywords]
+        return _PartialMerge(
+            args=tuple(item[0] for item in merged),
+            arg_kinds=tuple(item[1] for item in merged),
+            arg_names=tuple(item[2] for item in merged),
+            fixed_positional_slots=tuple(fixed_slots),
+            invocation_positional_slots=tuple(invocation_slots),
+        )
+
+    def _partial_placeholder_state(
+        self,
+        expression: Any,
+        environment: dict[str, _FinitePointsTo],
+        import_map: dict[str, str],
+        budget: list[int],
+    ) -> bool | None:
+        """Distinguish the source singleton from proven concrete stored values."""
+        from mypy.nodes import (
+            BytesExpr,
+            ComplexExpr,
+            DictExpr,
+            EllipsisExpr,
+            FloatExpr,
+            IntExpr,
+            ListExpr,
+            NameExpr,
+            SetExpr,
+            StrExpr,
+            TupleExpr,
+        )
+        from mypy.types import Instance, get_proper_type
+
+        value = self._finite_expression_value(expression, environment, import_map, (), budget)
+        if value is not None:
+            if value.types == ("functools.Placeholder",):
+                return True
+            if "functools.Placeholder" in value.types:
+                return None
+            return False
+        if isinstance(
+            expression,
+            (
+                BytesExpr,
+                ComplexExpr,
+                DictExpr,
+                EllipsisExpr,
+                FloatExpr,
+                IntExpr,
+                ListExpr,
+                SetExpr,
+                StrExpr,
+                TupleExpr,
+            ),
+        ):
+            return False
+        if isinstance(expression, NameExpr) and expression.name in {"None", "True", "False"}:
+            return False
+        if self._callable_declaration(getattr(expression, "node", None)) is not None:
+            return False
+        proper = get_proper_type(self._get_type_from_node(expression))
+        if isinstance(proper, Instance) and proper.type.fullname in {
+            "builtins.bool",
+            "builtins.bytes",
+            "builtins.complex",
+            "builtins.dict",
+            "builtins.float",
+            "builtins.frozenset",
+            "builtins.int",
+            "builtins.list",
+            "builtins.set",
+            "builtins.str",
+            "builtins.tuple",
+        }:
+            return False
+        return None
+
+    @staticmethod
+    def _exposed_partial_names(root: Any, *, max_nodes: int = 4096) -> tuple[set[str], bool]:
+        """Collect local roots exposed through bounded argument expressions."""
+        from itertools import chain
+
+        from mypy.nodes import (
+            BytesExpr,
+            CallExpr,
+            ComplexExpr,
+            ConditionalExpr,
+            DictExpr,
+            EllipsisExpr,
+            FloatExpr,
+            IndexExpr,
+            IntExpr,
+            ListExpr,
+            MemberExpr,
+            NameExpr,
+            SetExpr,
+            StarExpr,
+            StrExpr,
+            TupleExpr,
+        )
+
+        if max_nodes < 1:
+            return set(), False
+        names: set[str] = set()
+        seen: set[int] = set()
+        pending = [root]
+        while pending:
+            item = pending.pop()
+            if item is None or id(item) in seen:
+                continue
+            seen.add(id(item))
+            if len(seen) > max_nodes:
+                return names, False
+            children: Any = ()
+            if isinstance(item, NameExpr):
+                names.add(item.name)
+            elif isinstance(item, MemberExpr):
+                children = (item.expr,)
+            elif isinstance(item, IndexExpr):
+                children = (item.base, item.index)
+            elif isinstance(item, (TupleExpr, ListExpr, SetExpr)):
+                children = item.items
+            elif isinstance(item, DictExpr):
+                children = chain.from_iterable(item.items)
+            elif isinstance(item, StarExpr):
+                children = (item.expr,)
+            elif isinstance(item, CallExpr):
+                children = chain(
+                    item.args,
+                    (item.callee.expr,) if isinstance(item.callee, MemberExpr) else (),
+                )
+            elif isinstance(item, ConditionalExpr):
+                children = (item.if_expr, item.else_expr)
+            elif isinstance(
+                item, (BytesExpr, ComplexExpr, EllipsisExpr, FloatExpr, IntExpr, StrExpr)
+            ):
+                continue
+            else:
+                return names, False
+            for child in children:
+                if child is not None:
+                    pending.append(child)
+                    if len(seen) + len(pending) > max_nodes:
+                        return names, False
+        return names, True
+
     def _trace_references(self, *args: Any, **kwargs: Any) -> None:
         """Keep source and endpoint context scoped across recursive traces."""
         saved = (
@@ -5232,6 +5659,7 @@ class MypyAnalyzer:
             LambdaExpr,
             ListComprehension,
             ListExpr,
+            MatchStmt,
             MemberExpr,
             NameExpr,
             OpExpr,
@@ -5660,72 +6088,82 @@ class MypyAnalyzer:
                         positional_formals = [
                             item for item in partial_arguments if item.kind in (ARG_POS, ARG_OPT)
                         ]
-                    positional_partial_parameters = (
-                        {
-                            positional_formals[index].variable.name
-                            for index, kind in enumerate(partial_alias.arg_kinds)
-                            if kind == ARG_POS and index < len(positional_formals)
-                        }
-                        if partial_alias is not None and partial_function is not None
-                        else set()
-                    )
                     invocation_positional_parameters: set[str] = set()
                     invocation_parameters = set(invocation_keywords)
-                    if partial_function is not None:
-                        partial_positional_count = (
-                            sum(kind == ARG_POS for kind in partial_alias.arg_kinds)
-                            if partial_alias is not None
-                            else 0
-                        )
-                        positional_formals = positional_formals[partial_positional_count:]
-                        invocation_positional_count = 0
-                        for kind, name in zip(call.arg_kinds, call.arg_names, strict=True):
-                            if kind == ARG_POS and name is None:
-                                if invocation_positional_count < len(positional_formals):
-                                    parameter_name = positional_formals[
-                                        invocation_positional_count
-                                    ].variable.name
-                                    invocation_parameters.add(parameter_name)
-                                    invocation_positional_parameters.add(parameter_name)
-                                invocation_positional_count += 1
-                    stored_keyword_parameters: set[str] = set()
-                    if partial_alias is not None and partial_function is not None:
-                        for kind, name in zip(
-                            partial_alias.arg_kinds,
-                            partial_alias.arg_names,
-                            strict=True,
-                        ):
-                            if kind == ARG_NAMED and name is not None:
-                                stored_keyword_parameters.add(name)
-                    invalid_partial_duplicate = bool(
-                        partial_alias is not None
-                        and (
-                            any(
-                                parameter in invocation_keywords
-                                and parameter in positional_partial_parameters
-                                for parameter, _captured in partial_alias.bound_callables
-                            )
-                            or bool(stored_keyword_parameters & invocation_positional_parameters)
-                        )
-                    )
                     if partial_alias is not None:
                         from types import SimpleNamespace as _CallShape
 
-                        kept_bound = [
-                            (expression, kind, name)
-                            for expression, kind, name in zip(
-                                partial_alias.args,
-                                partial_alias.arg_kinds,
-                                partial_alias.arg_names,
-                                strict=True,
-                            )
-                            if name is None or name not in invocation_keywords
-                        ]
-                        binding_call = _CallShape(
-                            args=[*(item[0] for item in kept_bound), *call.args],
-                            arg_kinds=[*(item[1] for item in kept_bound), *call.arg_kinds],
-                            arg_names=[*(item[2] for item in kept_bound), *call.arg_names],
+                        merge = self._merge_partial_invocation(
+                            partial_alias.args,
+                            partial_alias.arg_kinds,
+                            partial_alias.arg_names,
+                            partial_alias.placeholder_positions,
+                            tuple(call.args),
+                            tuple(call.arg_kinds),
+                            tuple(call.arg_names),
+                            tuple(item.variable.name for item in positional_formals),
                         )
+                        partial_invocation_reason = merge.reason
+                        if partial_invocation_reason is None:
+                            if partial_function is None or any(
+                                item.kind in (ARG_STAR, ARG_STAR2) for item in partial_arguments
+                            ):
+                                partial_invocation_reason = "UNSUPPORTED_PARTIAL_SIGNATURE"
+                            else:
+                                effective_keywords = {
+                                    name
+                                    for kind, name in zip(
+                                        merge.arg_kinds, merge.arg_names, strict=True
+                                    )
+                                    if kind == ARG_NAMED and name is not None
+                                }
+                                accepted_keywords = {
+                                    item.variable.name
+                                    for item in partial_arguments
+                                    if not item.pos_only
+                                }
+                                supplied_positionals = len(merge.fixed_positional_slots) + len(
+                                    merge.invocation_positional_slots
+                                )
+                                missing_required_positionals = any(
+                                    item.kind == ARG_POS
+                                    and index >= supplied_positionals
+                                    and item.variable.name not in effective_keywords
+                                    for index, item in enumerate(positional_formals)
+                                )
+                                missing_required_keywords = any(
+                                    item.kind == ARG_NAMED
+                                    and item.variable.name not in effective_keywords
+                                    for item in partial_arguments
+                                )
+                                if (
+                                    not effective_keywords <= accepted_keywords
+                                    or missing_required_positionals
+                                    or missing_required_keywords
+                                ):
+                                    partial_invocation_reason = "INVALID_PARTIAL_ARGUMENTS"
+                        if partial_invocation_reason is not None:
+                            deps.add_analysis_limitation(
+                                AnalysisLimitation(
+                                    file_path=current_file,
+                                    call_line=call.line,
+                                    cap=partial_invocation_reason,
+                                    call_column=call.column,
+                                )
+                            )
+                            callable_aliases = ()
+                            traced = True
+                        else:
+                            invocation_positional_parameters = {
+                                positional_formals[index].variable.name
+                                for index in merge.invocation_positional_slots
+                            }
+                            invocation_parameters.update(invocation_positional_parameters)
+                            binding_call = _CallShape(
+                                args=list(merge.args),
+                                arg_kinds=list(merge.arg_kinds),
+                                arg_names=list(merge.arg_names),
+                            )
                     for declaration, bound_receiver in callable_aliases:
                         alias_fullname, alias_invocation = declaration
                         if (
@@ -5733,7 +6171,6 @@ class MypyAnalyzer:
                             and call_site.status != CallResolutionStatus.EXACT
                             and alias_invocation == InvocationKind.FUNCTION
                             and not callable_alias_is_possible
-                            and not invalid_partial_duplicate
                         ):
                             deps.add_resolved_call_site(
                                 call_site.model_copy(
@@ -5794,16 +6231,7 @@ class MypyAnalyzer:
                             )
                             and id(call) not in awaited_call_ids
                         )
-                        if invalid_partial_duplicate:
-                            deps.add_analysis_limitation(
-                                AnalysisLimitation(
-                                    file_path=current_file,
-                                    call_line=call.line,
-                                    cap="INVALID_PARTIAL_ARGUMENTS",
-                                    call_column=call.column,
-                                )
-                            )
-                        elif not alias_is_unawaited_coroutine:
+                        if not alias_is_unawaited_coroutine:
                             resolve_and_trace(
                                 alias_fullname,
                                 call.line,
@@ -6121,6 +6549,29 @@ class MypyAnalyzer:
                     exposed_names.update(deferred_environment)
                     exposed_names.update(callable_environment)
                     exposed_names.update(partial_environment)
+            if partial_environment:
+                names, partial_exposure_complete = self._exposed_partial_names(call)
+                partial_exposed_names = exposed_names | names
+                if not partial_exposure_complete:
+                    partial_environment.clear()
+                    deps.add_analysis_limitation(
+                        AnalysisLimitation(
+                            file_path=current_file,
+                            call_line=call.line,
+                            cap="PARTIAL_EXPOSURE_SHAPE_UNSUPPORTED",
+                            limit=4096,
+                            call_column=call.column,
+                        )
+                    )
+                else:
+                    exposed_partial_ids = {
+                        id(partial_environment[name])
+                        for name in partial_exposed_names
+                        if name in partial_environment
+                    }
+                    for name, partial in list(partial_environment.items()):
+                        if name in partial_exposed_names or id(partial) in exposed_partial_ids:
+                            partial_environment.pop(name, None)
             for name in exposed_names:
                 flow_environment.pop(name, None)
                 deferred_environment.pop(name, None)
@@ -6129,21 +6580,132 @@ class MypyAnalyzer:
                 string_environment.pop(name, None)
                 partial_environment.pop(name, None)
 
+        def alias_target_names(target: Any) -> set[str]:
+            """Identify names bound by a local assignment target."""
+            if isinstance(target, (TupleExpr, ListExpr)):
+                return {name for item in target.items for name in alias_target_names(item)}
+            if isinstance(target, StarExpr):
+                return alias_target_names(target.expr)
+            return {target.name} if isinstance(target, NameExpr) else set()
+
+        def clear_alias_name(name: str) -> None:
+            flow_environment.pop(name, None)
+            string_environment.pop(name, None)
+            deferred_environment.pop(name, None)
+            callable_environment.pop(name, None)
+            partial_environment.pop(name, None)
+            lambda_environment.pop(name, None)
+
         def clear_alias_target(target: Any) -> None:
             """Invalidate bounded local aliases overwritten by a binding target."""
-            if isinstance(target, (TupleExpr, ListExpr)):
-                for item in target.items:
-                    clear_alias_target(item)
-            elif isinstance(target, StarExpr):
-                clear_alias_target(target.expr)
-            elif isinstance(target, NameExpr):
-                name = target.name
-                flow_environment.pop(name, None)
-                string_environment.pop(name, None)
-                deferred_environment.pop(name, None)
-                callable_environment.pop(name, None)
-                partial_environment.pop(name, None)
-                lambda_environment.pop(name, None)
+            for name in alias_target_names(target):
+                clear_alias_name(name)
+
+        def context_bound_names(body: Any) -> set[str] | None:
+            """Collect reachable local writes without entering nested scope bodies."""
+            from types import GetSetDescriptorType, MemberDescriptorType
+
+            from mypy.nodes import AssignmentExpr, DelStmt, Node, OperatorAssignmentStmt, TempNode
+
+            names: set[str] = set()
+            pending: list[Any] = [body]
+            seen: set[int] = set()
+            item_count = 0
+            while pending:
+                item = pending.pop()
+                item_count += 1
+                if item_count > self.MAX_CALL_SPAN_MYPY_ITEMS:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_ITEMS", limit=self.MAX_CALL_SPAN_MYPY_ITEMS
+                    )
+                    return None
+                if isinstance(item, (list, tuple)):
+                    pending.extend(item)
+                    continue
+                if not isinstance(item, Node) or id(item) in seen:
+                    continue
+                seen.add(id(item))
+                if len(seen) > self.MAX_CALL_SPAN_MYPY_NODES:
+                    self._record_analysis_limitation(
+                        "MAX_CONTEXT_BINDING_NODES", limit=self.MAX_CALL_SPAN_MYPY_NODES
+                    )
+                    return None
+                if isinstance(item, AssignmentStmt) and not isinstance(item.rvalue, TempNode):
+                    for assignment_target in item.lvalues:
+                        names.update(alias_target_names(assignment_target))
+                elif isinstance(item, AssignmentExpr):
+                    names.update(alias_target_names(item.target))
+                elif isinstance(item, OperatorAssignmentStmt):
+                    names.update(alias_target_names(item.lvalue))
+                elif isinstance(item, DelStmt):
+                    names.update(alias_target_names(item.expr))
+                elif isinstance(item, ForStmt):
+                    if (
+                        not item.is_async
+                        and isinstance(item.expr, (ListExpr, TupleExpr))
+                        and not item.expr.items
+                    ):
+                        pending.extend((item.expr, item.else_body))
+                        continue
+                    names.update(alias_target_names(item.index))
+                elif isinstance(item, WithStmt):
+                    for context_target in item.target:
+                        names.update(alias_target_names(context_target))
+                elif isinstance(item, TryStmt):
+                    for exception_target in item.vars:
+                        names.update(alias_target_names(exception_target))
+                elif isinstance(item, (FuncDef, Decorator, ClassDef)):
+                    names.add(item.name)
+                elif isinstance(item, Import):
+                    names.update(alias or module.split(".")[0] for module, alias in item.ids)
+                elif isinstance(item, ImportFrom):
+                    names.update(alias or name for name, alias in item.names)
+                if isinstance(item, IfStmt):
+                    can_reach_else = True
+                    for expression, branch in zip(item.expr, item.body, strict=True):
+                        pending.append(expression)
+                        truth = self._literal_boolean(expression)
+                        if truth is not False:
+                            pending.append(branch)
+                        if truth is True:
+                            can_reach_else = False
+                            break
+                    if can_reach_else:
+                        pending.append(item.else_body)
+                    continue
+                if isinstance(item, WhileStmt) and self._literal_boolean(item.expr) is False:
+                    pending.extend((item.expr, item.else_body))
+                    continue
+                if isinstance(item, LambdaExpr):
+                    # A lambda's body and bindings belong to its deferred scope.
+                    continue
+                fields = set(getattr(item, "__dict__", {}))
+                for cls in type(item).__mro__:
+                    fields.update(
+                        attribute
+                        for attribute, descriptor in cls.__dict__.items()
+                        if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
+                    )
+                for attribute in fields:
+                    if attribute.startswith("__") or attribute in {
+                        "node",
+                        "info",
+                        "type",
+                        "unanalyzed_type",
+                        "analyzed",
+                        "original_def",
+                        "expanded",
+                        "original_decorators",
+                    }:
+                        continue
+                    if isinstance(item, FuncDef) and attribute == "body":
+                        continue
+                    if isinstance(item, ClassDef) and attribute in {"defs", "removed_statements"}:
+                        continue
+                    child = getattr(item, attribute, None)
+                    if isinstance(child, (Node, list, tuple)):
+                        pending.append(child)
+            return names
 
         def walk_node(n: Any) -> bool | None:
             """Recursively walk a mypy AST node with a bounded local environment."""
@@ -6418,6 +6980,78 @@ class MypyAnalyzer:
                                     "CALLABLE_UNION_PARTIAL", limit=len(target_value.targets)
                                 )
                                 target_value = None
+                            placeholder_positions: list[int] = []
+                            partial_shape_reason: str | None = None
+                            if (
+                                n.rvalue.arg_kinds[0] != ARG_POS
+                                or n.rvalue.arg_names[0] is not None
+                            ):
+                                partial_shape_reason = "INVALID_PARTIAL_ARGUMENTS"
+                            elif (
+                                isinstance(partial_target, NameExpr)
+                                and partial_target.name in partial_environment
+                            ) or (
+                                isinstance(partial_target, CallExpr)
+                                and self._explicit_import_fullname(
+                                    partial_target.callee, import_map
+                                )
+                                == "functools.partial"
+                            ):
+                                partial_shape_reason = "NESTED_PARTIAL_COMPOSITION_UNSUPPORTED"
+                            elif len(n.rvalue.args) - 1 > 256:
+                                partial_shape_reason = "MAX_PARTIAL_ARGUMENTS"
+                            else:
+                                stored_slot = 0
+                                for expression, kind, name in zip(
+                                    n.rvalue.args[1:],
+                                    n.rvalue.arg_kinds[1:],
+                                    n.rvalue.arg_names[1:],
+                                    strict=True,
+                                ):
+                                    if kind in (ARG_STAR, ARG_STAR2):
+                                        partial_shape_reason = "UNRESOLVED_PARTIAL_STAR_ARGUMENTS"
+                                        break
+                                    if kind not in (ARG_POS, ARG_NAMED):
+                                        partial_shape_reason = "UNSUPPORTED_PARTIAL_ARGUMENT_KIND"
+                                        break
+                                    if isinstance(expression, NameExpr) and (
+                                        expression.name in callable_environment
+                                        or expression.name in lambda_environment
+                                    ):
+                                        placeholder_state: bool | None = False
+                                    elif (
+                                        self._finite_string_values(expression, string_environment)
+                                        is not None
+                                    ):
+                                        placeholder_state = False
+                                    else:
+                                        placeholder_state = self._partial_placeholder_state(
+                                            expression, flow_environment, import_map, finite_budget
+                                        )
+                                    if placeholder_state is None:
+                                        partial_shape_reason = (
+                                            "UNRESOLVED_PARTIAL_PLACEHOLDER_ARGUMENTS"
+                                        )
+                                        break
+                                    if placeholder_state:
+                                        if kind != ARG_POS or name is not None:
+                                            partial_shape_reason = (
+                                                "INVALID_PARTIAL_PLACEHOLDER_KEYWORD"
+                                            )
+                                            break
+                                        placeholder_positions.append(stored_slot)
+                                    if kind == ARG_POS:
+                                        stored_slot += 1
+                            if partial_shape_reason is not None:
+                                target_value = None
+                                deps.add_analysis_limitation(
+                                    AnalysisLimitation(
+                                        file_path=current_file,
+                                        call_line=n.rvalue.line,
+                                        cap=partial_shape_reason,
+                                        call_column=n.rvalue.column,
+                                    )
+                                )
                             if target_value is not None:
                                 bound_callables: list[
                                     tuple[
@@ -6442,12 +7076,15 @@ class MypyAnalyzer:
                                         for item in parameters
                                         if not item.pos_only
                                     }
+                                    captured_slot = -1
                                     for expression, kind, name in zip(
                                         n.rvalue.args[1:],
                                         n.rvalue.arg_kinds[1:],
                                         n.rvalue.arg_names[1:],
                                         strict=True,
                                     ):
+                                        if kind == ARG_POS:
+                                            captured_slot += 1
                                         parameter = None
                                         if (
                                             kind == ARG_POS
@@ -6457,6 +7094,11 @@ class MypyAnalyzer:
                                             parameter = positional_parameters.pop(0)
                                         elif kind == ARG_NAMED and name in keyword_parameters:
                                             parameter = keyword_parameters[name]
+                                        if (
+                                            kind == ARG_POS
+                                            and captured_slot in placeholder_positions
+                                        ):
+                                            continue
                                         callable_actual: (
                                             tuple[
                                                 tuple[str, InvocationKind],
@@ -6515,6 +7157,7 @@ class MypyAnalyzer:
                                     args=tuple(n.rvalue.args[1:]),
                                     arg_kinds=tuple(n.rvalue.arg_kinds[1:]),
                                     arg_names=tuple(n.rvalue.arg_names[1:]),
+                                    placeholder_positions=tuple(placeholder_positions),
                                     bound_callables=tuple(bound_callables),
                                     bound_strings=tuple(bound_strings),
                                 )
@@ -6740,6 +7383,8 @@ class MypyAnalyzer:
                                 WhileStmt,
                                 ForStmt,
                                 TryStmt,
+                                WithStmt,
+                                MatchStmt,
                                 BreakStmt,
                                 ContinueStmt,
                                 ReturnStmt,
@@ -6792,10 +7437,20 @@ class MypyAnalyzer:
                     require_async=bool(n.is_async),
                 )
                 walk_node(n.expr)
-                clear_alias_target(n.index)
+                if (
+                    not n.is_async
+                    and isinstance(n.expr, (ListExpr, TupleExpr))
+                    and not n.expr.items
+                ):
+                    # The binder never executes on this proven zero-trip path.
+                    return walk_node(n.else_body) if n.else_body is not None else True
+                before_flow = dict(flow_environment)
+                before_strings = dict(string_environment)
+                before_deferred = dict(deferred_environment)
                 before_callables = dict(callable_environment)
                 before_partials = dict(partial_environment)
                 before_lambdas = dict(lambda_environment)
+                clear_alias_target(n.index)
                 possible_execution_depth[0] += 1
                 try:
                     walk_node(n.body)
@@ -6804,9 +7459,39 @@ class MypyAnalyzer:
                 after_callables = dict(callable_environment)
                 after_partials = dict(partial_environment)
                 after_lambdas = dict(lambda_environment)
-                callable_environment = self._join_callable_environments(
+                joined_callables = self._join_callable_environments(
                     [before_callables, after_callables]
                 )
+                unknown_binding = False
+                for name in sorted(before_callables.keys() | after_callables.keys()):
+                    if name in joined_callables:
+                        continue
+                    targets: list[Any] = []
+                    for environment in (before_callables, after_callables):
+                        alias_value = environment.get(name)
+                        candidates = (
+                            alias_value.targets
+                            if isinstance(alias_value, _CallableUnion)
+                            else (alias_value,)
+                            if alias_value is not None
+                            else ()
+                        )
+                        for candidate in candidates:
+                            if candidate not in targets:
+                                targets.append(candidate)
+                    if targets:
+                        unknown_binding = True
+                        if len(targets) <= self.MAX_POINTS_TO_TARGETS:
+                            # A missing path is unknown, so a known zero-trip or
+                            # positive-trip target is possible evidence only.
+                            joined_callables[name] = _CallableUnion(tuple(targets))
+                        else:
+                            self._record_analysis_limitation(
+                                "MAX_POINTS_TO_TARGETS",
+                                target_count=len(targets),
+                                limit=self.MAX_POINTS_TO_TARGETS,
+                            )
+                callable_environment = joined_callables
                 partial_environment = {
                     name: value
                     for name, value in before_partials.items()
@@ -6817,23 +7502,82 @@ class MypyAnalyzer:
                     for name, value in before_lambdas.items()
                     if after_lambdas.get(name) is value
                 }
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
+                unknown_binding |= (set(before_partials) | set(after_partials)) != set(
+                    partial_environment
+                ) or (set(before_lambdas) | set(after_lambdas)) != set(lambda_environment)
+                if unknown_binding:
+                    self._record_analysis_limitation("UNKNOWN_ITERATION_BINDING")
+                flow_environment = self._join_finite_environments([before_flow, flow_environment])
+                string_environment = {
+                    name: value
+                    for name, value in before_strings.items()
+                    if string_environment.get(name) == value
+                }
+                deferred_environment = {
+                    name: value
+                    for name, value in before_deferred.items()
+                    if deferred_environment.get(name) == value
+                }
+                if n.else_body is not None:
+                    # Break may bypass the else path. Keep only bindings that
+                    # agree with the pre-else state and retain possible targets.
+                    before_else_callables = dict(callable_environment)
+                    before_else_partials = dict(partial_environment)
+                    before_else_lambdas = dict(lambda_environment)
+                    possible_execution_depth[0] += 1
+                    try:
+                        walk_node(n.else_body)
+                    finally:
+                        possible_execution_depth[0] -= 1
+                    callable_environment = self._join_callable_environments(
+                        [before_else_callables, callable_environment]
+                    )
+                    partial_environment = {
+                        name: value
+                        for name, value in before_else_partials.items()
+                        if partial_environment.get(name) == value
+                    }
+                    lambda_environment = {
+                        name: value
+                        for name, value in before_else_lambdas.items()
+                        if lambda_environment.get(name) is value
+                    }
+                    flow_environment.clear()
+                    string_environment.clear()
+                    deferred_environment.clear()
 
             elif isinstance(n, WithStmt):
-                for expr in n.expr:
-                    walk_node(expr)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
+                for expression, context_target in zip(n.expr, n.target, strict=True):
+                    walk_node(expression)
+                    clear_alias_target(context_target)
+                written_names = context_bound_names(n.body)
+                before_alias_names = (
+                    set(callable_environment) | set(partial_environment) | set(lambda_environment)
+                )
                 walk_node(n.body)
-                flow_environment.clear()
-                string_environment.clear()
-                deferred_environment.clear()
-                callable_environment.clear()
-                partial_environment.clear()
-                lambda_environment.clear()
+                if written_names is None:
+                    flow_environment.clear()
+                    string_environment.clear()
+                    deferred_environment.clear()
+                    callable_environment.clear()
+                    partial_environment.clear()
+                    lambda_environment.clear()
+                else:
+                    affected_aliases = written_names & (
+                        before_alias_names
+                        | set(callable_environment)
+                        | set(partial_environment)
+                        | set(lambda_environment)
+                    )
+                    if affected_aliases:
+                        self._record_analysis_limitation("UNKNOWN_CONTEXT_EXIT_BINDING")
+                    # A manager may suppress an exception before or after a
+                    # body assignment. Its final linear state is not proof of
+                    # that alias at the continuation, but untouched locals stay.
+                    for name in written_names:
+                        clear_alias_name(name)
+                    for context_target in n.target:
+                        clear_alias_target(context_target)
 
             elif isinstance(n, TryStmt):
                 # An exception may be raised before or after any assignment in the
