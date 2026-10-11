@@ -661,6 +661,7 @@ class MypyAnalyzer:
 
         # Mypy build results - stored to prevent GC
         self._build_result: Any = None
+        self._retained_build_options: tuple[tuple[str, str], ...] | None = None
         self._trees: dict[str, Any] = {}  # module_name -> MypyFile
         self._module_to_path: dict[str, str] = {}
         self._types_map: dict[Any, Any] = {}  # AST node -> Type
@@ -1029,6 +1030,15 @@ class MypyAnalyzer:
             conflicting_package_metadata_roots: set[str] = set()
             conflicting_mypy_source_paths: set[str] = set()
             conflicting_package_source_paths: set[str] = set()
+            built_options = self._build_result.manager.options
+            option_fields = {
+                field
+                for cls in type(built_options).__mro__
+                for field in getattr(cls, "__mypyc_attrs__", ())
+            }
+            self._retained_build_options = tuple(
+                (key, repr(getattr(built_options, key))) for key in sorted(option_fields)
+            )
             analyzed_source_hashes: dict[str, str] = {}
             scanned_metadata_roots: set[Path] = set()
             authenticated_metadata_hashes: dict[str, str] = {}
@@ -1326,6 +1336,10 @@ class MypyAnalyzer:
             return None
         return self._build_result, dict(self._analysis_source_snapshots)
 
+    def framework_phase_build_options(self) -> tuple[tuple[str, str], ...] | None:
+        """Return effective mypy options captured when the retained build completed."""
+        return self._retained_build_options
+
     def framework_phase_source_bytes(self, path: Path, *, max_bytes: int) -> bytes | None:
         """Read one bounded, in-root source file without following symlinks."""
         directory_flag = getattr(os, "O_DIRECTORY", 0)
@@ -1515,6 +1529,7 @@ class MypyAnalyzer:
     ) -> None:
         """Discard one stale typed snapshot before an explicit bulk rebuild."""
         self._build_result = None
+        self._retained_build_options = None
         self._trees.clear()
         self._module_to_path.clear()
         self._types_map.clear()
