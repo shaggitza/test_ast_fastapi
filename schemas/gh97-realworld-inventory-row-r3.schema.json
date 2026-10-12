@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/gh97-realworld-inventory-row-r3.schema.json",
+  "title": "GH97 real-world physical-call inventory row r3",
+    "$comment": "Every accepted batch MUST pass scripts/validate_gh97_inventory.py with frozen source and exact public CLI output bytes. Public audit schema v1 does not expose byte-level physical identities, so exact observed/absent row claims are unsupported.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "case_id", "repository", "pr_number", "base_commit", "target_commit",
+    "base_tree", "target_tree", "packet_sha256", "path", "source_sha256", "file_bytes",
+    "start_byte", "end_byte", "call_ast_sha256", "excerpt_sha256",
+    "changed_context", "callee_syntax", "resolution_evidence_refs",
+    "receiver_evidence_refs", "bindings", "applicability", "preset",
+    "reviewers", "adjudication_sha256", "outcome", "reason",
+    "resource_components", "http",
+    "evidence_refs", "cli_observation"
+  ],
+  "properties": {
+    "case_id": {"type": "string", "minLength": 1},
+    "repository": {"type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$"},
+    "pr_number": {"type": "integer", "minimum": 1},
+    "base_commit": {"$ref": "#/$defs/git_oid"},
+    "target_commit": {"$ref": "#/$defs/git_oid"},
+    "base_tree": {"$ref": "#/$defs/git_oid"},
+    "target_tree": {"$ref": "#/$defs/git_oid"},
+    "packet_sha256": {"$ref": "#/$defs/sha256"},
+    "path": {"type": "string", "minLength": 1},
+    "source_sha256": {"$ref": "#/$defs/sha256", "description": "SHA-256 of exact source file bytes."},
+    "file_bytes": {"type": "integer", "minimum": 1, "description": "Exact UTF-8 source file byte length; semantic validator bounds call spans by this value."},
+    "start_byte": {"type": "integer", "minimum": 0},
+    "end_byte": {"type": "integer", "minimum": 1},
+    "call_ast_sha256": {"$ref": "#/$defs/sha256"},
+    "excerpt_sha256": {"$ref": "#/$defs/sha256"},
+    "changed_context": {"enum": ["changed", "context"]},
+    "callee_syntax": {"type": "string", "minLength": 1},
+    "resolution_evidence_refs": {"$ref": "#/$defs/refs"},
+    "receiver_evidence_refs": {"$ref": "#/$defs/refs"},
+    "bindings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["kind", "name", "span_start", "span_end", "source_path", "source_sha256", "source_file_bytes", "expression_sha256", "dynamic"],
+        "properties": {
+          "kind": {"enum": ["positional", "keyword", "receiver"]},
+          "name": {"type": ["string", "null"]},
+          "span_start": {"type": "integer", "minimum": 0},
+          "span_end": {"type": "integer", "minimum": 1},
+          "source_path": {"type": "string", "minLength": 1},
+          "source_sha256": {"$ref": "#/$defs/sha256"},
+          "source_file_bytes": {"type": "integer", "minimum": 1},
+          "expression_sha256": {"$ref": "#/$defs/sha256"},
+          "dynamic": {"type": "boolean"}
+        }
+      }
+    },
+    "applicability": {
+      "type": "object", "additionalProperties": false,
+      "required": ["distribution", "version", "evidence_sha256"],
+      "properties": {
+        "distribution": {"type": ["string", "null"]},
+        "version": {"type": ["string", "null"]},
+        "evidence_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "python_version": {"type": ["string", "null"]}
+      }
+    },
+    "preset": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "version", "revision", "config_sha256", "contract_id"],
+      "properties": {
+        "id": {"type": ["string", "null"]},
+        "version": {"type": ["string", "null"]},
+        "revision": {"type": ["string", "null"]},
+        "config_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "contract_id": {"type": ["string", "null"]},
+        "resolved_symbol": {"type": ["string", "null"]}
+      }
+    },
+    "reviewers": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reviewer_a", "reviewer_b", "inventory_a_sha256", "inventory_b_sha256"],
+      "properties": {
+        "reviewer_a": {"type": "string", "minLength": 1},
+        "reviewer_b": {"type": "string", "minLength": 1},
+        "inventory_a_sha256": {"$ref": "#/$defs/sha256"},
+        "inventory_b_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "adjudication_sha256": {"$ref": "#/$defs/sha256"},
+    "outcome": {"enum": ["supported_match", "supported_nonmatch", "unsupported", "incomplete", "out_of_scope", "unobserved_by_cli", "not_run", "unavailable"]},
+    "reason": {"enum": ["exact_selector_satisfied", "selector_not_satisfied", "no_approved_contract", "dynamic_or_missing_evidence", "outside_frozen_scope", "not_emitted_by_endpoint_reachable_cli", "input_or_invocation_not_run", "source_or_identity_unavailable", "other_frozen_reason"]},
+    "resource_components": {
+      "type": "array", "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "expression_sha256", "span_start", "span_end", "source_path", "source_sha256", "source_file_bytes", "state"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "expression_sha256": {"$ref": "#/$defs/sha256"},
+          "span_start": {"type": "integer", "minimum": 0},
+          "span_end": {"type": "integer", "minimum": 1},
+          "source_path": {"type": "string", "minLength": 1},
+          "source_sha256": {"$ref": "#/$defs/sha256"},
+          "source_file_bytes": {"type": "integer", "minimum": 1},
+          "state": {"enum": ["present", "missing", "dynamic"]}
+        }
+      }
+    },
+    "http": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "method", "url_expression_sha256", "provenance_ref"],
+      "properties": {
+        "state": {"enum": ["not_http", "complete", "incomplete", "unsupported"]},
+        "method": {"enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", null]},
+        "url_expression_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "provenance_ref": {"type": ["string", "null"]}
+      }
+    },
+    "evidence_refs": {"$ref": "#/$defs/refs"},
+    "cli_observation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "invocation_id", "output_sha256", "row_key"],
+      "properties": {
+        "status": {"enum": ["observed", "unobserved_by_cli", "not_run", "unavailable", "unsupported"]},
+        "invocation_id": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+        "output_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "row_key": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "git_oid": {"type": "string", "pattern": "^(?:[a-f0-9]{40}|[a-f0-9]{64})$"},
+    "refs": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

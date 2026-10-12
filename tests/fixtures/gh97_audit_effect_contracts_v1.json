@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "matching_status": "complete",
+  "scope": {
+    "kind": "endpoint_reachable_calls",
+    "source_root": ".",
+    "inventory_status": "established",
+    "inventory_limitations": [],
+    "endpoint_inventory": [
+      {
+        "id": "sha256:4cc2e09d2844c50fde57cd840cd83c8d42d0077dc51f92103b4be48266c340bb",
+        "methods": [
+          "GET"
+        ],
+        "path": "/items",
+        "handler_module": "app",
+        "handler_name": "list_items",
+        "handler_file": "app.py",
+        "handler_line": 5,
+        "discovery_status": "established",
+        "conditions": []
+      }
+    ],
+    "endpoints": 1,
+    "established_endpoints": 1,
+    "conditional_endpoints": 0,
+    "track_transitive": true,
+    "max_depth": 8,
+    "cache_enabled": false,
+    "package_applicability": "not_evaluated"
+  },
+  "provenance": {
+    "matcher_schema_version": 1,
+    "matcher": "exact_symbol_invocation_v1",
+    "contract_source_path": "contracts.yaml",
+    "raw_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "config_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "preset_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "contract_hashes": {},
+    "resolver_versions": [
+      "mypy@1.19.1"
+    ],
+    "occurrence_corpus_hash": "sha256:0b6c3023d8954d1f2a5b762f3aba59b64ebde1e58aea724f22539250ac63ef05",
+    "audit_hash": "sha256:7e031188ba2ac6b963b3cda6514ae1e045a290a4d784e9daa141ffd68e1b825d"
+  },
+  "summary": {
+    "contracts": 0,
+    "matched_contracts": 0,
+    "unmatched_contracts": 0,
+    "physical_occurrences": 1,
+    "matched_calls": 0,
+    "unmatched_calls": 1,
+    "ambiguous_calls": 0,
+    "unresolved_calls": 0,
+    "endpoint_links": 1
+  },
+  "contract_coverage": [],
+  "occurrences": [
+    {
+      "id": "sha256:495abe1890caaa908300e415665a60bac6f961edc39175588d9e12118edd5c6a",
+      "file_path": "app.py",
+      "line": 9,
+      "column": 4,
+      "end_line": 9,
+      "end_column": 18,
+      "source_spelling": "client.get(url)",
+      "resolver_status": "exact",
+      "audit_status": "unmatched",
+      "canonical_symbol": "example.Client.get",
+      "invocation": "instance_method",
+      "resolver": "mypy",
+      "resolver_version": "1.19.1",
+      "receiver_candidates": [],
+      "endpoints": [
+        {
+          "id": "sha256:4cc2e09d2844c50fde57cd840cd83c8d42d0077dc51f92103b4be48266c340bb",
+          "methods": [
+            "GET"
+          ],
+          "path": "/items",
+          "handler_module": "app",
+          "handler_name": "list_items",
+          "handler_file": "app.py",
+          "handler_line": 5,
+          "discovery_status": "established",
+          "conditions": []
+        }
+      ]
+    }
+  ]
+}
