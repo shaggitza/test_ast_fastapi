@@ -26,17 +26,21 @@ from mypy.nodes import (
     ConditionalExpr,
     Decorator,
     DictExpr,
+    DictionaryComprehension,
     ExpressionStmt,
     ForStmt,
     FuncDef,
+    GeneratorExpr,
     IfStmt,
     IndexExpr,
+    ListComprehension,
     ListExpr,
     MatchStmt,
     MemberExpr,
     NameExpr,
     OpExpr,
     RevealExpr,
+    SetComprehension,
     SetExpr,
     SliceExpr,
     StarExpr,
@@ -413,7 +417,26 @@ def _constructor_lifespan_evidence(  # noqa: PLR0911, PLR0912, PLR0915
             if isinstance(target, TypeInfo) and target.name == "FastAPI":
                 constructors.append((value, value.callee, target))
         fields: tuple[str, ...] = ()
-        if isinstance(value, AssignmentStmt):
+        if isinstance(value, (ListComprehension, SetComprehension)):
+            # Materialized comprehensions eagerly evaluate their result, every
+            # iterator, and every filter. Follow the explicit GeneratorExpr
+            # payload fields without applying bare-generator deferral rules.
+            generator = getattr(value, "generator", None)
+            if generator is not None:
+                for field in ("left_expr", "sequences", "condlists"):
+                    child = getattr(generator, field, None)
+                    if child is not None:
+                        pending.append((child, depth + 1))
+        elif isinstance(value, DictionaryComprehension):
+            fields = ("key", "value", "sequences", "condlists")
+        elif isinstance(value, GeneratorExpr):
+            # A bare generator defers its result and filters until iteration.
+            # Python evaluates only its outermost iterable when it is created.
+            sequences = getattr(value, "sequences", ())
+            child = sequences[0] if sequences else None
+            if child is not None:
+                pending.append((child, depth + 1))
+        elif isinstance(value, AssignmentStmt):
             fields = ("lvalues", "rvalue")
         elif isinstance(value, ExpressionStmt):
             fields = ("expr",)
