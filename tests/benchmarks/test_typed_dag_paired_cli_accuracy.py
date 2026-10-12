@@ -125,6 +125,41 @@ def test_failed_final_validation_publishes_invalid_report(
     assert "receipt mismatch" in saved["integrity_errors"][0]
 
 
+def test_main_summarizes_invalid_provenance_document_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    output = tmp_path / "report.json"
+    document: dict[str, Any] = {
+        "gate_status": "failed",
+        "run_validity": "invalid",
+        "integrity_errors": ["runner provenance unavailable"],
+    }
+    monkeypatch.setattr(gate, "run", lambda *_args: document)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "typed_dag_paired_cli_accuracy",
+            "--analyzer-project-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert gate.main() == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary == {
+        "gate_status": "failed",
+        "run_validity": "invalid",
+        "runner_revision": None,
+        "analyzer_revision": None,
+        "case_coverage": None,
+        "metrics": None,
+        "output": str(output),
+    }
+
+
 def test_all_cases_have_exact_paired_baseline_target_inputs() -> None:
     assert len(gate.CASES) == 18
     assert len({case.case_id for case in gate.CASES}) == 18
@@ -137,6 +172,46 @@ def test_all_cases_have_exact_paired_baseline_target_inputs() -> None:
         assert set(json.loads(material["baseline"]))
         assert set(json.loads(material["target"]))
         assert material["diff"]
+
+
+def test_fixture_validation_rejects_syntax_errors_on_either_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declared = gate.CASES[0]
+    valid = gate.case_inputs(declared)
+    for side in ("baseline", "target"):
+        malformed = dict(valid)
+        sources = json.loads(malformed[side])
+        sources["app/routes.py"] = "def route(:\n"
+        malformed[side] = json.dumps(sources, sort_keys=True)
+        monkeypatch.setattr(gate, "case_inputs", lambda _case, value=malformed: value)
+        with pytest.raises(ValueError, match=f"invalid {side} Python fixture"):
+            gate.validate_generated_fixture(declared, malformed)
+        monkeypatch.setattr(gate, "case_inputs", lambda _case, value=valid: value)
+
+
+@pytest.mark.parametrize("completeness", ["partial", None])
+def test_partial_or_missing_analysis_completeness_cannot_pass_case(
+    completeness: str | None,
+) -> None:
+    declared = next(case for case in gate.CASES if case.case_id == "cross_file_direct")
+    report = {
+        "candidate_endpoints": [
+            {"endpoint": {"method": "GET", "path": "/one"}, "confidence": "high"}
+        ],
+        "errors": [],
+        "inventory_status": "established",
+        "inventory_limitations": [],
+        "summary": {"total_endpoints": len(gate.ROOTS)},
+        "analysis_completeness": completeness,
+    }
+    record = {
+        "precision": 1.0,
+        "recall": 1.0,
+        "actual": [{"endpoint": "GET /one", "confidence": "high"}],
+        "cli_evidence": {"report": report},
+    }
+    assert not gate._case_passes(record, declared)
 
 
 def test_oracle_keeps_connected_dead_controls_out_and_live_paths_in() -> None:

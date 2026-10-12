@@ -65,3 +65,11 @@ was not run locally. It is a controlled fixture, not a corpus accuracy result.
 GH283's medium-project latency, paired real-world runs, blind corpus accuracy
 and publication acceptance remain open. This change generates no new latency
 measurements and does not relabel historical performance evidence.
+
+The separate generated paired CLI accuracy runner validates Python syntax in
+both baseline and target snapshots before invoking the analyzer. A case can
+count as passing only when the CLI reports `analysis_completeness: complete`;
+partial analyzer reports remain recorded as failures even when candidate
+precision and recall are otherwise perfect. This protects the gate from
+malformed baseline fixtures and from a comparison where one side was not fully
+analyzed.
