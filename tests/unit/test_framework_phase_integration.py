@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fastapi_endpoint_detector.analyzer import framework_phase_integration as phase_integration
+from fastapi_endpoint_detector.analyzer import framework_phase_integration as phase_module
 from fastapi_endpoint_detector.analyzer.framework_phase_graph import (
     adapt_framework_phases_to_graph,
 )
@@ -278,6 +278,39 @@ def test_local_module_shadow_with_framework_fullname_is_rejected_by_distribution
     assert report.records[0].framework_declaration_sha256 is None
 
 
+def test_rejected_framework_source_is_not_recorded_by_the_active_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.on_event('startup')\n"
+        "def start() -> None: pass\n",
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    typed_build = _typed_build(tmp_path)
+    observed: list[tuple[object, str]] = []
+    monkeypatch.setattr(phase_module, "_trusted_framework_source", lambda *_args: None)
+    monkeypatch.setattr(
+        phase_module,
+        "observe_framework_registration",
+        lambda site, symbol: observed.append((site, symbol)),
+    )
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), typed_build
+    )
+    assert report.records
+    assert observed == []
+    assert all(record.typed_framework_symbol is None for record in report.records)
+    assert all(record.registration_call_site is None for record in report.records)
+    assert all(
+        any("no unique exact mypy call site" in reason for reason in record.limitations)
+        for record in report.records
+    )
+
+
 @pytest.mark.parametrize(("suffix", "accepted"), ((".py", True), (".pyi", False)))
 def test_only_executable_framework_sources_attest_runtime_semantics(
     tmp_path: Path,
@@ -293,9 +326,7 @@ def test_only_executable_framework_sources_attest_runtime_semantics(
         files=(Path(module_path.name),),
         locate_file=lambda _item: module_path,
     )
-    monkeypatch.setattr(
-        phase_integration.importlib.metadata, "distribution", lambda _name: distribution
-    )
+    monkeypatch.setattr(phase_module.importlib.metadata, "distribution", lambda _name: distribution)
     typed_build = SimpleNamespace(
         modules={
             "fastapi.applications": SimpleNamespace(tree=SimpleNamespace(path=str(module_path)))
@@ -306,7 +337,7 @@ def test_only_executable_framework_sources_attest_runtime_semantics(
         receiver_candidates=("fastapi.applications.FastAPI",),
     )
 
-    actual = phase_integration._trusted_framework_source(site, typed_build, source_root)
+    actual = phase_module._trusted_framework_source(site, typed_build, source_root)
 
     if accepted:
         assert actual == (
