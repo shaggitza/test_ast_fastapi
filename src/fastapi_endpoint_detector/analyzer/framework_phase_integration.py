@@ -446,7 +446,7 @@ def _constructor_lifespan_evidence(  # noqa: PLR0911, PLR0912, PLR0915
         elif isinstance(value, (CastExpr, RevealExpr, StarExpr)):
             fields = ("expr",)
         elif isinstance(value, AssignmentExpr):
-            fields = ("expr", "rvalue")
+            fields = ("target", "value")
         elif isinstance(value, SliceExpr):
             fields = ("begin_index", "end_index", "stride")
         elif isinstance(value, (NameExpr, MemberExpr)):

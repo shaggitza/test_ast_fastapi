@@ -471,6 +471,62 @@ def test_constructor_scan_finds_eager_statement_bodies(tmp_path: Path, registrat
     )
 
 
+def test_constructor_scan_finds_walrus_constructor_selected_by_extractor(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+        "(app := FastAPI(lifespan=lifespan))\n",
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    surface = inventory.endpoints[0].surface
+    assert surface is not None
+    typed_build = _typed_build(tmp_path)
+
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), typed_build
+    )
+
+    assert report.records
+    for record in report.records:
+        evidence = record.constructor_lifespan
+        assert evidence is not None
+        assert record.status == "conditional"
+        assert evidence.constructor_line == surface.registration_line
+        assert evidence.constructor_column == surface.registration_column
+        assert evidence.callback_symbol == record.typed_callback_symbol
+
+
+@pytest.mark.parametrize(
+    "registration",
+    (
+        "(first := FastAPI(lifespan=lifespan))\n(second := FastAPI(lifespan=lifespan))\n",
+        "def deferred():\n    (app := FastAPI(lifespan=lifespan))\n",
+    ),
+    ids=("repeated-walrus-constructors", "deferred-walrus-constructor"),
+)
+def test_constructor_scan_rejects_ambiguous_or_deferred_walrus_constructors(
+    tmp_path: Path, registration: str
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n" + registration,
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), _typed_build(tmp_path)
+    )
+
+    assert all(record.constructor_lifespan is None for record in report.records)
+
+
 @pytest.mark.parametrize(
     "statement",
     (
