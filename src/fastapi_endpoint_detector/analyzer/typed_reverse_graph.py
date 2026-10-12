@@ -52,7 +52,7 @@ SourceDeclarationScope = Literal["app", "router", "include", "route"]
 EdgeKind = Literal["call", "constructor", "global_read", "global_write", "dependency"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 Invocation = Literal["function", "instance_method", "class_method", "constructor", "unknown"]
-_GRAPH_SCHEMA_VERSION = 7
+_GRAPH_SCHEMA_VERSION = 8
 
 
 class TypedSnapshot(Protocol):
@@ -1698,7 +1698,8 @@ def _dependency_metadata_valid(  # noqa: PLR0911, PLR0912
             or (
                 row.scope != "signature"
                 and (
-                    _dependency_declaration_key(row) not in eligible_sites
+                    row.reason_code != "route_dependency_association_origin_and_transfer_unverified"
+                    or _dependency_declaration_key(row) not in eligible_sites
                     or row.source_spelling
                     != dependency_declaration_spelling(row.span, lines[row.span.path])
                 )

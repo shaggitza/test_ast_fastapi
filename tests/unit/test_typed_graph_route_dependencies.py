@@ -215,7 +215,7 @@ def _graph(
     edges, issues = graph_module._source_dependency_projection((), rows)
     assert edges == {}
     return TypedReverseGraph(
-        schema_version=7,
+        schema_version=8,
         root="/retained",
         inventory_fingerprint="inventory",
         source_hashes=tuple((record.module, record.sha256) for record in inventory.files),
@@ -362,7 +362,7 @@ def test_manifest_and_projection_bind_scope_sites_and_occurrences() -> None:
     graph = _graph(inventory, bindings, sites, rows)
     manifest = TypedGraphCache.manifest(graph)
     encoded = json.loads(json.dumps(asdict(manifest)))
-    assert manifest.schema_version == 7
+    assert manifest.schema_version == 8
     assert len(encoded["source_dependency_declaration_sites"]) == 4
     assert {row["scope"] for row in encoded["source_dependency_uncertainties"]} == {
         "app",
@@ -554,7 +554,48 @@ def _located(node: Any, line: int, column: int, end_line: int, end_column: int) 
     return node
 
 
-@pytest.mark.parametrize("mutation", ["extra_global", "duplicate", "edge_missing", "none"])
+def _with_forged_route_reason(trusted: TypedReverseGraph) -> TypedReverseGraph:
+    forged_rows = list(trusted.source_dependency_uncertainties)
+    route_index = next(index for index, row in enumerate(forged_rows) if row.scope == "route")
+    forged_rows[route_index] = replace(forged_rows[route_index], reason_code="another_valid_reason")
+    forged_rows_tuple = tuple(forged_rows)
+    old_edges, old_issues = graph_module._source_dependency_projection(
+        trusted.source_dependency_bindings, trusted.source_dependency_uncertainties
+    )
+    new_edges, new_issues = graph_module._source_dependency_projection(
+        trusted.source_dependency_bindings, forged_rows_tuple
+    )
+    altered = replace(
+        trusted,
+        edges=tuple(
+            sorted(
+                (
+                    *(edge for edge in trusted.edges if edge.witness_id not in old_edges),
+                    *new_edges.values(),
+                )
+            )
+        ),
+        uncertainties=tuple(
+            sorted(
+                (
+                    *(
+                        item
+                        for item in trusted.uncertainties
+                        if item.uncertainty_id not in old_issues
+                    ),
+                    *new_issues.values(),
+                )
+            )
+        ),
+        source_dependency_uncertainties=forged_rows_tuple,
+    )
+    return altered
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["extra_global", "duplicate", "edge_missing", "reason_forgery", "old_schema", "none"],
+)
 def test_cache_rebuild_authenticates_all_di_producers_from_retained_manual_nodes(
     monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
@@ -640,6 +681,11 @@ def test_cache_rebuild_authenticates_all_di_producers_from_retained_manual_nodes
         altered = replace(trusted, uncertainties=(*trusted.uncertainties, extra))
     elif mutation == "duplicate":
         altered = replace(trusted, uncertainties=(*trusted.uncertainties, di_rows[0]))
+    elif mutation == "old_schema":
+        altered = replace(trusted, schema_version=7)
+    elif mutation == "reason_forgery":
+        altered = _with_forged_route_reason(trusted)
+        assert graph_module._dependency_projection_valid(altered, expected_graph=altered)
     elif mutation == "edge_missing":
         altered = replace(
             trusted,
@@ -652,3 +698,132 @@ def test_cache_rebuild_authenticates_all_di_producers_from_retained_manual_nodes
     assert TypedGraphCache.validate(altered, inventory, snapshot, config_fingerprint="config") is (
         mutation == "none"
     )
+
+
+def _mounted_endpoint(mount_count: int = 1) -> Endpoint:
+    endpoint = _endpoint()
+    assert endpoint.native_provenance is not None
+    provenance = endpoint.native_provenance
+    root_app, old_router = provenance.object_chain
+    old_edge = provenance.assembly_chain[0]
+    objects = [root_app]
+    edges = []
+    for index in range(mount_count):
+        child = old_router.model_copy(
+            update={
+                "object_kind": "app",
+                "symbol": f"child_app_{index + 1}",
+                "dependency_expressions": (_expression("app", 2 if index == 0 else 4),),
+            }
+        )
+        parent = objects[-1]
+        edges.append(
+            old_edge.model_copy(
+                update={
+                    "operation": "mount",
+                    "mode": NativeAssemblyMode.LIVE,
+                    "parent_module": parent.module,
+                    "parent_symbol": parent.symbol,
+                    "child_module": child.module,
+                    "child_symbol": child.symbol,
+                    "occurrence_order": index,
+                    "dependency_expressions": (),
+                }
+            )
+        )
+        objects.append(child)
+    router = old_router.model_copy(
+        update={
+            "symbol": "child_router",
+            "dependency_expressions": (_expression("router", 3),),
+        }
+    )
+    edges.append(
+        old_edge.model_copy(
+            update={
+                "parent_module": objects[-1].module,
+                "parent_symbol": objects[-1].symbol,
+                "child_module": router.module,
+                "child_symbol": router.symbol,
+                "occurrence_order": mount_count,
+                "dependency_expressions": (_expression("include", 2),),
+            }
+        )
+    )
+    objects.append(router)
+    registration = provenance.registration.model_copy(
+        update={
+            "owner_module": router.module,
+            "owner_symbol": router.symbol,
+            "dependency_expressions": (_expression("route", 5),),
+        }
+    )
+    mounted = provenance.model_copy(
+        update={
+            "registration": registration,
+            "object_chain": tuple(objects),
+            "assembly_chain": tuple(edges),
+        }
+    )
+    # Verify the inert provenance model itself before testing the bridge.
+    mounted = NativeRouteProvenance.model_validate(mounted.model_dump())
+    return endpoint.model_copy(update={"native_provenance": mounted})
+
+
+@pytest.mark.parametrize("mount_count", [1, 2])
+def test_mount_boundary_keeps_only_last_child_dependency_groups(mount_count: int) -> None:
+    endpoint = _mounted_endpoint(mount_count)
+    inventory, snapshots, endpoints, bindings = _case((endpoint,))
+    sites, rows = bridge._route_dependency_source_metadata(
+        inventory, endpoints, bindings, snapshots
+    )
+    assert {(row.scope, row.span.start_line) for row in rows} == {
+        ("app", 2 if mount_count == 1 else 4),
+        ("router", 3),
+        ("include", 2),
+        ("route", 5),
+    }
+    assert 1 not in {row.span.start_line for row in rows}
+    assert _valid_metadata(inventory, snapshots, bindings, sites, rows)
+
+
+def test_invalid_dependency_on_pre_mount_edge_is_still_rejected() -> None:
+    endpoint = _mounted_endpoint(2)
+    assert endpoint.native_provenance is not None
+    provenance = endpoint.native_provenance
+    edge = provenance.assembly_chain[0].model_copy(
+        update={"dependency_expressions": (_expression("include", 2),)}
+    )
+    endpoint = endpoint.model_copy(
+        update={
+            "native_provenance": provenance.model_copy(
+                update={"assembly_chain": (edge, *provenance.assembly_chain[1:])}
+            )
+        }
+    )
+    with pytest.raises(
+        bridge.TypedGraphBridgeError, match="route dependency assembly scope is unsupported"
+    ):
+        bridge._route_dependency_groups(endpoint)
+
+
+def test_scoped_reason_is_fixed_while_signature_reasons_remain_flexible() -> None:
+    inventory, snapshots, endpoints, bindings = _case()
+    sites, rows = bridge._route_dependency_source_metadata(
+        inventory, endpoints, bindings, snapshots
+    )
+    route = next(row for row in rows if row.scope == "route")
+    route_site = next(site for site in sites if site.scope == "route")
+    assert _valid_metadata(inventory, snapshots, bindings, (route_site,), (route,))
+    forged = replace(route, reason_code="another_valid_reason")
+    forged_graph = _graph(inventory, bindings, (route_site,), (forged,))
+    assert graph_module._dependency_projection_valid(forged_graph, expected_graph=forged_graph)
+    assert not _valid_metadata(inventory, snapshots, bindings, (route_site,), (forged,))
+    signature = SourceDependencyUncertainty(
+        bindings[0].occurrence_id,
+        bindings[0].symbol,
+        bindings[0].span,
+        "another_valid_reason",
+        "handler",
+    )
+    assert _valid_metadata(inventory, snapshots, bindings, (), (signature,))

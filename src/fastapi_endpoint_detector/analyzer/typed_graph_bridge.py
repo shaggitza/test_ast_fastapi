@@ -678,16 +678,24 @@ def _route_dependency_groups(
         return ()
     if len(provenance.object_chain) > 256 or len(provenance.assembly_chain) > 256:
         raise TypedGraphBridgeError("route dependency provenance exceeds chain budget")
+    first_child_object = 0
+    for index, edge in enumerate(provenance.assembly_chain):
+        if edge.operation != "include_router" and edge.dependency_expressions:
+            raise TypedGraphBridgeError("route dependency assembly scope is unsupported")
+        if edge.operation == "mount":
+            first_child_object = index + 1
     groups: list[tuple[str, tuple[NativeRouteDependencyExpressionEvidence, ...]]] = [
         ("route", provenance.registration.dependency_expressions)
     ]
     groups.extend(
-        (node.object_kind, node.dependency_expressions) for node in provenance.object_chain
+        (node.object_kind, node.dependency_expressions)
+        for node in provenance.object_chain[first_child_object:]
     )
-    for edge in provenance.assembly_chain:
-        if edge.operation != "include_router" and edge.dependency_expressions:
-            raise TypedGraphBridgeError("route dependency assembly scope is unsupported")
-        groups.append(("include", edge.dependency_expressions))
+    groups.extend(
+        ("include", edge.dependency_expressions)
+        for edge in provenance.assembly_chain[first_child_object:]
+        if edge.operation == "include_router"
+    )
     return tuple(groups)
 
 
