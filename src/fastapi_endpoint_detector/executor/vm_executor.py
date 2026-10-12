@@ -593,15 +593,15 @@ class VMExecutor:
         source_root: Path | None = None,
     ) -> dict[str, Any]:
         """Translate exact host snapshot paths to their read-only container mount paths."""
+        if set(manifest) != {"schema_version", "protocol", "entries"}:
+            raise VMExecutorError("runtime phase manifest has an unknown or incomplete schema")
         try:
-            validated = PhaseManifest.model_validate(manifest)
+            validated = PhaseManifest.model_validate_json(json.dumps(manifest), strict=True)
         except (TypeError, ValueError) as error:
             raise VMExecutorError("runtime phase manifest failed validation") from error
         # Work from the validated model so constructor evidence is bound to the
         # same callback identity that is projected below.
         manifest = validated.model_dump(mode="json")
-        if set(manifest) != {"schema_version", "protocol", "entries"}:
-            raise VMExecutorError("runtime phase manifest has an unknown or incomplete schema")
         entries = manifest.get("entries")
         if not isinstance(entries, list):
             raise VMExecutorError("runtime phase manifest entries must be an array")

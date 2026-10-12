@@ -469,6 +469,19 @@ def test_constructor_lifespan_callback_is_projected_with_manifest_identity(tmp_p
     assert strict.entries[0].constructor_lifespan is not None
     assert validated.entries[0].callback.file == str(callback_file.resolve())
 
+    for required in ("schema_version", "protocol", "entries"):
+        incomplete = json.loads(json.dumps(manifest))
+        del incomplete[required]
+        with pytest.raises(VMExecutorError, match="incomplete schema"):
+            VMExecutor._container_phase_manifest(incomplete, app, "/app")
+
+    for invalid_line in ("1", True):
+        coercible = json.loads(json.dumps(manifest))
+        coercible["entries"][0]["callback"]["line"] = invalid_line
+        coercible["entries"][0]["constructor_lifespan"]["callback"]["line"] = invalid_line
+        with pytest.raises(VMExecutorError, match="failed validation"):
+            VMExecutor._container_phase_manifest(coercible, app, "/app")
+
     mismatched = json.loads(json.dumps(manifest))
     mismatched["entries"][0]["constructor_lifespan"]["callback"]["file"] = str(app)
     with pytest.raises(VMExecutorError, match="failed validation"):
