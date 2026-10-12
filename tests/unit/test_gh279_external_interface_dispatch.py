@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import pytest
+
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.models.effect_contract import (
+    CallResolutionStatus,
+    ResolvedCallSite,
+)
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def _external_run_site(tmp_path: Path, *, stub: str, source: str) -> ResolvedCallSite:
+    project = tmp_path / "project"
+    project.mkdir(parents=True)
+    (tmp_path / "api.pyi").write_text(stub, encoding="utf-8")
+    main = project / "main.py"
+    main.write_text(source, encoding="utf-8")
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(
+            name="handler",
+            module="main",
+            file_path=main,
+            line_number=3,
+        ),
+    )
+    dependencies = MypyAnalyzer(
+        project,
+        module_root=tmp_path,
+        no_site_packages=True,
+    ).analyze_endpoint(endpoint)
+    sites = [
+        site for site in dependencies.resolved_call_sites if site.source_spelling == "value.run"
+    ]
+    assert len(sites) == 1
+    return sites[0]
+
+
+def test_external_protocol_method_is_not_exact(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub=(
+            "from typing import Protocol\nclass Runner(Protocol):\n    def run(self) -> None: ...\n"
+        ),
+        source=("from api import Runner\n\ndef handler(value: Runner) -> None:\n    value.run()\n"),
+    )
+
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_external_abstract_method_is_not_exact(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub=(
+            "from abc import ABC, abstractmethod\n"
+            "class Runner(ABC):\n"
+            "    @abstractmethod\n"
+            "    def run(self) -> None: ...\n"
+        ),
+        source=("from api import Runner\n\ndef handler(value: Runner) -> None:\n    value.run()\n"),
+    )
+
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_external_final_class_has_no_runtime_dispatch_proof(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub=("from typing import final\n@final\nclass Service:\n    def run(self) -> None: ...\n"),
+        source=(
+            "from api import Service\n\ndef handler(value: Service) -> None:\n    value.run()\n"
+        ),
+    )
+
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_shared_external_protocol_union_is_ambiguous_in_both_orders(tmp_path: Path) -> None:
+    stub = (
+        "from typing import Protocol\n"
+        "class Common(Protocol):\n"
+        "    def run(self) -> None: ...\n"
+        "class First(Common, Protocol): ...\n"
+        "class Second(Common, Protocol): ...\n"
+    )
+    for index, annotation in enumerate(("First | Second", "Second | First")):
+        site = _external_run_site(
+            tmp_path / str(index),
+            stub=stub,
+            source=(
+                "from api import First, Second\n\n"
+                f"def handler(value: {annotation}) -> None:\n"
+                "    value.run()\n"
+            ),
+        )
+        assert site.status == CallResolutionStatus.AMBIGUOUS
+        assert site.reason_code == "open_receiver_dispatch"
+        assert site.canonical_symbol is None
+
+
+def test_nonfinal_external_base_with_project_override_is_ambiguous(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub="class Base:\n    def run(self) -> None: ...\n",
+        source=(
+            "from api import Base\n\n"
+            "class Child(Base):\n    def run(self) -> None: ...\n\n"
+            "def handler(value: Base) -> None:\n    value.run()\n"
+        ),
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_external_final_method_has_no_runtime_dispatch_proof(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub=(
+            "from typing import final\nclass Service:\n    @final\n    def run(self) -> None: ...\n"
+        ),
+        source="from api import Service\n\ndef handler(value: Service) -> None:\n    value.run()\n",
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_external_classmethod_through_open_instance_is_ambiguous(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub="class Base:\n    @classmethod\n    def run(cls) -> None: ...\n",
+        source=(
+            "from api import Base\n\n"
+            "class Child(Base):\n    @classmethod\n    def run(cls) -> None: ...\n\n"
+            "def handler(value: Base) -> None:\n    value.run()\n"
+        ),
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_external_staticmethod_shadowed_by_project_subclass_is_ambiguous(tmp_path: Path) -> None:
+    site = _external_run_site(
+        tmp_path,
+        stub="class Base:\n    @staticmethod\n    def run() -> None: ...\n",
+        source=(
+            "from api import Base\n\n"
+            "class Child(Base):\n    @staticmethod\n    def run() -> None: ...\n\n"
+            "def handler(value: Base) -> None:\n    value.run()\n"
+        ),
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+@pytest.mark.parametrize("descriptor", ["staticmethod", "classmethod"])
+@pytest.mark.parametrize("final_class", [False, True])
+def test_final_external_descriptor_has_no_runtime_receiver_proof(
+    tmp_path: Path, descriptor: str, final_class: bool
+) -> None:
+    decorator = "@final\n" if final_class else ""
+    formal = "" if descriptor == "staticmethod" else "cls"
+    site = _external_run_site(
+        tmp_path,
+        stub=(
+            "from typing import final\n"
+            f"{decorator}class Service:\n"
+            f"    @final\n    @{descriptor}\n"
+            f"    def run({formal}) -> None: ...\n"
+        ),
+        source="from api import Service\n\ndef handler(value: Service) -> None:\n    value.run()\n",
+    )
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None
+
+
+def test_project_final_annotation_has_no_runtime_receiver_proof(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    main = project / "main.py"
+    main.write_text(
+        "from typing import final\n"
+        "@final\nclass Service:\n    def run(self) -> None: pass\n"
+        "def handler(value: Service) -> None:\n    value.run()\n",
+        encoding="utf-8",
+    )
+    endpoint = Endpoint(
+        path="/test",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="main", file_path=main, line_number=5),
+    )
+    dependencies = MypyAnalyzer(
+        project, module_root=project, no_site_packages=True
+    ).analyze_endpoint(endpoint)
+    sites = [
+        site for site in dependencies.resolved_call_sites if site.source_spelling == "value.run"
+    ]
+    assert len(sites) == 1
+    site = sites[0]
+    assert site.status == CallResolutionStatus.AMBIGUOUS
+    assert site.reason_code == "open_receiver_dispatch"
+    assert site.canonical_symbol is None
+    assert site.invocation is None

@@ -809,9 +809,9 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "v20-loop-exits-partial-capture-release-alternatives-provider-origin-context"
-        "-suppression-alternatives-conditional-block-continuations-context-exit-alia"
-        "ses-normal-finally-writes-imported-callable-source"
+        "v21-loop-exits-provider-origin-no-nominal-finality-context-suppression-alte"
+        "rnatives-conditional-block-continuations-context-exit-aliases-normal-finall"
+        "y-writes-imported-callable-source"
     )
     MAX_CONTROL_EXIT_STATES = 32
     MAX_LOOP_FLOW_PASSES = 4
@@ -831,7 +831,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 20
+    EXECUTION_SUMMARY_VERSION = 21
     CALLBACK_PROVIDER_MODULES: ClassVar[frozenset[str]] = frozenset(
         {
             "asyncio.threads",
@@ -4832,6 +4832,655 @@ class MypyAnalyzer:
         imported = self._explicit_import_fullname(callee, import_map)
         return self._exact_finite_project_type_info(imported) if imported is not None else None
 
+    @staticmethod
+    def _effective_constructor_member(info: Any, name: str) -> tuple[Any, Any] | None:
+        """Resolve the first actual MRO member, without skipping a shadow."""
+        from mypy.nodes import FuncDef, TypeInfo
+
+        if not isinstance(info, TypeInfo):
+            return None
+        mro = info.mro
+        if not mro or mro[0] is not info or len(mro) > 64:
+            return None
+        for owner in mro:
+            if not isinstance(owner, TypeInfo):
+                return None
+            symbol = owner.names.get(name)
+            if symbol is None:
+                continue
+            node = symbol.node
+            if (
+                not isinstance(node, FuncDef)
+                or node.info is not owner
+                or node.fullname != f"{owner.fullname}.{name}"
+            ):
+                return None
+            return owner, node
+        return None
+
+    def _project_instance_class_is_unmodified(self, info: Any, member_name: str) -> bool:
+        """Reject visible class writes in a bounded retained project syntax graph."""
+        from types import GetSetDescriptorType, MemberDescriptorType
+
+        from mypy.nodes import (
+            AssignmentExpr,
+            AssignmentStmt,
+            CallExpr,
+            DelStmt,
+            DictExpr,
+            ListExpr,
+            MemberExpr,
+            Node,
+            OperatorAssignmentStmt,
+            ReturnStmt,
+            SetExpr,
+            StarExpr,
+            StrExpr,
+            TupleExpr,
+            TypeInfo,
+            Var,
+        )
+        from mypy.types import (
+            AnyType,
+            CallableType,
+            Instance,
+            Overloaded,
+            TupleType,
+            TypedDictType,
+            TypeType,
+            UnionType,
+            get_proper_type,
+        )
+
+        watched = tuple(info.mro)
+        names = {
+            member_name,
+            "__new__",
+            "__init__",
+            "__init_subclass__",
+            "__getattribute__",
+            "__getattr__",
+            "__bases__",
+            "__class__",
+        }
+        if len(self._project_modules) > 256:
+            return False
+        seen: set[int] = set()
+        inspected = 0
+        for module in sorted(self._project_modules):
+            tree = self._trees.get(module)
+            if tree is None:
+                return False
+            imports = self._import_map_for_tree(tree, module)
+
+            def watched_base(
+                expression: Any,
+                bound_imports: dict[str, str] = imports,
+                *,
+                unknown_is_overlap: bool = True,
+            ) -> bool:
+                node = getattr(expression, "node", None)
+                if isinstance(node, TypeInfo):
+                    return any(node is owner for owner in watched)
+                resolved = self._project_constructor_info(expression, bound_imports)
+                if resolved is not None:
+                    return any(resolved is owner for owner in watched)
+                typed = node.type if isinstance(node, Var) else self._get_type_from_node(expression)
+
+                type_seen: set[tuple[int, bool]] = set()
+
+                def overlaps(value: Any, *, class_value: bool = False) -> bool:
+                    proper = get_proper_type(value)
+                    if len(type_seen) > 256:
+                        return True
+                    if proper is not None:
+                        visit_key = (id(proper), class_value)
+                        if visit_key in type_seen:
+                            return unknown_is_overlap
+                        type_seen.add(visit_key)
+                    if proper is None or isinstance(proper, AnyType):
+                        return unknown_is_overlap
+                    if isinstance(proper, UnionType):
+                        return any(overlaps(item, class_value=class_value) for item in proper.items)
+                    if isinstance(proper, TypeType):
+                        return overlaps(proper.item, class_value=True)
+                    if isinstance(proper, Instance):
+                        if class_value:
+                            return any(proper.type is owner for owner in watched)
+                        if proper.type.has_base("builtins.type"):
+                            return True
+                        if proper.type.fullname == "builtins.object":
+                            return unknown_is_overlap
+                        return any(overlaps(argument) for argument in proper.args)
+                    if isinstance(proper, CallableType):
+                        return proper.is_type_obj() and any(
+                            proper.type_object() is owner for owner in watched
+                        )
+                    if isinstance(proper, Overloaded):
+                        return any(overlaps(item) for item in proper.items)
+                    if isinstance(proper, TupleType):
+                        return any(overlaps(item) for item in proper.items)
+                    if isinstance(proper, TypedDictType):
+                        return any(overlaps(item) for item in proper.items.values())
+                    return unknown_is_overlap
+
+                return overlaps(typed)
+
+            def class_value_escapes(expression: Any) -> bool:
+                values = [expression]
+                counted = 0
+                while values:
+                    value = values.pop()
+                    counted += 1
+                    if counted > 256:
+                        return True
+                    if watched_base(value, unknown_is_overlap=False):
+                        return True
+                    if isinstance(value, (ListExpr, TupleExpr, SetExpr)):
+                        values.extend(value.items)
+                    elif isinstance(value, DictExpr):
+                        for key, item_value in value.items:
+                            if key is not None:
+                                values.append(key)
+                            values.append(item_value)
+                    elif isinstance(value, StarExpr):
+                        values.append(value.expr)
+                return False
+
+            def writes_member(expression: Any) -> bool:
+                if isinstance(expression, MemberExpr):
+                    return expression.name in names and watched_base(expression.expr)
+                if isinstance(expression, (ListExpr, TupleExpr)):
+                    return any(writes_member(item) for item in expression.items)
+                if isinstance(expression, StarExpr):
+                    return writes_member(expression.expr)
+                return False
+
+            pending: list[Any] = [tree]
+            while pending:
+                item = pending.pop()
+                inspected += 1
+                if inspected > 8192:
+                    return False
+                if isinstance(item, (list, tuple)):
+                    pending.extend(item)
+                    continue
+                if not isinstance(item, Node) or isinstance(item, TypeInfo) or id(item) in seen:
+                    continue
+                seen.add(id(item))
+                if isinstance(item, AssignmentStmt) and class_value_escapes(item.rvalue):
+                    return False
+                if isinstance(item, ReturnStmt) and item.expr is not None:
+                    if class_value_escapes(item.expr):
+                        return False
+                if isinstance(item, AssignmentStmt) and any(
+                    writes_member(target) for target in item.lvalues
+                ):
+                    return False
+                if isinstance(item, (AssignmentExpr, OperatorAssignmentStmt)) and writes_member(
+                    item.target if isinstance(item, AssignmentExpr) else item.lvalue
+                ):
+                    return False
+                if isinstance(item, DelStmt) and writes_member(item.expr):
+                    return False
+                if isinstance(item, CallExpr):
+                    spelling = getattr(item.callee, "fullname", None) or getattr(
+                        getattr(item.callee, "node", None), "fullname", None
+                    )
+                    if isinstance(item.callee, MemberExpr) and item.callee.name in {
+                        "__setattr__",
+                        "__delattr__",
+                    }:
+                        if getattr(item.callee.expr, "fullname", None) == "builtins.type":
+                            spelling = f"builtins.type.{item.callee.name}"
+                    if spelling in {
+                        "builtins.setattr",
+                        "builtins.delattr",
+                        "builtins.type.__setattr__",
+                        "builtins.type.__delattr__",
+                    }:
+                        if len(item.args) < 2:
+                            return False
+                        attribute = item.args[1]
+                        if (
+                            not isinstance(attribute, StrExpr) or attribute.value in names
+                        ) and watched_base(item.args[0]):
+                            return False
+                    # Passing the class to another call can expose it to a
+                    # project helper or an aliased setter that changes lookup.
+                    if any(class_value_escapes(argument) for argument in item.args):
+                        return False
+                fields: set[str] = set()
+                for node_type in type(item).__mro__:
+                    fields.update(
+                        name
+                        for name, descriptor in vars(node_type).items()
+                        if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
+                    )
+                for child_field in fields - {
+                    "node",
+                    "info",
+                    "type",
+                    "unanalyzed_type",
+                    "analyzed",
+                    "original_def",
+                    "def_var",
+                    "names",
+                }:
+                    child = getattr(item, child_field, None)
+                    if isinstance(child, (Node, list, tuple)):
+                        pending.append(child)
+        return True
+
+    def _project_constructor_binding_is_stable(
+        self, info: Any, constructor: Any, import_map: dict[str, str] | None = None
+    ) -> bool:
+        """Check bounded visible writes to the exact constructor binding."""
+        from types import GetSetDescriptorType, MemberDescriptorType
+
+        from mypy.nodes import (
+            AssignmentExpr,
+            AssignmentStmt,
+            CallExpr,
+            ClassDef,
+            Decorator,
+            DelStmt,
+            DictionaryComprehension,
+            ForStmt,
+            FuncDef,
+            GeneratorExpr,
+            GlobalDecl,
+            Import,
+            ImportAll,
+            ImportFrom,
+            LambdaExpr,
+            ListExpr,
+            MemberExpr,
+            NameExpr,
+            Node,
+            OperatorAssignmentStmt,
+            OverloadedFuncDef,
+            StarExpr,
+            TempNode,
+            TryStmt,
+            TupleExpr,
+            TypeInfo,
+            Var,
+            WithStmt,
+        )
+        from mypy.patterns import AsPattern, StarredPattern
+
+        if (
+            not isinstance(info, TypeInfo)
+            or not isinstance(constructor, CallExpr)
+            or info.module_name not in self._project_modules
+            or len(self._project_modules) > 256
+        ):
+            return False
+        caller_imports = import_map or {}
+        imported = self._explicit_import_fullname(constructor.callee, caller_imports)
+        if imported is not None and self._exact_finite_project_type_info(imported) is not info:
+            return False
+        inspected = 0
+
+        def syntax_children(item: Any) -> list[Any]:
+            fields = set(getattr(item, "__dict__", {}))
+            for node_type in type(item).__mro__:
+                fields.update(
+                    name
+                    for name, descriptor in vars(node_type).items()
+                    if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
+                )
+            children: list[Any] = []
+            for child_field in fields - {
+                "node",
+                "info",
+                "type",
+                "unanalyzed_type",
+                "analyzed",
+                "original_def",
+                "def_var",
+                "names",
+                "expanded",
+                "original_decorators",
+            }:
+                child = getattr(item, child_field, None)
+                if isinstance(child, (Node, list, tuple)):
+                    children.append(child)
+            return children
+
+        def scope_globals(body: Any) -> frozenset[str] | None:
+            nonlocal inspected
+            names: set[str] = set()
+            pending = [body]
+            seen: set[int] = set()
+            while pending:
+                item = pending.pop()
+                inspected += 1
+                if inspected > 8192:
+                    return None
+                if isinstance(item, (list, tuple)):
+                    pending.extend(item)
+                    continue
+                if not isinstance(item, Node) or id(item) in seen:
+                    continue
+                seen.add(id(item))
+                if isinstance(item, GlobalDecl):
+                    names.update(item.names)
+                elif not isinstance(
+                    item, (ClassDef, Decorator, FuncDef, LambdaExpr, OverloadedFuncDef, TypeInfo)
+                ):
+                    pending.extend(syntax_children(item))
+            return frozenset(names)
+
+        for module in sorted(self._project_modules):
+            tree = self._trees.get(module)
+            if tree is None:
+                return False
+            imports = self._import_map_for_tree(tree, module)
+            if len(imports) > 8192:
+                return False
+            binding_names = {info.name} if module == info.module_name else set()
+            for local_name, fullname in imports.items():
+                if (
+                    fullname == info.fullname
+                    or self._exact_finite_project_type_info(fullname) is info
+                ):
+                    binding_names.add(local_name)
+
+            def writes_binding(
+                expression: Any,
+                module_scope: bool,
+                globals_in_scope: frozenset[str],
+                bound_names: set[str] = binding_names,
+                bound_imports: dict[str, str] = imports,
+            ) -> bool:
+                nonlocal inspected
+                targets = [expression]
+                while targets:
+                    target = targets.pop()
+                    inspected += 1
+                    if inspected > 8192:
+                        return True
+                    if isinstance(target, NameExpr):
+                        if target.node is info or (
+                            (module_scope or target.name in globals_in_scope)
+                            and target.name in bound_names
+                        ):
+                            return True
+                    elif isinstance(target, Var):
+                        if (
+                            module_scope or target.name in globals_in_scope
+                        ) and target.name in bound_names:
+                            return True
+                    elif isinstance(target, MemberExpr):
+                        if (
+                            target.node is info
+                            or target.fullname == info.fullname
+                            or self._explicit_import_fullname(target, bound_imports)
+                            == info.fullname
+                        ):
+                            return True
+                    elif isinstance(target, (ListExpr, TupleExpr)):
+                        targets.extend(target.items)
+                    elif isinstance(target, StarExpr):
+                        targets.append(target.expr)
+                return False
+
+            pending: list[tuple[Any, bool, frozenset[str]]] = [(tree, True, frozenset())]
+            seen_syntax: set[tuple[int, bool, frozenset[str]]] = set()
+            while pending:
+                item, module_scope, globals_in_scope = pending.pop()
+                inspected += 1
+                if inspected > 8192:
+                    return False
+                if isinstance(item, (list, tuple)):
+                    pending.extend((child, module_scope, globals_in_scope) for child in item)
+                    continue
+                key = (id(item), module_scope, globals_in_scope)
+                if not isinstance(item, Node) or isinstance(item, TypeInfo) or key in seen_syntax:
+                    continue
+                seen_syntax.add(key)
+                if isinstance(item, ImportAll) and module_scope:
+                    # Wildcard exports can replace a retained class binding.
+                    # Their namespace effects are outside this bounded proof.
+                    return False
+                if isinstance(item, AssignmentStmt):
+                    if not isinstance(item.rvalue, TempNode) or not item.rvalue.no_rhs:
+                        if any(
+                            writes_binding(target, module_scope, globals_in_scope)
+                            for target in item.lvalues
+                        ):
+                            return False
+                elif isinstance(item, (AssignmentExpr, OperatorAssignmentStmt)):
+                    target = item.target if isinstance(item, AssignmentExpr) else item.lvalue
+                    if writes_binding(target, module_scope, globals_in_scope):
+                        return False
+                elif isinstance(item, DelStmt):
+                    if writes_binding(item.expr, module_scope, globals_in_scope):
+                        return False
+                elif isinstance(item, ForStmt):
+                    if writes_binding(item.index, module_scope, globals_in_scope):
+                        return False
+                elif isinstance(item, WithStmt):
+                    if any(
+                        writes_binding(target, module_scope, globals_in_scope)
+                        for target in item.target
+                    ):
+                        return False
+                elif isinstance(item, TryStmt):
+                    if any(
+                        writes_binding(target, module_scope, globals_in_scope)
+                        for target in item.vars
+                    ):
+                        return False
+                elif isinstance(item, (AsPattern, StarredPattern)):
+                    pattern_target = item.name if isinstance(item, AsPattern) else item.capture
+                    if writes_binding(pattern_target, module_scope, globals_in_scope):
+                        return False
+                elif isinstance(item, (Import, ImportFrom)):
+                    if isinstance(item, ImportFrom):
+                        sibling = (
+                            f"{module.rsplit('.', 1)[0]}.{item.id}" if "." in module else item.id
+                        )
+                        full_module = sibling if sibling in self._module_to_path else item.id
+                        imported_names = [
+                            (alias or name, f"{full_module}.{name}") for name, alias in item.names
+                        ]
+                    else:
+                        imported_names = [
+                            (alias or name.split(".", maxsplit=1)[0], name)
+                            for name, alias in item.ids
+                        ]
+                    for local_name, fullname in imported_names:
+                        if (
+                            (module_scope or local_name in globals_in_scope)
+                            and local_name in binding_names
+                            and self._exact_finite_project_type_info(fullname) is not info
+                        ):
+                            return False
+                if isinstance(item, (ClassDef, FuncDef, Decorator, OverloadedFuncDef)):
+                    declaration = item.func if isinstance(item, Decorator) else item
+                    if (
+                        (module_scope or declaration.name in globals_in_scope)
+                        and declaration.name in binding_names
+                        and declaration is not info.defn
+                    ):
+                        return False
+                if isinstance(item, (FuncDef, LambdaExpr, ClassDef)):
+                    body = item.defs if isinstance(item, ClassDef) else item.body
+                    declared_globals = scope_globals(body)
+                    if declared_globals is None:
+                        return False
+                    pending.append((body, False, declared_globals))
+                    if isinstance(item, ClassDef):
+                        pending.extend(
+                            (child, module_scope, globals_in_scope)
+                            for child in (*item.base_type_exprs, *item.decorators)
+                        )
+                    else:
+                        pending.extend(
+                            (argument.initializer, module_scope, globals_in_scope)
+                            for argument in item.arguments
+                        )
+                    continue
+                if isinstance(item, (GeneratorExpr, DictionaryComprehension)):
+                    if any(writes_binding(index, False, frozenset()) for index in item.indices):
+                        return False
+                    pending.extend((child, False, frozenset()) for child in syntax_children(item))
+                    continue
+                pending.extend(
+                    (child, module_scope, globals_in_scope) for child in syntax_children(item)
+                )
+        return True
+
+    def _default_project_instance(
+        self, constructed: Any, constructor: Any, import_map: dict[str, str] | None = None
+    ) -> bool:
+        """Prove bounded, source-owned default allocation without supplied actuals."""
+        from mypy.nodes import (
+            AssignmentStmt,
+            BytesExpr,
+            CallExpr,
+            ExpressionStmt,
+            FloatExpr,
+            FuncDef,
+            IntExpr,
+            NameExpr,
+            PassStmt,
+            StrExpr,
+            TypeInfo,
+        )
+        from mypy.types import Instance
+
+        if (
+            not isinstance(constructed, TypeInfo)
+            or not isinstance(constructor, CallExpr)
+            or constructor.args
+            or constructor.arg_kinds
+            or constructor.arg_names
+            or not self._project_constructor_binding_is_stable(constructed, constructor, import_map)
+            or constructed.is_protocol
+            or constructed.is_abstract
+            or constructed.is_newtype
+            or constructed.fallback_to_any
+            or not constructed.mro
+            or constructed.mro[0] is not constructed
+            or len(constructed.mro) > 64
+        ):
+            return False
+        for owner in constructed.mro:
+            if not isinstance(owner, TypeInfo) or owner.fallback_to_any:
+                return False
+            if owner.defn.decorators and (
+                owner.fullname != "builtins.object"
+                or any(
+                    not isinstance(decorator, NameExpr)
+                    or decorator.fullname != "typing_extensions.disjoint_base"
+                    for decorator in owner.defn.decorators
+                )
+            ):
+                return False
+        for metaclass in (constructed.metaclass_type, constructed.declared_metaclass):
+            if metaclass is not None and (
+                not isinstance(metaclass, Instance) or metaclass.type.fullname != "builtins.type"
+            ):
+                return False
+        for hook in ("__new__", "__init__", "__init_subclass__"):
+            member = self._effective_constructor_member(constructed, hook)
+            if member is None or member[1].fullname != f"builtins.object.{hook}":
+                return False
+        for owner in constructed.mro:
+            if owner.fullname == "builtins.object":
+                continue
+            identity = self._exact_project_identity(owner.fullname)
+            result = self._resolve_fullname_to_file(owner.fullname)
+            if (
+                identity is None
+                or result is None
+                or result[1] != identity[0]
+                or result[0] != self._module_to_path.get(identity[0])
+                or Path(result[0]).suffix != ".py"
+                or len(owner.defn.defs.body) > 256
+            ):
+                return False
+            try:
+                Path(result[0]).resolve().relative_to(self.source_root.resolve())
+            except (OSError, RuntimeError, ValueError):
+                return False
+            # Unknown class-body values can run descriptor __set_name__ hooks.
+            # Admit ordinary functions, docstrings and scalar constants only.
+            for statement in owner.defn.defs.body:
+                if isinstance(statement, (FuncDef, PassStmt)):
+                    continue
+                if isinstance(statement, ExpressionStmt) and isinstance(statement.expr, StrExpr):
+                    continue
+                if isinstance(statement, AssignmentStmt) and all(
+                    isinstance(target, NameExpr) for target in statement.lvalues
+                ):
+                    value = statement.rvalue
+                    if isinstance(value, (BytesExpr, FloatExpr, IntExpr, StrExpr)):
+                        continue
+                    if isinstance(value, NameExpr) and value.fullname in {
+                        "builtins.None",
+                        "builtins.True",
+                        "builtins.False",
+                    }:
+                        continue
+                return False
+        return True
+
+    def _default_instance_member_lookup(self, info: Any) -> bool:
+        """Require ordinary instance lookup without a custom fallback."""
+        from mypy.nodes import TypeInfo
+
+        if (
+            not isinstance(info, TypeInfo)
+            or not info.mro
+            or info.mro[0] is not info
+            or len(info.mro) > 64
+            or any(not isinstance(owner, TypeInfo) or owner.fallback_to_any for owner in info.mro)
+        ):
+            return False
+        lookup = self._effective_constructor_member(info, "__getattribute__")
+        return (
+            lookup is not None
+            and lookup[1].fullname == "builtins.object.__getattribute__"
+            and all("__getattr__" not in owner.names for owner in info.mro)
+        )
+
+    def _constructed_project_callable(
+        self, constructed: Any, constructor: Any, import_map: dict[str, str] | None = None
+    ) -> tuple[str, InvocationKind] | None:
+        """Prove default allocation and an undecorated project-owned __call__."""
+        if not self._default_project_instance(constructed, constructor, import_map):
+            return None
+        member = self._effective_constructor_member(constructed, "__call__")
+        if member is None:
+            return None
+        owner, node = member
+        if node.is_static or node.is_class or node.is_property:
+            return None
+        identity = self._exact_project_identity(node.fullname)
+        owner_identity = self._exact_project_identity(owner.fullname)
+        result = self._resolve_fullname_to_file(node.fullname)
+        if (
+            identity is None
+            or owner_identity is None
+            or identity[0] != owner_identity[0]
+            or result is None
+            or result[1] != identity[0]
+            or result[0] != self._module_to_path.get(identity[0])
+        ):
+            return None
+        try:
+            Path(result[0]).resolve().relative_to(self.source_root.resolve())
+        except (OSError, RuntimeError, ValueError):
+            return None
+        if not self._project_instance_class_is_unmodified(constructed, "__call__"):
+            return None
+        return node.fullname, InvocationKind.INSTANCE_METHOD
+
     def _exact_finite_project_callable(self, fullname: str) -> tuple[str, InvocationKind] | None:
         """Resolve a factory through exact project modules and explicit re-exports."""
         visited: set[str] = set()
@@ -5535,6 +6184,8 @@ class MypyAnalyzer:
             return None
         info = self._project_constructor_info(expression.callee, import_map)
         if info is not None:
+            if not self._project_constructor_binding_is_stable(info, expression, import_map):
+                return None
             return self._finite_constructor_value(
                 info, expression, environment, import_map, stack, budget
             )
@@ -6309,6 +6960,7 @@ class MypyAnalyzer:
         receiver_infos: list[TypeInfo] = []
         incomplete = False
         source_exact_receiver = False
+        instance_receiver = True
         if isinstance(callee.expr, NameExpr):
             imported = (
                 import_map.get(callee.expr.name, "")
@@ -6324,19 +6976,18 @@ class MypyAnalyzer:
             )
             if direct_info is not None:
                 receiver_infos.append(direct_info)
+                instance_receiver = False
         elif isinstance(callee.expr, CallExpr):
-            constructor = callee.expr.callee
-            imported = self._explicit_import_fullname(constructor, import_map) or ""
-            if isinstance(constructor, NameExpr) and not imported:
-                imported = (
-                    import_map.get(constructor.name, "")
-                    if isinstance(constructor.node, Var)
-                    and constructor.node.line < 0
-                    and "." in (constructor.fullname or "")
-                    else ""
-                )
-            constructed = self._project_type_info(imported)
+            constructed = self._project_constructor_info(callee.expr.callee, import_map)
             if constructed is not None:
+                if not self._default_project_instance(constructed, callee.expr, import_map):
+                    return (
+                        CallResolutionStatus.AMBIGUOUS,
+                        None,
+                        None,
+                        (constructed.fullname,),
+                        "unproven_receiver_construction",
+                    )
                 receiver_infos.append(constructed)
                 source_exact_receiver = True
         if not receiver_infos:
@@ -6359,9 +7010,51 @@ class MypyAnalyzer:
         if receiver_infos:
             candidates = tuple(sorted({item.fullname for item in receiver_infos if item.fullname}))
             resolutions: set[tuple[str, InvocationKind]] = set()
-            dynamically_final = True
             for info in receiver_infos:
+                if instance_receiver and not self._default_instance_member_lookup(info):
+                    return (
+                        CallResolutionStatus.AMBIGUOUS,
+                        None,
+                        None,
+                        candidates,
+                        "unproven_receiver_lookup",
+                    )
                 member = info.get(callee.name)
+                method = member.node if member is not None else None
+                if source_exact_receiver:
+                    if not self._project_instance_class_is_unmodified(info, callee.name):
+                        return (
+                            CallResolutionStatus.AMBIGUOUS,
+                            None,
+                            None,
+                            candidates,
+                            "unproven_receiver_lookup",
+                        )
+                    effective = self._effective_constructor_member(info, callee.name)
+                    if (
+                        not isinstance(method, FuncDef)
+                        or effective is None
+                        or effective[1] is not method
+                        or method.is_static
+                        or method.is_class
+                        or method.is_property
+                        or self._exact_project_identity(method.fullname) is None
+                    ):
+                        return (
+                            CallResolutionStatus.AMBIGUOUS,
+                            None,
+                            None,
+                            candidates,
+                            "unproven_receiver_lookup",
+                        )
+                if isinstance(method, Decorator) and method.var.is_property:
+                    return (
+                        CallResolutionStatus.AMBIGUOUS,
+                        None,
+                        None,
+                        candidates,
+                        "unproven_receiver_lookup",
+                    )
                 declaration = (
                     self._callable_declaration(member.node) if member is not None else None
                 )
@@ -6369,30 +7062,11 @@ class MypyAnalyzer:
                     incomplete = True
                 else:
                     resolutions.add(declaration)
-                    method = member.node if member is not None else None
-                    method_final = (
-                        bool(getattr(method.var, "is_final", False))
-                        if isinstance(method, Decorator)
-                        else bool(getattr(method, "is_final", False))
-                        if isinstance(method, FuncDef)
-                        else False
-                    )
-                    dynamically_final = dynamically_final and (
-                        bool(getattr(info, "is_final", False)) or method_final
-                    )
             if len(resolutions) == 1 and not incomplete:
                 resolved_symbol, invocation = next(iter(resolutions))
-                # Project source is subject to subclass overrides. External
-                # library declarations remain exact here because this
-                # analyzer has no project implementation set to fan out to.
-                resolved_file = self._resolve_fullname_to_file(resolved_symbol)
-                if resolved_file is None or resolved_file[1] not in self._project_modules:
-                    dynamically_final = True
+                # Nominal finality is a typing promise, not runtime receiver identity.
+                # Only the guarded source construction above establishes exact dispatch.
                 if source_exact_receiver:
-                    dynamically_final = True
-                if invocation != InvocationKind.INSTANCE_METHOD:
-                    dynamically_final = True
-                if dynamically_final:
                     return (
                         CallResolutionStatus.EXACT,
                         resolved_symbol,
@@ -6445,26 +7119,44 @@ class MypyAnalyzer:
     ) -> ResolvedCallSite | None:
         """Classify one mypy call expression without guessing symbol identity."""
         if string_environment or lexical_scope is not None:
-            # This same physical call can be reached under different endpoint
-            # actual-to-formal bindings; keep each trace's argument evidence
-            # separate instead of reusing the node-identity cache entry.
+            # A physical call can have different actual-to-formal bindings.
             site = self._resolved_call_site_uncached(
-                call,
-                current_file,
-                import_map,
-                lexical_scope=lexical_scope,
+                call, current_file, import_map, lexical_scope=lexical_scope
             )
-            if site is None:
-                return None
-            return site.model_copy(
-                update={"arguments": self._call_argument_evidence(call, string_environment)}
+            if site is not None:
+                site = site.model_copy(
+                    update={"arguments": self._call_argument_evidence(call, string_environment)}
+                )
+        else:
+            cache_key = id(call)
+            if cache_key not in self._resolved_call_site_cache:
+                self._resolved_call_site_cache[cache_key] = self._resolved_call_site_uncached(
+                    call, current_file, import_map
+                )
+            site = self._resolved_call_site_cache[cache_key]
+        if (
+            site is not None
+            and site.reason_code
+            in {
+                "unproven_callable_construction",
+                "unproven_receiver_construction",
+                "unproven_receiver_lookup",
+            }
+            and self._active_endpoint_dependencies is not None
+        ):
+            self._active_endpoint_dependencies.add_analysis_limitation(
+                AnalysisLimitation(
+                    site.file_path,
+                    site.line,
+                    {
+                        "unproven_callable_construction": "UNPROVEN_CALLABLE_CONSTRUCTION",
+                        "unproven_receiver_construction": "UNPROVEN_RECEIVER_CONSTRUCTION",
+                        "unproven_receiver_lookup": "UNPROVEN_RECEIVER_LOOKUP",
+                    }[site.reason_code],
+                    call_column=site.column,
+                )
             )
-        cache_key = id(call)
-        if cache_key not in self._resolved_call_site_cache:
-            self._resolved_call_site_cache[cache_key] = self._resolved_call_site_uncached(
-                call, current_file, import_map
-            )
-        return self._resolved_call_site_cache[cache_key]
+        return site
 
     @staticmethod
     def _finite_string_values(
@@ -6718,7 +7410,7 @@ class MypyAnalyzer:
         lexical_scope: str | None = None,
     ) -> ResolvedCallSite | None:
         """Resolve one physical project-source call for the analyzer-wide cache."""
-        from mypy.nodes import MemberExpr, NameExpr, SuperExpr, TypeInfo, Var
+        from mypy.nodes import CallExpr, MemberExpr, NameExpr, SuperExpr, TypeInfo, Var
 
         try:
             Path(current_file).resolve().relative_to(self.source_root.resolve())
@@ -6779,6 +7471,21 @@ class MypyAnalyzer:
                 receiver_candidates,
                 reason_code,
             ) = self._member_call_resolution(callee, import_map)
+        elif isinstance(callee, CallExpr):
+            # A type alone does not prove what a constructor returns.
+            constructed = self._project_constructor_info(callee.callee, import_map)
+            declaration = (
+                self._constructed_project_callable(constructed, callee, import_map)
+                if constructed is not None
+                else None
+            )
+            if declaration is not None and constructed is not None:
+                status = CallResolutionStatus.EXACT
+                canonical_symbol, invocation = declaration
+                receiver_candidates = (constructed.fullname,)
+                reason_code = None
+            else:
+                reason_code = "unproven_callable_construction"
         elif isinstance(callee, SuperExpr) and callee.info is not None:
             declarations = []
             for info in callee.info.mro[1:]:
