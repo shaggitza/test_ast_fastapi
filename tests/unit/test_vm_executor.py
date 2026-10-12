@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from fastapi_endpoint_detector.analyzer.framework_phase_runtime import PhaseManifest
 from fastapi_endpoint_detector.executor.vm_executor import (
     SandboxPolicy,
     VMExecutor,
@@ -417,6 +418,68 @@ def test_lifespan_manifest_uses_same_hardened_worker_request(tmp_path: Path) -> 
     assert "--network" in command and command[command.index("--network") + 1] == "none"
     assert "--pid" in command and command[command.index("--pid") + 1] == ""
     assert "--security-opt" in command
+
+
+def test_constructor_lifespan_callback_is_projected_with_manifest_identity(tmp_path: Path) -> None:
+    app = tmp_path / "app"
+    app.mkdir()
+    callback_file = app / "main.py"
+    callback_file.write_text("async def lifespan(): pass\n", encoding="utf-8")
+    callback = {
+        "module": "sample",
+        "symbol": "lifespan",
+        "file": str(callback_file.resolve()),
+        "line": 1,
+        "column": 0,
+        "end_line": 1,
+        "end_column": 24,
+        "source_sha256": "sha256:" + "a" * 64,
+    }
+    registration = {
+        **callback,
+        "symbol": "FastAPI",
+        "file": str(callback_file.resolve()),
+        "line": 2,
+        "end_line": 2,
+        "end_column": 30,
+    }
+    manifest = _phase_manifest_for_test(app)
+    entry = manifest["entries"][0]
+    entry["callback"] = callback
+    entry["registration"] = registration
+    entry["constructor_lifespan"] = {
+        "constructor_symbol": "fastapi.applications.FastAPI",
+        "constructor_file": str(callback_file.resolve()),
+        "constructor_file_sha256": "sha256:" + "b" * 64,
+        "provider_capture_sha256": "sha256:" + "c" * 64,
+        "constructor_line": 2,
+        "constructor_column": 0,
+        "constructor_end_line": 2,
+        "constructor_end_column": 30,
+        "callback_symbol": "sample.lifespan",
+        "callback": callback,
+    }
+    validated = PhaseManifest.model_validate(manifest)
+    projected = VMExecutor._container_phase_manifest(manifest, app, "/app")
+    strict = PhaseManifest.model_validate_json(json.dumps(projected), strict=True)
+
+    projected_entry = projected["entries"][0]
+    assert projected_entry["constructor_lifespan"]["callback"] == projected_entry["callback"]
+    assert projected_entry["callback"]["file"] == "/app/main.py"
+    assert strict.entries[0].constructor_lifespan is not None
+    assert validated.entries[0].callback.file == str(callback_file.resolve())
+
+    mismatched = json.loads(json.dumps(manifest))
+    mismatched["entries"][0]["constructor_lifespan"]["callback"]["file"] = str(app)
+    with pytest.raises(VMExecutorError, match="failed validation"):
+        VMExecutor._container_phase_manifest(mismatched, app, "/app")
+
+    outside = json.loads(json.dumps(manifest))
+    outside["entries"][0]["callback"]["file"] = str(tmp_path / "outside.py")
+    outside["entries"][0]["constructor_lifespan"]["callback"]["file"] = str(tmp_path / "outside.py")
+    (tmp_path / "outside.py").write_text("", encoding="utf-8")
+    with pytest.raises(VMExecutorError, match="outside the mounted snapshot"):
+        VMExecutor._container_phase_manifest(outside, app, "/app")
 
 
 def test_selected_runtime_entry_is_explicit_in_worker_argv(tmp_path: Path) -> None:
