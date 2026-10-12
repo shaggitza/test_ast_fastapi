@@ -51,6 +51,12 @@ class _Response:
         return result
 
 
+class _BlockingResponse(_Response):
+    def read(self, size: int = -1) -> bytes:
+        time.sleep(1)
+        return super().read(size)
+
+
 class _Opener:
     def __init__(self, response: _Response) -> None:
         self.response = response
@@ -83,7 +89,7 @@ def test_fetch_accepts_exact_redirect_and_rejects_wrong_host_or_size(
     monkeypatch.setattr(
         urllib.request, "build_opener", lambda *_args: _Opener(_Response(b"abc", final))
     )
-    body, fetched_url = collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5)
+    body, fetched_url = collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 10)
     assert body == b"abc"
     assert fetched_url == final
     monkeypatch.setattr(
@@ -92,12 +98,66 @@ def test_fetch_accepts_exact_redirect_and_rejects_wrong_host_or_size(
         lambda *_args: _Opener(_Response(b"abc", "https://evil.example/1.diff")),
     )
     with pytest.raises(protocol.CorpusV2Error, match="redirect"):
-        collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5)
+        collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 10)
+
+
+def test_fetch_wall_deadline_interrupts_blocking_read_and_preserves_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = f"https://github.com/{collector.REPOSITORY}/pull/1.diff"
+    monkeypatch.setattr(
+        urllib.request,
+        "build_opener",
+        lambda *_args: _Opener(_BlockingResponse(b"abc", url)),
+    )
+    started = time.monotonic()
+    with pytest.raises(collector.CollectionFailure) as caught:
+        collector._fetch(url, collector.REPOSITORY, 1, 3, started + 0.05, 10)
+    assert caught.value.failure_class == "deadline"
+    assert caught.value.bytes_read == 0
+    assert time.monotonic() - started < 0.5
+
+    class _BlockingOpener:
+        def open(self, _request: object, timeout: float) -> _Response:
+            assert timeout > 0
+            time.sleep(1)
+            return _Response(b"abc", url)
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: _BlockingOpener())
+    started = time.monotonic()
+    with pytest.raises(collector.CollectionFailure) as caught:
+        collector._fetch(url, collector.REPOSITORY, 1, 3, started + 0.05, 10)
+    assert caught.value.failure_class == "deadline"
+    assert time.monotonic() - started < 0.5
+
+    class _BrokenOpener:
+        def open(self, _request: object, timeout: float) -> _Response:
+            assert timeout > 0
+            raise urllib.error.URLError("DNS lookup refused")
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: _BrokenOpener())
+    with pytest.raises(collector.CollectionFailure) as caught:
+        collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 10)
+    assert caught.value.failure_class == "request_error"
+    assert "DNS lookup refused" in str(caught.value)
+
+
+def test_fetch_never_reads_beyond_remaining_aggregate_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = f"https://github.com/{collector.REPOSITORY}/pull/1.diff"
+    response = _Response(b"abcdefgh", url)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: _Opener(response))
+    with pytest.raises(collector.CollectionFailure) as caught:
+        collector._fetch(url, collector.REPOSITORY, 1, 8, time.monotonic() + 5, 3)
+    assert caught.value.failure_class == "aggregate_limit"
+    assert caught.value.bytes_read == 3
+    assert response.body == b"defgh"
     monkeypatch.setattr(
         urllib.request, "build_opener", lambda *_args: _Opener(_Response(b"ab", url))
     )
     with pytest.raises(protocol.CorpusV2Error, match="size_mismatch"):
-        collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5)
+        collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 10)
 
 
 def test_publish_is_no_clobber_and_safe_output_rejects_symlink(tmp_path: Path) -> None:
@@ -140,8 +200,9 @@ def test_hash_mismatch_never_creates_blob(tmp_path: Path) -> None:
     root.mkdir()
     blob_dir = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     body = b"bad bytes"
-    with pytest.raises(protocol.CorpusV2Error, match="hash_mismatch"):
+    with pytest.raises(collector.CollectionFailure, match="hash_mismatch") as caught:
         collector._store_verified(blob_dir, body, "0" * 64)
+    assert caught.value.bytes_read == len(body)
     assert list(root.iterdir()) == []
     os.close(blob_dir)
 
@@ -176,14 +237,16 @@ def test_capture_is_single_source_for_rows_when_paths_change(
     monkeypatch.setattr(protocol, "_read_bounded", capture_then_mutate)
 
     def mocked_fetch(
-        url: str, _repo: str, number: int, _size: int, _deadline: float
+        url: str, _repo: str, number: int, _size: int, _deadline: float, _budget: int
     ) -> tuple[bytes, str]:
         failure = number % 4
         if failure == 0:
             headers: Any = None
             raise urllib.error.HTTPError(url, 404, "missing", headers, None)
         labels = {1: "hash_mismatch", 2: "size_mismatch", 3: "invalid_resource"}
-        raise collector.CollectionFailure(labels[failure], "mocked transport result")
+        error = collector.CollectionFailure(labels[failure], "mocked transport result")
+        error.bytes_read = 7
+        raise error
 
     monkeypatch.setattr(collector, "_fetch", mocked_fetch)
     result = collector.collect(
@@ -205,7 +268,7 @@ def test_capture_is_single_source_for_rows_when_paths_change(
         "matched": 0,
         "missing": 10,
         "mismatch": 40,
-        "bytes": 0,
+        "bytes": 280,
     }
     assert {row["failure_class"] for row in result["rows"]} == {
         "http_error",

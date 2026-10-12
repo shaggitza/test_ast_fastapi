@@ -8,13 +8,18 @@ import contextlib
 import hashlib
 import json
 import os
+import signal
 import stat
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -40,6 +45,31 @@ class CollectionFailure(protocol.CorpusV2Error):
     def __init__(self, failure_class: str, detail: str) -> None:
         super().__init__(detail)
         self.failure_class = failure_class
+        self.bytes_read = 0
+
+
+@contextlib.contextmanager
+def _wall_deadline(deadline: float) -> Iterator[None]:
+    """Interrupt a blocking urllib operation at the collector's wall deadline."""
+    if threading.current_thread() is not threading.main_thread():
+        raise CollectionFailure("deadline", "deadline guard requires the main thread")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def expired(_signum: int, _frame: Any) -> None:
+        raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
+
+    signal.signal(signal.SIGALRM, expired)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        signal.signal(signal.SIGALRM, previous_handler)
+        raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def _open_dir_chain(path: Path, *, create: bool) -> int:
@@ -111,7 +141,8 @@ def _read_blob(dirfd: int, name: str, expected_size: int, expected_hash: str) ->
 
 
 def _fetch(
-    url: str, repository: str, number: int, expected_size: int, deadline: float
+    url: str, repository: str, number: int, expected_size: int, deadline: float,
+    byte_budget: int,
 ) -> tuple[bytes, str]:
     redirects = protocol._SafeDiffRedirects(repository, number)
     opener = urllib.request.build_opener(redirects)
@@ -124,33 +155,50 @@ def _fetch(
     )
     body = bytearray()
     try:
-        with opener.open(
-            request, timeout=max(0.1, min(20, deadline - time.monotonic()))
-        ) as response:
+        with _wall_deadline(deadline):
+            response_context = opener.open(
+                request, timeout=max(0.1, min(20, deadline - time.monotonic()))
+            )
+        with response_context as response:
             final_url = response.geturl()
             redirects._validate(final_url)
             kind = response.headers.get("Content-Type", "")
             if not (kind.startswith("text/plain") or kind.startswith("text/x-diff")):
                 raise CollectionFailure("invalid_resource", "invalid diff content type")
             while True:
-                if time.monotonic() >= deadline:
-                    raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
-                chunk = response.read(min(64 * 1024, MAX_ROW_BYTES + 1 - len(body)))
+                room = min(
+                    byte_budget - len(body),
+                    expected_size + 1 - len(body),
+                    MAX_ROW_BYTES + 1 - len(body),
+                )
+                if room <= 0:
+                    break
+                with _wall_deadline(deadline):
+                    chunk = response.read(min(64 * 1024, room))
                 if not chunk:
                     break
                 body.extend(chunk)
+                if len(body) >= byte_budget and len(body) != expected_size:
+                    raise CollectionFailure("aggregate_limit", "aggregate byte ceiling exhausted")
                 if len(body) > min(expected_size, MAX_ROW_BYTES):
                     raise CollectionFailure(
                         "size_mismatch", "diff exceeded locked/task byte ceiling"
                     )
     except urllib.error.HTTPError:
         raise
+    except CollectionFailure as exc:
+        exc.bytes_read = len(body)
+        raise
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise protocol.CorpusV2Error(f"diff request failed: {type(exc).__name__}") from exc
+        failure = CollectionFailure("request_error", f"diff request failed: {exc}")
+        failure.bytes_read = len(body)
+        raise failure from exc
     if len(body) != expected_size:
-        raise CollectionFailure(
+        failure = CollectionFailure(
             "size_mismatch", f"size_mismatch: expected {expected_size} bytes, received {len(body)}"
         )
+        failure.bytes_read = len(body)
+        raise failure
     return bytes(body), final_url
 
 
@@ -186,7 +234,9 @@ def _validate_rows(rows: list[dict[str, Any]]) -> None:
 def _store_verified(cache_fd: int, body: bytes, expected_hash: str) -> str:
     digest = hashlib.sha256(body).hexdigest()
     if digest != expected_hash:
-        raise CollectionFailure("hash_mismatch", f"hash_mismatch: received SHA-256 {digest}")
+        failure = CollectionFailure("hash_mismatch", f"hash_mismatch: received SHA-256 {digest}")
+        failure.bytes_read = len(body)
+        raise failure
     try:
         _read_blob(cache_fd, digest, len(body), digest)
     except FileNotFoundError:
@@ -277,10 +327,12 @@ def collect(  # noqa: PLR0912, PLR0915
         try:
             if time.monotonic() >= deadline:
                 raise protocol.CorpusV2Error("collector wall-clock limit exceeded")
-            if total + row["diff_bytes"] > MAX_TOTAL_BYTES:
-                raise protocol.CorpusV2Error("aggregate locked byte ceiling exceeded")
+            remaining = MAX_TOTAL_BYTES - total
+            if remaining <= 0:
+                raise CollectionFailure("aggregate_limit", "aggregate byte ceiling exhausted")
             body, final_url = _fetch(
-                row["diff_final_url"], REPOSITORY, row["pr"], row["diff_bytes"], deadline
+                row["diff_final_url"], REPOSITORY, row["pr"], row["diff_bytes"], deadline,
+                remaining,
             )
             digest = _store_verified(cachefd, body, expected_hash)
             total += len(body)
@@ -294,6 +346,7 @@ def collect(  # noqa: PLR0912, PLR0915
                 }
             )
         except Exception as exc:  # retain one explicit status for every frozen row
+            total += getattr(exc, "bytes_read", 0)
             classification = (
                 "http_error"
                 if isinstance(exc, urllib.error.HTTPError)
