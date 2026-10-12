@@ -11,12 +11,15 @@ from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.config import AnalysisConfig, Config, load_config
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
+    CompositeEffectSelector,
     EffectContractDocument,
     EffectContractError,
+    EffectSelector,
     FiniteValueStatus,
     InvocationKind,
     ResolvedCallSite,
     ResourceIdentityEvidence,
+    SelectorKind,
     load_effect_contracts,
 )
 
@@ -167,7 +170,7 @@ def test_semantic_change_changes_hash(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "mutation,match",
     [
-        (lambda data: data.update(schema_version=5), "schema_version"),
+        (lambda data: data.update(schema_version=6), "schema_version"),
         (lambda data: data.update(unknown=True), "Extra inputs"),
         (
             lambda data: data["contracts"][0].update(symbol="redis.client.Redis.*"),
@@ -496,3 +499,61 @@ def test_loader_rejects_unsupported_extension_and_large_documents(tmp_path: Path
     large.write_bytes(b"x" * (1_048_576 + 1))
     with pytest.raises(EffectContractError, match="1 MiB"):
         load_effect_contracts(large)
+
+
+@pytest.mark.parametrize("field", ["resource", "value"])
+@pytest.mark.parametrize("schema_version", [1, 2, 3, 4])
+def test_argument_or_keyword_selector_requires_schema_v5(field: str, schema_version: int) -> None:
+    data = _document()
+    contracts = data["contracts"]
+    assert isinstance(contracts, list)
+    contracts[0][field] = {"kind": "argument_or_keyword", "index": 0, "name": "url"}
+    data["schema_version"] = schema_version
+    with pytest.raises(ValidationError, match="schema_version 5"):
+        EffectContractDocument.model_validate(data)
+    data["schema_version"] = 5
+    document = EffectContractDocument.model_validate(data)
+    selector = getattr(document.contracts[0], field)
+    assert selector.kind is SelectorKind.ARGUMENT_OR_KEYWORD
+    assert selector.index == 0
+    assert selector.name == "url"
+    assert EffectContractDocument.model_validate(document.model_dump()) == document
+
+
+def test_argument_or_keyword_selector_in_composite_requires_schema_v5() -> None:
+    data = _document()
+    contracts = data["contracts"]
+    assert isinstance(contracts, list)
+    contracts[0]["resource"] = {
+        "kind": "composite",
+        "components": [
+            {"kind": "argument_or_keyword", "index": 0, "name": "url"},
+            {"kind": "keyword", "name": "tenant"},
+        ],
+    }
+    data["schema_version"] = 4
+    with pytest.raises(ValidationError, match="schema_version 5"):
+        EffectContractDocument.model_validate(data)
+    data["schema_version"] = 5
+    assert isinstance(
+        EffectContractDocument.model_validate(data).contracts[0].resource,
+        CompositeEffectSelector,
+    )
+
+
+@pytest.mark.parametrize(
+    "selector",
+    [
+        {"kind": "argument_or_keyword", "index": 0},
+        {"kind": "argument_or_keyword", "name": "url"},
+        {"kind": "argument_or_keyword", "index": True, "name": "url"},
+        {"kind": "argument_or_keyword", "index": -1, "name": "url"},
+        {"kind": "argument_or_keyword", "index": 0, "name": "url-name"},
+        {"kind": "argument_or_keyword", "index": 0, "name": "url", "fallback": True},
+    ],
+)
+def test_argument_or_keyword_selector_rejects_invalid_shape(
+    selector: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        EffectSelector.model_validate(selector)
