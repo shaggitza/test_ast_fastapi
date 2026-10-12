@@ -21,6 +21,7 @@ try:
 except ImportError:  # pragma: no cover - unavailable on Windows
     resource = None  # type: ignore[assignment]
 
+from fastapi_endpoint_detector.analyzer.live_expression_types import LIVE_EXPRESSION_SCOPE
 from fastapi_endpoint_detector.analyzer.mypy_incremental import (
     BuildConfig,
     MypyIncrementalProvider,
@@ -97,6 +98,7 @@ def _equivalence_passed(record: dict[str, object]) -> bool:
         isinstance(equivalence, dict)
         and equivalence.get("equivalent_to_independent_cold_build") is True
         and equivalence.get("cache_fingerprint_matches_independent_cold_build") is True
+        and equivalence.get("live_expression_types_match_independent_cold_build") is True
     )
 
 
@@ -159,7 +161,18 @@ def _equivalence_check(
     fingerprint_matches = state.report.cache_fingerprint == fresh.report.cache_fingerprint
     if not fingerprint_matches:
         raise RuntimeError("retained cache fingerprint differs from independent cold build")
+    live = state.live_expression_type_snapshot()
+    fresh_live = fresh.live_expression_type_snapshot()
+    if live != fresh_live:
+        raise RuntimeError("retained current expression types differ from independent cold build")
     return {
+        "live_expression_types_match_independent_cold_build": True,
+        "live_expression_type_scope": LIVE_EXPRESSION_SCOPE,
+        "live_expression_type_modules": len(live),
+        "live_expression_type_count": sum(row.expressions for row in live),
+        "live_expression_mapped_type_count": sum(row.mapped_expressions for row in live),
+        "live_expression_owned_typevar_count": sum(row.owned_typevars for row in live),
+        "live_expression_module_digests": {row.module: row.sha256 for row in live},
         "equivalent_to_independent_cold_build": True,
         "cache_fingerprint_matches_independent_cold_build": True,
         "python_version": config.python_version,
@@ -339,6 +352,7 @@ def main() -> None:  # noqa: PLR0915
                 [
                     Path(__file__),
                     Path("src/fastapi_endpoint_detector/analyzer/mypy_incremental.py"),
+                    Path("src/fastapi_endpoint_detector/analyzer/live_expression_types.py"),
                     Path("src/fastapi_endpoint_detector/models/endpoint.py"),
                     Path("pyproject.toml"),
                 ]

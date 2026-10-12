@@ -16,4 +16,15 @@ The R9 result separates raw client observations, client uncertainties, hash-boun
 
 This corpus supplies no established endpoint objects or attested server origins. The runner requires empty join output and does not infer origins from audit citations or route coincidences. It does not compute canonical precision or recall. GH108 acceptance remains open for broader coverage and independently attested joins.
 
-This change supplies a versioned runner and regression tests. No measured R9 result is included in the commit. CI exercises the adapter on the pinned snapshots and synthetic contract controls. The original R8 runner, manifest and result remain available under their existing paths.
+The measured result is `benchmarks/real_world/nonpython_v1/results/evaluation-r9.json`, SHA-256 `1c418a5c7908214b870a9fdc986d33e90da85589fe00ecc99c4bb7f445393c8c` (84,495 bytes). It was produced from runner revision `b4ea67c9d1f14bbabe6ea16a00bb0ffbadad522c` using Python 3.11.16 and this command, with exit status 0:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python -B benchmarks/real_world/evaluate_nonpython_r9.py \
+  --fixture-dir benchmarks/real_world/nonpython_v1 --write /tmp/nonpython-r9.json
+```
+
+All six case scans were complete and their scanned counts matched the selected paths: 2, 5, 3, 5, 4 and 6 files. The result verifies 25 source files and reconciles all 18 imported scanner modules with the pinned manifest. It records 35 raw client observations, 41 client uncertainties and 36 deployment observations. The eight client atoms have separate audited-callsite statuses: one observed, six unobserved and one unresolved location. These statuses are provisional source comparisons, not true-positive/false-negative labels or precision/recall scores.
+
+No endpoint objects or trusted origins were supplied, so established-surface joins remain zero. Langflow's selected Python source was scanned but yielded zero subprocess observations; the deployment observations remain conditional source evidence, with no runtime execution claim. The result records the protocol-evidence file digest; that digest is not independently pinned or externally attested. This run does not satisfy GH108's broader coverage or attested-origin acceptance.
+
+The original R8 runner, manifest and result remain available under their existing paths.

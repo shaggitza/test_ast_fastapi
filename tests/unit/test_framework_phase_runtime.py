@@ -17,6 +17,8 @@ from fastapi_endpoint_detector.analyzer.framework_phase_bridge import FrameworkP
 from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
     PhaseManifest,
     PhaseManifestEntry,
+    PhaseObservation,
+    compare_phase_observation,
     manifest_from_report,
 )
 from fastapi_endpoint_detector.models.surface_contract import load_surface_preset
@@ -435,3 +437,325 @@ def test_manifest_contract_tamper_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="contract digest does not match framework-v1"):
         PhaseManifest.model_validate(manifest)
+
+
+def _comparison_manifest(*phases: str) -> PhaseManifest:
+    catalog = load_surface_preset("framework-v1")
+    callback = SourceIdentity(
+        module="app",
+        symbol="lifespan",
+        file="/snapshot/app.py",
+        line=2,
+        column=0,
+        end_line=7,
+        end_column=0,
+        source_sha256=_DIGEST,
+    )
+    registration = SourceIdentity(
+        module="app",
+        symbol="FastAPI",
+        file="/snapshot/app.py",
+        line=9,
+        column=6,
+        end_line=9,
+        end_column=36,
+        source_sha256=_DIGEST,
+    )
+    return PhaseManifest(
+        entries=tuple(
+            PhaseManifestEntry(
+                callback=callback,
+                registration=registration,
+                phase=phase,
+                execution_conditions=(f"{phase} phase",),
+                contract_id=f"fastapi-lifespan-{phase}",
+                contract_sha256=catalog.document.contract_hashes[f"fastapi-lifespan-{phase}"],
+                source_sha256=_DIGEST,
+                callback_file_sha256="a" * 64,
+                registration_file_sha256="a" * 64,
+                inventory_sha256=_DIGEST,
+                engine_sha256=_DIGEST,
+                config_sha256=_DIGEST,
+            )
+            for phase in phases
+        )
+    )
+
+
+def _observed_row(entry: PhaseManifestEntry, digest: str) -> dict[str, object]:
+    return {
+        "callback": entry.callback.model_dump(mode="json"),
+        "registration": entry.registration.model_dump(mode="json"),
+        "phase": entry.phase,
+        "manifest_sha256": digest,
+        "execution_conditions": list(entry.execution_conditions),
+    }
+
+
+def test_phase_comparison_joins_exact_identities_and_keeps_phases_independent() -> None:
+    manifest = _comparison_manifest("startup", "shutdown")
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(_observed_row(manifest.entries[0], manifest.digest),),
+        unavailable=(),
+        execution_status="completed",
+    )
+    comparison = compare_phase_observation(manifest, observation)
+    assert comparison.manifest_sha256 == manifest.digest
+    assert comparison.execution_status == "completed"
+    assert {row.phase: row.status for row in comparison.rows} == {
+        "startup": "observed_positive",
+        "shutdown": "not_observed_positive_only",
+    }
+    assert compare_phase_observation(manifest, observation).model_dump(mode="json") == (
+        comparison.model_dump(mode="json")
+    )
+
+
+def test_self_reported_phase_rows_never_become_positive_truth() -> None:
+    manifest = _comparison_manifest("startup", "shutdown")
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(_observed_row(manifest.entries[0], manifest.digest),),
+        unavailable=(),
+        execution_status="completed",
+        role="self_reported_nonpositive",
+    )
+    comparison = compare_phase_observation(manifest, observation)
+    assert comparison.observation_role == "self_reported_nonpositive"
+    assert {row.phase: row.status for row in comparison.rows} == {
+        "startup": "self_reported_observation",
+        "shutdown": "not_observed_positive_only",
+    }
+
+
+def test_callback_only_unavailability_coalesces_repeated_worker_rows() -> None:
+    manifest = _comparison_manifest("startup", "shutdown")
+    unavailable = {
+        "callback": manifest.entries[0].callback.model_dump(mode="json"),
+        "reason": "callback source unavailable",
+    }
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(),
+        unavailable=(unavailable, unavailable),
+        execution_status="unavailable",
+    )
+    comparison = compare_phase_observation(manifest, observation)
+    assert {row.status for row in comparison.rows} == {"callback_unavailable"}
+    assert all(
+        row.unavailable_reasons == ("callback source unavailable",) for row in comparison.rows
+    )
+
+
+def test_exact_phase_positive_survives_callback_unavailability_for_its_sibling() -> None:
+    manifest = _comparison_manifest("startup", "shutdown")
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(_observed_row(manifest.entries[0], manifest.digest),),
+        unavailable=(
+            {
+                "callback": manifest.entries[0].callback.model_dump(mode="json"),
+                "reason": "shutdown unavailable",
+            },
+        ),
+        execution_status="completed",
+    )
+    comparison = compare_phase_observation(manifest, observation)
+    assert {row.phase: row.status for row in comparison.rows} == {
+        "startup": "observed_positive",
+        "shutdown": "callback_unavailable",
+    }
+
+
+def test_phase_comparison_rejects_top_level_digest_even_without_rows() -> None:
+    manifest = _comparison_manifest("startup")
+    observation = PhaseObservation(
+        manifest_sha256="sha256:" + "0" * 64,
+        observed=(),
+        unavailable=(),
+        execution_status="completed",
+    )
+    with pytest.raises(ValueError, match="different manifest"):
+        compare_phase_observation(manifest, observation)
+
+
+@pytest.mark.parametrize("status", ["startup_failed", "unavailable"])
+def test_failed_phase_executions_cannot_carry_positive_rows(status: str) -> None:
+    manifest = _comparison_manifest("startup")
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(_observed_row(manifest.entries[0], manifest.digest),),
+        unavailable=(),
+        execution_status=status,
+    )
+    with pytest.raises(ValueError, match="failed execution"):
+        compare_phase_observation(manifest, observation)
+
+
+def test_phase_comparison_rejects_duplicate_and_mismatched_occurrences() -> None:
+    manifest = _comparison_manifest("startup")
+    row = _observed_row(manifest.entries[0], manifest.digest)
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(row, row),
+        unavailable=(),
+        execution_status="completed",
+    )
+    with pytest.raises(ValueError, match="repeats"):
+        compare_phase_observation(manifest, observation)
+    wrong_registration = {
+        **row,
+        "registration": {**row["registration"], "column": 7},
+    }
+    observation = observation.model_copy(update={"observed": (wrong_registration,)})
+    with pytest.raises(ValueError, match="exactly match"):
+        compare_phase_observation(manifest, observation)
+    wrong_conditions = {**row, "execution_conditions": ["different condition"]}
+    observation = observation.model_copy(update={"observed": (wrong_conditions,)})
+    with pytest.raises(ValueError, match="exactly match"):
+        compare_phase_observation(manifest, observation)
+    wrong_row_digest = {**row, "manifest_sha256": "sha256:" + "0" * 64}
+    observation = observation.model_copy(update={"observed": (wrong_row_digest,)})
+    with pytest.raises(ValueError, match="mismatched manifest"):
+        compare_phase_observation(manifest, observation)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("line", "2"),
+        ("line", True),
+        ("line", None),
+        ("line", 2**31),
+        ("column", -1),
+        ("end_line", "7"),
+        ("end_column", True),
+        ("module", 1),
+        ("symbol", ""),
+        ("file", "x" * 4097),
+        ("source_sha256", "sha256:" + "g" * 64),
+    ],
+)
+def test_phase_comparison_rejects_coercible_identity_fields(field: str, value: object) -> None:
+    manifest = _comparison_manifest("startup")
+    row = _observed_row(manifest.entries[0], manifest.digest)
+    row["callback"] = {**row["callback"], field: value}
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(row,),
+        unavailable=(),
+        execution_status="completed",
+    )
+    with pytest.raises(ValueError):
+        compare_phase_observation(manifest, observation)
+
+
+def test_phase_comparison_rejects_malformed_updates_and_condition_bounds() -> None:
+    manifest = _comparison_manifest("startup")
+    row = _observed_row(manifest.entries[0], manifest.digest)
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(),
+        unavailable=(),
+        execution_status="completed",
+    )
+    updates = (
+        {"observed": None},
+        {"unavailable": {}},
+        {"role": []},
+        {"execution_status": []},
+        {"schema_version": True},
+        {"protocol": "other"},
+    )
+    for update in updates:
+        with pytest.raises(ValueError):
+            compare_phase_observation(manifest, observation.model_copy(update=update))
+    for bad_row in (
+        {**row, "phase": []},
+        {**row, "execution_conditions": ["x"] * 129},
+        {**row, "execution_conditions": ["x" * 2049]},
+        {key: value for key, value in row.items() if key != "registration"},
+    ):
+        with pytest.raises(ValueError):
+            compare_phase_observation(
+                manifest, observation.model_copy(update={"observed": (bad_row,)})
+            )
+
+
+def test_phase_comparison_bounds_rows_and_unavailable_reason_fanout() -> None:
+    manifest = _comparison_manifest("startup")
+    row = _observed_row(manifest.entries[0], manifest.digest)
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=tuple(row for _ in range(10_000)),
+        unavailable=(),
+        execution_status="completed",
+    )
+    with pytest.raises(ValueError, match="row budget"):
+        compare_phase_observation(manifest, observation)
+    entry = manifest.entries[0]
+    many_registrations = PhaseManifest(
+        entries=tuple(
+            entry.model_copy(
+                update={
+                    "registration": entry.registration.model_copy(
+                        update={
+                            "column": column,
+                            "end_column": column + 1,
+                        }
+                    ),
+                }
+            )
+            for column in range(100)
+        )
+    )
+    callback = entry.callback.model_dump(mode="json")
+    observation = PhaseObservation(
+        manifest_sha256=many_registrations.digest,
+        observed=(),
+        unavailable=tuple(
+            {"callback": callback, "reason": f"reason {index}"} for index in range(101)
+        ),
+        execution_status="unavailable",
+    )
+    with pytest.raises(ValueError, match="fanout"):
+        compare_phase_observation(many_registrations, observation)
+
+
+def test_phase_comparison_rejects_unknown_or_contradictory_unavailable_callbacks() -> None:
+    manifest = _comparison_manifest("startup")
+    entry = manifest.entries[0]
+    callback = entry.callback.model_dump(mode="json")
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest,
+        observed=(),
+        unavailable=({"callback": {**callback, "symbol": "other"}, "reason": "unavailable"},),
+        execution_status="unavailable",
+    )
+    with pytest.raises(ValueError, match="absent from the static manifest"):
+        compare_phase_observation(manifest, observation)
+    observation = observation.model_copy(
+        update={
+            "observed": (_observed_row(entry, manifest.digest),),
+            "unavailable": ({"callback": callback, "reason": "unavailable"},),
+            "execution_status": "completed",
+        }
+    )
+    with pytest.raises(ValueError, match="both observed and unavailable"):
+        compare_phase_observation(manifest, observation)
+
+
+def test_phase_comparison_revalidates_static_duplicate_and_mutated_identity_models() -> None:
+    manifest = _comparison_manifest("startup")
+    observation = PhaseObservation(
+        manifest_sha256=manifest.digest, observed=(), unavailable=(), execution_status="completed"
+    )
+    duplicated = manifest.model_copy(update={"entries": (manifest.entries[0], manifest.entries[0])})
+    with pytest.raises(ValueError, match="duplicate"):
+        compare_phase_observation(duplicated, observation)
+    bad_identity = manifest.entries[0].callback.model_copy(update={"line": True})
+    bad_entry = manifest.entries[0].model_copy(update={"callback": bad_identity})
+    mutated = manifest.model_copy(update={"entries": (bad_entry,)})
+    with pytest.raises(ValueError, match="coordinate"):
+        compare_phase_observation(mutated, observation)
