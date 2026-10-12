@@ -504,6 +504,67 @@ def test_constructor_scan_finds_walrus_constructor_selected_by_extractor(
 @pytest.mark.parametrize(
     "registration",
     (
+        "apps = [FastAPI() for _ in [0]]\n",
+        "apps = {FastAPI() for _ in [0]}\n",
+        "apps = {FastAPI(): 0 for _ in [0]}\n",
+    ),
+    ids=("list-comprehension", "set-comprehension", "dictionary-comprehension"),
+)
+def test_constructor_scan_counts_eager_comprehension_constructors(
+    tmp_path: Path, registration: str
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n"
+        "def startup_work() -> None: pass\n"
+        "def shutdown_work() -> None: pass\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n"
+        "    startup_work()\n"
+        "    yield\n"
+        "    shutdown_work()\n"
+        "app = FastAPI(lifespan=lifespan)\n"
+        + registration,
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    assert inventory.endpoints
+
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), _typed_build(tmp_path)
+    )
+
+    assert report.records
+    # A second eager constructor makes the selected binding ambiguous. The
+    # scan must see constructors in each materialized comprehension form.
+    assert all(record.constructor_lifespan is None for record in report.records)
+
+
+def test_constructor_scan_ignores_bare_generator_body_but_keeps_direct_constructor(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+        "app = FastAPI(lifespan=lifespan)\n"
+        "deferred = (FastAPI(lifespan=lifespan) for _ in [0])\n",
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), _typed_build(tmp_path)
+    )
+
+    assert report.records
+    assert all(record.constructor_lifespan is not None for record in report.records)
+    assert all(record.status == "conditional" for record in report.records)
+
+
+@pytest.mark.parametrize(
+    "registration",
+    (
         "(first := FastAPI(lifespan=lifespan))\n(second := FastAPI(lifespan=lifespan))\n",
         "def deferred():\n    (app := FastAPI(lifespan=lifespan))\n",
     ),
