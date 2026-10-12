@@ -131,13 +131,14 @@ def _open_dir_chain(path: Path, *, create: bool) -> int:
 
 def _publish(dirfd: int, name: str, body: bytes) -> None:
     temp_name = f".raw-diff-{os.getpid()}-{time.monotonic_ns()}"
-    fd = os.open(
-        temp_name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o600,
-        dir_fd=dirfd,
-    )
+    fd: int | None = None
     try:
+        fd = os.open(
+            temp_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=dirfd,
+        )
         view = memoryview(body)
         written = 0
         while written < len(view):
@@ -151,15 +152,16 @@ def _publish(dirfd: int, name: str, body: bytes) -> None:
     except FileExistsError as exc:
         raise protocol.CorpusV2Error(f"refusing to overwrite existing cache entry: {name}") from exc
     finally:
-        try:
-            os.close(fd)
-        finally:
-            deadline = _deadline_at
-            if deadline is None:
-                os.unlink(temp_name, dir_fd=dirfd)
-            elif time.monotonic() < deadline:
-                with _wall_deadline(deadline):
+        if fd is not None:
+            try:
+                os.close(fd)
+            finally:
+                deadline = _deadline_at
+                if deadline is None:
                     os.unlink(temp_name, dir_fd=dirfd)
+                elif time.monotonic() < deadline:
+                    with _wall_deadline(deadline):
+                        os.unlink(temp_name, dir_fd=dirfd)
 
 
 def _read_blob(dirfd: int, name: str, expected_size: int, expected_hash: str) -> None:

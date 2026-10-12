@@ -769,3 +769,61 @@ def test_receipt_io_failure_is_reported_as_publication_failure(
     assert isinstance(caught.value.__cause__, OSError)
     assert "blob directory" not in str(caught.value)
     assert not (tmp_path / "out" / "receipts.json").exists()
+
+
+def test_publish_interruption_after_temp_acquisition_closes_owned_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    original_open = os.open
+    opened: list[int] = []
+
+    def record_temp(path: Any, *args: Any, **kwargs: Any) -> int:
+        fd = original_open(path, *args, **kwargs)
+        if isinstance(path, str) and path.startswith(".raw-diff-"):
+            opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(os, "open", record_temp)
+    previous_trace = sys.gettrace()
+    injected = False
+
+    def interrupt(frame: FrameType, event: str, _arg: object) -> Any:
+        nonlocal injected
+        if (
+            not injected
+            and event == "line"
+            and frame.f_code is collector._publish.__code__
+            and frame.f_locals.get("fd") is not None
+        ):
+            injected = True
+            raise collector.CollectionFailure("deadline", "injected after temporary acquisition")
+        return interrupt
+
+    try:
+        sys.settrace(interrupt)
+        with pytest.raises(collector.CollectionFailure, match="after temporary acquisition"):
+            collector._publish(directory, "blob", b"abc")
+    finally:
+        sys.settrace(previous_trace)
+        os.close(directory)
+    assert injected and len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_publish_temp_collision_never_removes_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(time, "monotonic_ns", lambda: 7001)
+    temporary = tmp_path / f".raw-diff-{os.getpid()}-7001"
+    temporary.write_bytes(b"preexisting private file")
+    directory = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(protocol.CorpusV2Error, match="refusing to overwrite"):
+            collector._publish(directory, "blob", b"new bytes")
+    finally:
+        os.close(directory)
+    assert temporary.read_bytes() == b"preexisting private file"
+    assert not (tmp_path / "blob").exists()
