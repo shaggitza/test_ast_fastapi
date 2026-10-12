@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
+from mypy.nodes import ARG_NAMED, ARG_POS, CallExpr, Decorator, FuncDef
 from mypy.server.update import FineGrainedBuildManager
 
 from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildReport, TypedBuild
@@ -15,6 +17,7 @@ from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
     EndpointOccurrenceBinding,
     GraphSide,
+    SourceDependencyUncertainty,
     SourceSpan,
     TypedReverseGraph,
     build_typed_reverse_graph,
@@ -291,6 +294,374 @@ def exact_handler_bindings(
     return tuple(bindings)
 
 
+_DEPENDENCY_SELECTORS = frozenset(
+    {
+        "fastapi.params.Depends",
+        "fastapi.params.Security",
+        "fastapi.param_functions.Depends",
+        "fastapi.param_functions.Security",
+    }
+)
+_DEPENDENCY_SPELLINGS = frozenset({"Depends", "Security"})
+_MAX_DEPENDENCY_AST_NODES = 32768
+_MAX_DEPENDENCY_IMPORT_STATEMENTS = 32768
+_MAX_DEPENDENCY_IMPORT_BINDINGS = 32768
+_MAX_DEPENDENCY_CALLS_PER_HANDLER = 64
+_MAX_DEPENDENCY_TYPED_NODES = 32768
+_MAX_DEPENDENCY_METADATA = 8192
+_DEPENDENCY_SCOPE_LIMITATION = (
+    "Only handler signature dependency candidates are inspected. String annotations "
+    "are not expanded. Route decorators and module-level dependency declarations "
+    "are not scanned; FastAPI selector source ownership is not authenticated, so "
+    "no positive dependency binding is emitted."
+)
+
+
+def _bridge_occurrence_id(endpoint: Endpoint) -> str:
+    provenance = endpoint.native_provenance
+    if provenance is not None:
+        registration = provenance.registration
+        span = registration.source_span
+        return (
+            f"{endpoint.identifier}@{span.file_path.resolve()}"
+            f":{span.start_line}:{span.start_column}#{registration.occurrence_order}"
+        )
+    handler = endpoint.handler
+    return f"{endpoint.identifier}@{Path(handler.file_path).resolve()}:{handler.line_number}"
+
+
+def _bridge_func(node: Any) -> FuncDef | None:
+    if isinstance(node, Decorator):
+        node = node.func
+    return node if isinstance(node, FuncDef) else None
+
+
+def _bridge_fullname(node: Any) -> str | None:
+    if isinstance(node, Decorator):
+        node = node.func
+    fullname = getattr(node, "fullname", None)
+    return fullname if isinstance(fullname, str) and fullname else None
+
+
+def _bridge_children(node: Any) -> tuple[Any, ...]:
+    ignored = {
+        "node",
+        "info",
+        "type",
+        "unanalyzed_type",
+        "original_def",
+        "original_first_arg",
+        "def_var",
+        "expanded",
+        "analyzed",
+    }
+    children: list[Any] = []
+    attributes: set[str] = set()
+    for cls in type(node).__mro__:
+        for name in getattr(cls, "__mypyc_attrs__", ()):
+            if name in attributes or name.startswith("_") or name in ignored:
+                continue
+            attributes.add(name)
+            try:
+                value = getattr(node, name)
+            except (AttributeError, RuntimeError):
+                continue
+            if isinstance(value, (tuple, list)):
+                children.extend(item for item in value if hasattr(type(item), "__mypyc_attrs__"))
+            elif hasattr(type(value), "__mypyc_attrs__"):
+                children.append(value)
+    return tuple(children)
+
+
+def _dependency_spelling(expression: ast.expr, imports: dict[str, str]) -> str | None:
+    if isinstance(expression, ast.Name):
+        resolved = imports.get(expression.id, expression.id)
+        leaf = resolved.rsplit(".", 1)[-1]
+        return leaf if leaf in _DEPENDENCY_SPELLINGS else None
+    if isinstance(expression, ast.Attribute) and expression.attr in _DEPENDENCY_SPELLINGS:
+        return expression.attr
+    return None
+
+
+def _module_import_suites(statement: ast.stmt) -> tuple[list[ast.stmt], ...]:
+    """Return only suites that execute in the surrounding module scope."""
+    if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+        return statement.body, statement.orelse
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return (statement.body,)
+    if isinstance(statement, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+        # TryStar shares suite fields; this cast supports Python 3.10 typing.
+        try_statement = cast("ast.Try", statement)
+        return (
+            try_statement.body,
+            *(handler.body for handler in try_statement.handlers),
+            try_statement.orelse,
+            try_statement.finalbody,
+        )
+    if isinstance(statement, ast.Match):
+        return tuple(case.body for case in statement.cases)
+    return ()
+
+
+def _source_module_imports(parsed: ast.Module) -> dict[str, str]:
+    """Collect selector alias candidates across bounded module-level suites."""
+    imports: dict[str, str] = {}
+    if len(parsed.body) > _MAX_DEPENDENCY_IMPORT_STATEMENTS:
+        raise TypedGraphBridgeError("dependency module imports exceed statement budget")
+    pending = list(reversed(parsed.body))
+    seen: set[int] = set()
+    alias_count = 0
+
+    def remember(name: str, target: str) -> None:
+        nonlocal alias_count
+        alias_count += 1
+        if alias_count > _MAX_DEPENDENCY_IMPORT_BINDINGS:
+            raise TypedGraphBridgeError("dependency module imports exceed alias budget")
+        previous = imports.get(name)
+        # This table discovers candidates, not established runtime bindings.
+        # Retain a selector spelling across conflicting branch imports.
+        if previous is None or previous.rsplit(".", 1)[-1] not in _DEPENDENCY_SPELLINGS:
+            imports[name] = target
+
+    while pending:
+        statement = pending.pop()
+        if id(statement) in seen:
+            continue
+        seen.add(id(statement))
+        if len(seen) > _MAX_DEPENDENCY_IMPORT_STATEMENTS:
+            raise TypedGraphBridgeError("dependency module imports exceed statement budget")
+        if isinstance(statement, ast.ImportFrom):
+            for item in statement.names:
+                remember(item.asname or item.name, f"{statement.module or ''}.{item.name}")
+        elif isinstance(statement, ast.Import):
+            for item in statement.names:
+                remember(item.asname or item.name.split(".", 1)[0], item.name)
+
+        # Function and class bodies start a different lexical scope.
+        for suite in reversed(_module_import_suites(statement)):
+            if len(seen) + len(pending) + len(suite) > _MAX_DEPENDENCY_IMPORT_STATEMENTS:
+                raise TypedGraphBridgeError("dependency module imports exceed statement budget")
+            pending.extend(reversed(suite))
+    return imports
+
+
+def _signature_dependency_calls(
+    function: ast.FunctionDef | ast.AsyncFunctionDef, imports: dict[str, str]
+) -> tuple[ast.Call, ...]:
+    arguments = function.args
+    roots: list[ast.AST] = [
+        argument.annotation
+        for argument in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs)
+        if argument.annotation is not None
+    ]
+    roots.extend(arguments.defaults)
+    roots.extend(value for value in arguments.kw_defaults if value is not None)
+    for argument in (arguments.vararg, arguments.kwarg):
+        if argument is not None and argument.annotation is not None:
+            roots.append(argument.annotation)
+    calls: list[ast.Call] = []
+    seen: set[int] = set()
+    stack = list(roots)
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if len(seen) > _MAX_DEPENDENCY_AST_NODES:
+            raise TypedGraphBridgeError("dependency signature AST exceeds node budget")
+        if isinstance(node, ast.Call) and _dependency_spelling(node.func, imports):
+            calls.append(node)
+            if len(calls) > _MAX_DEPENDENCY_CALLS_PER_HANDLER:
+                raise TypedGraphBridgeError("dependency signature exceeds call budget")
+        stack.extend(ast.iter_child_nodes(node))
+    return tuple(calls)
+
+
+def _typed_signature_calls(function: FuncDef) -> dict[tuple[int, int], list[CallExpr]]:
+    calls: dict[tuple[int, int], list[CallExpr]] = {}
+    seen: set[int] = set()
+    stack: list[Any] = [
+        value
+        for argument in function.arguments
+        for value in (argument.type_annotation, argument.initializer)
+        if value is not None
+    ]
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if len(seen) > _MAX_DEPENDENCY_TYPED_NODES:
+            raise TypedGraphBridgeError("typed dependency signature exceeds node budget")
+        if isinstance(node, CallExpr):
+            calls.setdefault((int(node.line), int(node.column)), []).append(node)
+        stack.extend(_bridge_children(node))
+    return calls
+
+
+def _dependency_argument_index(call: CallExpr) -> int | None:
+    if (
+        len(call.args) != len(call.arg_kinds)
+        or len(call.args) != len(call.arg_names)
+        or any(kind not in {ARG_POS, ARG_NAMED} for kind in call.arg_kinds)
+    ):
+        return None
+    positional = [
+        index
+        for index, (kind, name) in enumerate(zip(call.arg_kinds, call.arg_names, strict=True))
+        if kind == ARG_POS and name is None
+    ]
+    named = [
+        index
+        for index, (kind, name) in enumerate(zip(call.arg_kinds, call.arg_names, strict=True))
+        if kind == ARG_NAMED and name == "dependency"
+    ]
+    # Only the unambiguous first argument or explicit dependency keyword is inspected.
+    if len(positional) > 1 or len(named) > 1 or bool(positional) == bool(named):
+        return None
+    return positional[0] if positional else named[0]
+
+
+def _is_exact_project_provider(node: Any, typed: TypedBuild, records: dict[str, Any]) -> bool:
+    provider = _bridge_func(node)
+    fullname = _bridge_fullname(provider)
+    if provider is None or fullname is None or "." not in fullname:
+        return False
+    module, leaf = fullname.rsplit(".", 1)
+    state = typed.modules.get(module)
+    if module not in records or state is None or state.tree is None:
+        return False
+    table_node = getattr(state.tree.names.get(leaf), "node", None)
+    return _bridge_func(table_node) is provider and provider.name == leaf
+
+
+def _signature_dependency_reason(
+    candidates: list[CallExpr], typed: TypedBuild, records: dict[str, Any]
+) -> str:
+    if len(candidates) != 1:
+        return (
+            "dependency_selector_typed_call_ambiguous"
+            if candidates
+            else "dependency_selector_typed_call_unavailable"
+        )
+    call = candidates[0]
+    selector = _bridge_fullname(getattr(call.callee, "node", None))
+    if selector not in _DEPENDENCY_SELECTORS:
+        if selector is not None and any(selector.startswith(module + ".") for module in records):
+            return "dependency_selector_project_shadow"
+        return "dependency_selector_identity_unverified"
+    index = _dependency_argument_index(call)
+    if index is None:
+        return "dependency_argument_binding_unsupported"
+    if not _is_exact_project_provider(getattr(call.args[index], "node", None), typed, records):
+        return "dependency_provider_not_top_level_project_function"
+    # Neither this fullname nor adjacent package hashes authenticate the selector implementation.
+    return "fastapi_selector_origin_unverified"
+
+
+def _append_dependency_uncertainty(
+    output: list[SourceDependencyUncertainty],
+    owner: EndpointOccurrenceBinding,
+    span: SourceSpan,
+    reason: str,
+    spelling: str,
+) -> None:
+    output.append(
+        SourceDependencyUncertainty(
+            occurrence_id=owner.occurrence_id,
+            owner_symbol=owner.symbol,
+            span=span,
+            reason_code=reason,
+            source_spelling=spelling[:256],
+        )
+    )
+    if len(output) > _MAX_DEPENDENCY_METADATA:
+        raise TypedGraphBridgeError("dependency metadata exceeds row budget")
+
+
+def _dependency_uncertainty_key(item: SourceDependencyUncertainty) -> tuple[Any, ...]:
+    return (
+        item.occurrence_id,
+        item.owner_symbol,
+        item.span.module,
+        item.span.path,
+        item.span.source_sha256,
+        item.span.start_line,
+        item.span.start_column,
+        item.span.end_line,
+        item.span.end_column,
+        item.reason_code,
+        item.source_spelling,
+    )
+
+
+def _dependency_source_uncertainties(
+    typed: TypedBuild,
+    inventory: Any,
+    endpoints: tuple[Endpoint, ...],
+    bindings: tuple[EndpointOccurrenceBinding, ...],
+    source_snapshots: dict[str, bytes],
+) -> tuple[SourceDependencyUncertainty, ...]:
+    """Record bounded signature candidates without asserting selector origin."""
+    records = {record.module: record for record in inventory.files}
+    by_occurrence = {binding.occurrence_id: binding for binding in bindings}
+    if len(by_occurrence) != len(bindings) or len(endpoints) != len(bindings):
+        raise TypedGraphBridgeError("endpoint occurrence bindings are incomplete or duplicated")
+    output: list[SourceDependencyUncertainty] = []
+    for endpoint in endpoints:
+        owner = by_occurrence.get(_bridge_occurrence_id(endpoint))
+        module = endpoint.handler.module
+        record, state, raw = (
+            records.get(module),
+            typed.modules.get(module),
+            source_snapshots.get(module),
+        )
+        if owner is None or record is None or state is None or state.tree is None or raw is None:
+            raise TypedGraphBridgeError("dependency owner lacks authenticated typed source")
+        typed_node = _bridge_func(
+            getattr(state.tree.names.get(endpoint.handler.name), "node", None)
+        )
+        if typed_node is None or _bridge_fullname(typed_node) != owner.symbol:
+            raise TypedGraphBridgeError("dependency handler is not an exact typed function")
+        try:
+            parsed = ast.parse(raw.decode("utf-8"), filename=str(record.path))
+        except (UnicodeDecodeError, SyntaxError):
+            _append_dependency_uncertainty(
+                output,
+                owner,
+                owner.span,
+                "dependency_signature_source_parse_unavailable",
+                "<handler signature>",
+            )
+            continue
+        functions = [
+            node
+            for node in parsed.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == endpoint.handler.name
+            and node.lineno == endpoint.handler.line_number
+        ]
+        if len(functions) != 1:
+            raise TypedGraphBridgeError("dependency handler source is not unique")
+        syntax_calls = _signature_dependency_calls(functions[0], _source_module_imports(parsed))
+        typed_calls = _typed_signature_calls(typed_node)
+        for call in syntax_calls:
+            span = SourceSpan(
+                module,
+                str(Path(record.path).resolve()),
+                record.sha256,
+                int(call.lineno),
+                int(call.col_offset),
+                int(call.end_lineno or call.lineno),
+                int(call.end_col_offset or call.col_offset),
+            )
+            reason = _signature_dependency_reason(
+                typed_calls.get((int(call.lineno), int(call.col_offset)), []), typed, records
+            )
+            _append_dependency_uncertainty(output, owner, span, reason, ast.unparse(call.func))
+    return tuple(sorted(output, key=_dependency_uncertainty_key))
+
+
 def build_shadow_graph(
     analyzer: MypyAnalyzer,
     inventory: Any,
@@ -298,13 +669,22 @@ def build_shadow_graph(
 ) -> TypedReverseGraph:
     """Build a diagnostic graph from one authenticated retained ordinary build."""
     typed, snapshots, config = retained_typed_build(analyzer, inventory)
-    bindings = exact_handler_bindings(typed, inventory, endpoints)
-    return build_typed_reverse_graph(
+    selected = tuple(endpoints)
+    bindings = exact_handler_bindings(typed, inventory, selected)
+    uncertainties = _dependency_source_uncertainties(
+        typed, inventory, selected, bindings, snapshots
+    )
+    graph = build_typed_reverse_graph(
         inventory,
         typed,
         bindings,
         config_fingerprint=config,
         source_snapshots=snapshots,
+        source_dependency_uncertainties=uncertainties,
+    )
+    return replace(
+        graph,
+        limitations=tuple(sorted({*graph.limitations, _DEPENDENCY_SCOPE_LIMITATION})),
     )
 
 
