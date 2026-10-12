@@ -77,7 +77,7 @@ def _wall_deadline(deadline: float) -> Iterator[None]:
         _deadline_at = min(_deadline_at, deadline)
         remaining = _deadline_at - time.monotonic()
         if remaining <= 0:
-            signal.setitimer(signal.ITIMER_REAL, 0.000001)
+            signal.setitimer(signal.ITIMER_REAL, 0)
             raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
         signal.setitimer(signal.ITIMER_REAL, remaining)
 
@@ -418,116 +418,125 @@ def _collect(  # noqa: PLR0912, PLR0915
     rootfd = _open_dir_chain(output, create=True)
     deadline = _deadline_at
     if deadline is None:
+        os.close(rootfd)
         raise RuntimeError("collector must run under its wall deadline")
-    statuses: list[dict[str, Any]] = []
-    total = 0
+    cachefd: int | None = None
     try:
         with contextlib.suppress(FileExistsError):
             os.mkdir("blobs", 0o700, dir_fd=rootfd)
         cachefd = os.open("blobs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
-    except OSError as exc:
-        os.close(rootfd)
-        raise protocol.CorpusV2Error("blob directory must be a real directory") from exc
-    for row in rows:
-        expected_hash = row["diff_sha256"].removeprefix("sha256:")
-        entry: dict[str, Any] = {
-            "pr": row["pr"],
-            "url": row["diff_final_url"],
-            "expected_sha256": expected_hash,
-            "expected_bytes": row["diff_bytes"],
-        }
-        fetched = False
-        try:
-            if time.monotonic() >= deadline:
-                raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
-            remaining = MAX_TOTAL_BYTES - total
-            if remaining <= 0:
-                raise CollectionFailure("aggregate_limit", "aggregate byte ceiling exhausted")
-            body, final_url = _fetch(
-                row["diff_final_url"],
-                REPOSITORY,
-                row["pr"],
-                row["diff_bytes"],
-                deadline,
-                remaining,
-            )
-            fetched = True
-            total += len(body)
-            with _wall_deadline(deadline):
-                digest = _store_verified(cachefd, body, expected_hash)
+        statuses: list[dict[str, Any]] = []
+        total = 0
+        for row in rows:
+            expected_hash = row["diff_sha256"].removeprefix("sha256:")
+            entry: dict[str, Any] = {
+                "pr": row["pr"],
+                "url": row["diff_final_url"],
+                "expected_sha256": expected_hash,
+                "expected_bytes": row["diff_bytes"],
+            }
+            fetched = False
+            try:
                 if time.monotonic() >= deadline:
                     raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
-            entry.update(
-                {
-                    "status": "matched",
-                    "sha256": digest,
-                    "bytes": len(body),
-                    "final_url": final_url,
-                    "blob": f"blobs/{digest}",
-                }
-            )
-        except Exception as exc:  # retain one explicit status for every frozen row
-            if not fetched:
-                total += getattr(exc, "bytes_read", 0)
-            classification = (
-                "http_error"
-                if isinstance(exc, urllib.error.HTTPError)
-                else exc.failure_class
-                if isinstance(exc, CollectionFailure)
-                else (
-                    "local_storage_error"
-                    if isinstance(exc, OSError)
-                    else "request_error"
-                    if isinstance(exc, (urllib.error.URLError, TimeoutError))
-                    else "validation_error"
-                    if isinstance(exc, protocol.CorpusV2Error)
-                    else "collector_error"
+                remaining = MAX_TOTAL_BYTES - total
+                if remaining <= 0:
+                    raise CollectionFailure("aggregate_limit", "aggregate byte ceiling exhausted")
+                body, final_url = _fetch(
+                    row["diff_final_url"],
+                    REPOSITORY,
+                    row["pr"],
+                    row["diff_bytes"],
+                    deadline,
+                    remaining,
                 )
-            )
-            entry.update(
-                {
-                    "status": "missing"
-                    if classification
-                    in {
-                        "request_error",
-                        "http_error",
-                        "local_storage_error",
-                        "aggregate_budget",
-                        "aggregate_limit",
-                        "deadline",
+                fetched = True
+                total += len(body)
+                with _wall_deadline(deadline):
+                    digest = _store_verified(cachefd, body, expected_hash)
+                    if time.monotonic() >= deadline:
+                        raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
+                entry.update(
+                    {
+                        "status": "matched",
+                        "sha256": digest,
+                        "bytes": len(body),
+                        "final_url": final_url,
+                        "blob": f"blobs/{digest}",
                     }
-                    else "mismatch",
-                    "failure_class": classification,
-                    **(
-                        {"http_status": exc.code} if isinstance(exc, urllib.error.HTTPError) else {}
-                    ),
-                    "failure": str(exc)[:240],
-                }
-            )
-        statuses.append(entry)
-    receipt = {
-        "schema": SCHEMA,
-        "lock_sha256": actual_lock_hash,
-        "repository": REPOSITORY,
-        "rows": statuses,
-        "summary": {
-            "rows": len(statuses),
-            "matched": sum(r["status"] == "matched" for r in statuses),
-            "missing": sum(r["status"] == "missing" for r in statuses),
-            "mismatch": sum(r["status"] == "mismatch" for r in statuses),
-            "bytes": total,
-        },
-    }
-    try:
-        _publish(
-            rootfd,
-            "receipts.json",
-            (json.dumps(receipt, sort_keys=True, indent=2, allow_nan=False) + "\n").encode(),
-        )
+                )
+            except Exception as exc:  # retain one explicit status for every frozen row
+                if not fetched:
+                    total += getattr(exc, "bytes_read", 0)
+                classification = (
+                    "http_error"
+                    if isinstance(exc, urllib.error.HTTPError)
+                    else exc.failure_class
+                    if isinstance(exc, CollectionFailure)
+                    else (
+                        "local_storage_error"
+                        if isinstance(exc, OSError)
+                        else "request_error"
+                        if isinstance(exc, (urllib.error.URLError, TimeoutError))
+                        else "validation_error"
+                        if isinstance(exc, protocol.CorpusV2Error)
+                        else "collector_error"
+                    )
+                )
+                entry.update(
+                    {
+                        "status": "missing"
+                        if classification
+                        in {
+                            "request_error",
+                            "http_error",
+                            "local_storage_error",
+                            "aggregate_budget",
+                            "aggregate_limit",
+                            "deadline",
+                        }
+                        else "mismatch",
+                        "failure_class": classification,
+                        **(
+                            {"http_status": exc.code}
+                            if isinstance(exc, urllib.error.HTTPError)
+                            else {}
+                        ),
+                        "failure": str(exc)[:240],
+                    }
+                )
+            statuses.append(entry)
+
+        # An alarm caught as a row failure is one-shot. The deadline context
+        # below checks the absolute deadline before receipt assembly/publication.
+        with _wall_deadline(deadline):
+            receipt = {
+                "schema": SCHEMA,
+                "lock_sha256": actual_lock_hash,
+                "repository": REPOSITORY,
+                "rows": statuses,
+                "summary": {
+                    "rows": len(statuses),
+                    "matched": sum(r["status"] == "matched" for r in statuses),
+                    "missing": sum(r["status"] == "missing" for r in statuses),
+                    "mismatch": sum(r["status"] == "mismatch" for r in statuses),
+                    "bytes": total,
+                },
+            }
+            content = (
+                json.dumps(receipt, sort_keys=True, indent=2, allow_nan=False) + "\n"
+            ).encode()
+        with _wall_deadline(deadline):
+            _publish(rootfd, "receipts.json", content)
+        return receipt
+    except OSError as exc:
+        raise protocol.CorpusV2Error("blob directory must be a real directory") from exc
     finally:
-        os.close(cachefd)
-        os.close(rootfd)
-    return receipt
+        try:
+            if cachefd is not None:
+                os.close(cachefd)
+        finally:
+            os.close(rootfd)
 
 
 def collect(

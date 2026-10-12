@@ -167,6 +167,7 @@ def test_fetch_wall_deadline_interrupts_blocking_read_and_preserves_transport_er
 
 def test_active_caller_alarm_is_refused_without_changing_it() -> None:
     previous_handler = signal.getsignal(signal.SIGALRM)
+
     def handler(_signum: int, _frame: Any) -> None:
         return None
 
@@ -174,9 +175,10 @@ def test_active_caller_alarm_is_refused_without_changing_it() -> None:
     signal.setitimer(signal.ITIMER_REAL, 5, 2)
     try:
         before = signal.getitimer(signal.ITIMER_REAL)
-        with pytest.raises(
-            collector.CollectionFailure, match="caller-owned active"
-        ), collector._wall_deadline(time.monotonic() + 1):
+        with (
+            pytest.raises(collector.CollectionFailure, match="caller-owned active"),
+            collector._wall_deadline(time.monotonic() + 1),
+        ):
             pass
         after = signal.getitimer(signal.ITIMER_REAL)
         assert signal.getsignal(signal.SIGALRM) is handler
@@ -207,6 +209,18 @@ def test_earlier_nested_deadline_shortens_outer_deadline() -> None:
     ):
         time.sleep(1)
     assert time.monotonic() - started < 0.5
+
+
+def test_already_expired_nested_deadline_leaves_no_alarm_or_guard_state() -> None:
+    with (  # noqa: SIM117
+        collector._wall_deadline(time.monotonic() + 5),
+        pytest.raises(collector.CollectionFailure, match="wall-clock limit"),
+    ):
+        with collector._wall_deadline(time.monotonic() - 1):
+            pytest.fail("expired nested deadline entered its body")
+    assert collector._deadline_depth == 0
+    assert collector._deadline_at is None
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
 
 @pytest.mark.parametrize("blocked_operation", ["read", "fsync"])
@@ -339,7 +353,7 @@ def test_storage_failures_do_not_reuse_downloaded_byte_allowance(
     assert result["summary"]["mismatch"] == 0
 
 
-def test_expired_final_row_storage_is_missing_and_bytes_stay_charged(
+def test_expired_final_row_storage_fails_without_receipt_and_charges_bytes_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured = {
@@ -353,9 +367,14 @@ def test_expired_final_row_storage_is_missing_and_bytes_stay_charged(
         lambda path, *args: captured[path] if path in captured else original_read(path, *args),
     )
 
+    allowances: list[int] = []
+    sizes_fetched: list[int] = []
+
     def fetched(
-        url: str, _repo: str, _number: int, size: int, _deadline: float, _budget: int
+        url: str, _repo: str, _number: int, size: int, _deadline: float, budget: int
     ) -> tuple[bytes, str]:
+        allowances.append(budget)
+        sizes_fetched.append(size)
         return b"x" * size, url
 
     store_calls = 0
@@ -370,13 +389,104 @@ def test_expired_final_row_storage_is_missing_and_bytes_stay_charged(
     monkeypatch.setattr(collector, "_fetch", fetched)
     monkeypatch.setattr(collector, "_store_verified", store)
     monkeypatch.setattr(collector, "MAX_SECONDS", 1)
-    result = collector.collect(tmp_path / "deadline-out")
-    last = result["rows"][-1]
-    assert last["status"] == "missing"
-    assert last["failure_class"] == "deadline"
-    assert "sha256" not in last and "blob" not in last
-    assert result["summary"]["matched"] == 49
-    assert result["summary"]["bytes"] == collector.MAX_TOTAL_BYTES
+    publish_calls: list[str] = []
+    original_publish = collector._publish
+
+    def publish_spy(fd: int, name: str, body: bytes) -> None:
+        publish_calls.append(name)
+        original_publish(fd, name, body)
+
+    monkeypatch.setattr(collector, "_publish", publish_spy)
+    output = tmp_path / "deadline-out"
+    with pytest.raises(collector.CollectionFailure, match="wall-clock limit") as caught:
+        collector.collect(output)
+    assert caught.value.failure_class == "deadline"
+    assert store_calls == 50  # the real alarm interrupted the final storage call
+    assert sum(sizes_fetched) == collector.MAX_TOTAL_BYTES
+    assert allowances == [
+        collector.MAX_TOTAL_BYTES - sum(sizes_fetched[:index])
+        for index in range(len(sizes_fetched))
+    ]
+    assert publish_calls == []
+    assert not (output / "receipts.json").exists()
+    assert collector._deadline_depth == 0
+    assert collector._deadline_at is None
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+@pytest.mark.parametrize("failure_stage", ["row_loop", "assembly", "publication", "cache_open"])
+def test_owned_directory_descriptors_close_on_post_open_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    captured = {
+        path: path.read_bytes()
+        for path in (collector.LOCK, collector.MANIFEST, collector.CHECKSUMS)
+    }
+    original_read_bounded = protocol._read_bounded
+    monkeypatch.setattr(
+        protocol,
+        "_read_bounded",
+        lambda path, *args: (
+            captured[path] if path in captured else original_read_bounded(path, *args)
+        ),
+    )
+    owned: set[int] = set()
+    closed: set[int] = set()
+    original_open_chain = collector._open_dir_chain
+    original_open = os.open
+    original_close = os.close
+
+    def tracked_open_chain(path: Path, *, create: bool) -> int:
+        fd = original_open_chain(path, create=create)
+        owned.add(fd)
+        return fd
+
+    def tracked_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        if path == "blobs" and kwargs.get("dir_fd") in owned and failure_stage == "cache_open":
+            raise OSError("mocked cache open failure")
+        fd = original_open(path, flags, *args, **kwargs)
+        if path == "blobs" and kwargs.get("dir_fd") in owned:
+            owned.add(fd)
+        return fd
+
+    def tracked_close(fd: int) -> None:
+        if fd in owned:
+            closed.add(fd)
+        original_close(fd)
+
+    monkeypatch.setattr(collector, "_open_dir_chain", tracked_open_chain)
+    monkeypatch.setattr(os, "open", tracked_open)
+    monkeypatch.setattr(os, "close", tracked_close)
+    monkeypatch.setattr(collector, "MAX_SECONDS", 10)
+    monkeypatch.setattr(
+        collector,
+        "_fetch",
+        lambda url, _repo, _number, size, _deadline, _budget: (b"x" * size, url),
+    )
+    monkeypatch.setattr(collector, "_store_verified", lambda _fd, _body, digest: digest)
+    if failure_stage == "row_loop":
+
+        def interrupt_fetch(*_args: object) -> tuple[bytes, str]:
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(collector, "_fetch", interrupt_fetch)
+    elif failure_stage == "assembly":
+        monkeypatch.setattr(
+            collector.json,
+            "dumps",
+            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("assembly failure")),
+        )
+    elif failure_stage == "publication":
+        monkeypatch.setattr(
+            collector,
+            "_publish",
+            lambda *_a: (_ for _ in ()).throw(RuntimeError("publish failure")),
+        )
+
+    with pytest.raises((KeyboardInterrupt, RuntimeError, protocol.CorpusV2Error)):
+        collector.collect(tmp_path / "tracked-output")
+    assert owned
+    assert closed == owned
 
 
 def test_publish_is_no_clobber_and_safe_output_rejects_symlink(tmp_path: Path) -> None:
