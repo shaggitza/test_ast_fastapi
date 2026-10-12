@@ -126,6 +126,20 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     package_init = root / "__init__.py"
     package_prefix = root.name if not package_init.is_symlink() and package_init.is_file() else ""
     symlink_package_init = package_init.is_symlink()
+    # Declaration files may affect Mypy resolution, but are never executable
+    # source records or inputs to the endpoint extractor.
+    stub_candidates = sorted(
+        path
+        for path in root.rglob("*.pyi")
+        if not path.is_symlink()
+        and not any(parent.is_symlink() for parent in path.parents if parent != root.parent)
+        and path.resolve().is_relative_to(root)
+    )
+    stub_modules: dict[str, list[str]] = {}
+    for path in stub_candidates:
+        stub_relative_path = path.relative_to(root)
+        module = _module_name(stub_relative_path, package_prefix) or path.parent.name
+        stub_modules.setdefault(module, []).append(stub_relative_path.as_posix())
     module_paths: dict[str, list[Path]] = {}
     symlink_modules: dict[str, str] = {}
     for path in root.rglob("*"):
@@ -191,6 +205,21 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     unresolved: set[tuple[str, str]] = set()
     unresolved_occurrences: set[UnresolvedImportOccurrence] = set()
     limitations: set[str] = set()
+    for path in stub_candidates:
+        stub_relative_name = path.relative_to(root).as_posix()
+        if _matches(stub_relative_name, include_patterns) and not _matches(
+            stub_relative_name, exclude_patterns
+        ):
+            limitations.add(
+                f"Selected type stub {stub_relative_name} is unsupported by "
+                "the runtime source inventory; "
+                "type declarations are not executable source evidence"
+            )
+    if root / "__init__.pyi" in stub_candidates:
+        limitations.add(
+            "Root type stub __init__.pyi may affect static package identity; "
+            "declaration source is not represented by the runtime source inventory"
+        )
     if symlink_package_init:
         limitations.add(
             "Root package initializer __init__.py is a rejected symlink; package-prefix "
@@ -281,6 +310,16 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
             local = None
             ambiguous_import = None
             parts = imported.split(".")
+            for stop in range(len(parts), 0, -1):
+                stub_module = ".".join(parts[:stop])
+                if stub_module in stub_modules:
+                    record_unresolved_import(rel_by_path[path], occurrence)
+                    limitations.add(
+                        f"Local import {imported!r} from {rel_by_path[path]} may use in-root "
+                        f"type stub {', '.join(stub_modules[stub_module])}; "
+                        "type declarations are outside the runtime source inventory"
+                    )
+                    break
             for stop in range(len(parts), 0, -1):
                 candidate_module = ".".join(parts[:stop])
                 if candidate_module in ambiguous_modules:

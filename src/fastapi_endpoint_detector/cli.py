@@ -629,6 +629,8 @@ def audit_effect_contracts_command(
     )
 
     config: Config = ctx.obj["config"]
+    if not config.integrations.use_mypy:
+        raise click.ClickException("effect contract auditing requires integrations.use_mypy=true")
     configured = any((config.analysis.effect_contracts, config.analysis.effect_preset))
     supplied = sum(item is not None for item in (contracts, preset))
     if supplied > 1:
@@ -641,6 +643,23 @@ def audit_effect_contracts_command(
         )
 
     try:
+        source_scope = config.source_inventory(app)
+        if (
+            source_scope.limitations
+            or source_scope.unresolved_imports
+            or source_scope.module_collisions
+        ):
+            raise click.ClickException(
+                "configured source inventory is incomplete; "
+                "complete contract coverage unavailable: "
+                + (
+                    "; ".join(source_scope.limitations[:3])
+                    or "unresolved local imports or module identities"
+                )
+            )
+        if not source_scope.files:
+            raise click.ClickException("configured source inventory selects no Python source files")
+        source_root = source_scope.root
         if configured:
             loaded = config.load_effect_contract_snapshot()
         elif contracts is not None:
@@ -654,8 +673,9 @@ def audit_effect_contracts_command(
             app_variable=app_var,
             app_entry=app_entry,
             bootstrap_entry=bootstrap_entry,
+            source_paths=source_scope.paths,
         )
-        inventory = extractor.extract_inventory()
+        endpoint_inventory = extractor.extract_inventory()
         loaded_surfaces = config.load_surface_contract_snapshot()
         if loaded_surfaces is not None:
             from fastapi_endpoint_detector.parser.custom_surface_extractor import (
@@ -669,16 +689,18 @@ def audit_effect_contracts_command(
                 bootstrap_entry=bootstrap_entry,
                 app_variable=app_var,
                 app_entry=app_entry,
+                source_paths=source_scope.paths,
             ).extract_inventory()
-            inventory = merge_surface_inventory(inventory, custom)
-        source_root = app.resolve().parent if app.is_file() else app.resolve()
+            endpoint_inventory = merge_surface_inventory(endpoint_inventory, custom)
         effective_depth = config.parser.max_depth if config.analysis.track_transitive else 1
-        analyzer = MypyAnalyzer(source_root, max_depth=effective_depth)
+        analyzer = MypyAnalyzer(
+            source_root, max_depth=effective_depth, source_inventory=source_scope
+        )
         if clear_cache:
             analyzer.clear_cache()
-        analyzer.analyze_endpoints(inventory.endpoints, use_cache=not no_cache)
+        analyzer.analyze_endpoints(endpoint_inventory.endpoints, use_cache=not no_cache)
         rows = []
-        for endpoint in inventory.endpoints:
+        for endpoint in endpoint_inventory.endpoints:
             dependencies = analyzer.get_endpoint_dependencies(endpoint)
             if dependencies is None:
                 raise RuntimeError(
@@ -698,7 +720,7 @@ def audit_effect_contracts_command(
         audit = audit_effect_contracts(
             loaded,
             source_root=source_root,
-            inventory=inventory,
+            inventory=endpoint_inventory,
             endpoint_call_sites=rows,
             track_transitive=config.analysis.track_transitive,
             max_depth=effective_depth,
