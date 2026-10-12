@@ -439,6 +439,121 @@ def test_constructor_lifespan_rejects_non_direct_or_ambiguous_bindings(
     assert all(record.constructor_lifespan is None for record in report.records)
 
 
+@pytest.mark.parametrize(
+    "registration",
+    ("with nullcontext():\n    app = FastAPI(lifespan=lifespan)\n",),
+    ids=("with",),
+)
+def test_constructor_scan_finds_eager_statement_bodies(tmp_path: Path, registration: str) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager, nullcontext\n"
+        "from fastapi import FastAPI\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n" + registration,
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), _typed_build(tmp_path)
+    )
+
+    assert report.records
+    assert all(record.constructor_lifespan is not None for record in report.records)
+    assert all(record.status == "conditional" for record in report.records)
+    surface = inventory.endpoints[0].surface
+    assert surface is not None
+    assert all(
+        (evidence := record.constructor_lifespan) is not None
+        and evidence.constructor_line == surface.registration_line
+        and evidence.constructor_column == surface.registration_column
+        and evidence.callback_symbol == record.typed_callback_symbol
+        for record in report.records
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    (
+        "try:\n    FastAPI()\nexcept RuntimeError:\n    pass\n",
+        "for _item in ():\n    FastAPI()\n",
+        "while False:\n    FastAPI()\n",
+        "match 0:\n    case 0:\n        FastAPI()\n",
+    ),
+    ids=("try", "for", "while", "match"),
+)
+def test_constructor_scan_counts_nested_eager_constructors(tmp_path: Path, statement: str) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+        "app = FastAPI(lifespan=lifespan)\n" + statement,
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), _typed_build(tmp_path)
+    )
+
+    assert all(record.constructor_lifespan is None for record in report.records)
+
+
+@pytest.mark.parametrize(
+    "registration",
+    (
+        "def deferred():\n    app = FastAPI(lifespan=lifespan)\n",
+        "class Deferred:\n    app = FastAPI(lifespan=lifespan)\n",
+        "if flag:\n    app = FastAPI(lifespan=lifespan)\n"
+        "else:\n    other = FastAPI(lifespan=lifespan)\n",
+    ),
+    ids=("function-body", "class-body", "ambiguous-branches"),
+)
+def test_constructor_scan_excludes_deferred_bodies_and_rejects_ambiguity(
+    tmp_path: Path, registration: str
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager\n"
+        "from fastapi import FastAPI\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+        "app = FastAPI(lifespan=lifespan)\n" + registration,
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), _typed_build(tmp_path)
+    )
+
+    if registration.startswith("if flag:"):
+        assert all(record.constructor_lifespan is None for record in report.records)
+    else:
+        assert report.records
+        assert all(record.constructor_lifespan is not None for record in report.records)
+
+
+def test_constructor_scan_depth_budget_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from contextlib import asynccontextmanager, nullcontext\n"
+        "from fastapi import FastAPI\n"
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+        "with nullcontext():\n    with nullcontext():\n"
+        "        app = FastAPI(lifespan=lifespan)\n",
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    typed_build = _typed_build(tmp_path)
+    monkeypatch.setattr(phase_integration, "_CONSTRUCTOR_SCAN_MAX_DEPTH", 1)
+
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), typed_build
+    )
+
+    assert all(record.constructor_lifespan is None for record in report.records)
+
+
 def test_constructor_lifespan_rejects_caller_source_changed_after_typed_build(
     tmp_path: Path,
 ) -> None:

@@ -27,10 +27,12 @@ from mypy.nodes import (
     Decorator,
     DictExpr,
     ExpressionStmt,
+    ForStmt,
     FuncDef,
     IfStmt,
     IndexExpr,
     ListExpr,
+    MatchStmt,
     MemberExpr,
     NameExpr,
     OpExpr,
@@ -38,9 +40,12 @@ from mypy.nodes import (
     SetExpr,
     SliceExpr,
     StarExpr,
+    TryStmt,
     TupleExpr,
     TypeInfo,
     UnaryExpr,
+    WhileStmt,
+    WithStmt,
 )
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
@@ -414,6 +419,14 @@ def _constructor_lifespan_evidence(  # noqa: PLR0911, PLR0912, PLR0915
             fields = ("expr",)
         elif isinstance(value, IfStmt):
             fields = ("expr", "body", "else_body")
+        elif isinstance(value, WithStmt):
+            fields = ("expr", "target", "body")
+        elif isinstance(value, TryStmt):
+            fields = ("body", "handlers", "else_body", "finally_body")
+        elif isinstance(value, (ForStmt, WhileStmt)):
+            fields = ("expr", "body", "else_body")
+        elif isinstance(value, MatchStmt):
+            fields = ("subject", "patterns", "guards", "bodies")
         elif isinstance(value, Block):
             fields = ("body",)
         elif isinstance(value, CallExpr):
