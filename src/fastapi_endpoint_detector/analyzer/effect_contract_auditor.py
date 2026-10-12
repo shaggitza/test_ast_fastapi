@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import platform
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -308,7 +307,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             distribution: (verified_package_versions or {}).get(distribution)
             for distribution in pinned_distributions
         },
-        "python_version": target_python_version or platform.python_version(),
+        "python_version": target_python_version,
     }
     endpoint_rows = list(endpoint_call_sites)
     physical: dict[
@@ -418,13 +417,15 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                         except (InvalidVersion, ValueError):
                             applicability_failure = True
                 if contract.package.python is not None:
-                    python_version = target_python_version or platform.python_version()
-                    try:
-                        applicability_failure |= not SpecifierSet(contract.package.python).contains(
-                            Version(python_version)
-                        )
-                    except (InvalidVersion, ValueError):
+                    if target_python_version is None:
                         applicability_failure = True
+                    else:
+                        try:
+                            applicability_failure |= not SpecifierSet(
+                                contract.package.python
+                            ).contains(Version(target_python_version))
+                        except (InvalidVersion, ValueError):
+                            applicability_failure = True
                 if applicability_failure:
                     contract = None
         resolver_status = CallResolutionStatus(payload["resolver_status"])

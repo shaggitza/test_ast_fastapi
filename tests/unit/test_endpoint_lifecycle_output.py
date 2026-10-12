@@ -1,6 +1,7 @@
 """Machine reports retain snapshot-qualified endpoint lifecycle evidence."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,42 @@ from fastapi_endpoint_detector.models.report import (
     EndpointLifecycleKind,
 )
 from fastapi_endpoint_detector.output.formatters import get_formatter
+
+
+@pytest.mark.parametrize("output_format", ["text", "markdown", "html"])
+@pytest.mark.parametrize("lifecycle", list(EndpointLifecycleKind))
+def test_human_output_retains_lifecycle_and_snapshot_coordinates(
+    output_format: str, lifecycle: EndpointLifecycleKind
+) -> None:
+    baseline = (
+        None if lifecycle == EndpointLifecycleKind.TARGET else _endpoint("old_items", "baseline")
+    )
+    target = (
+        None if lifecycle == EndpointLifecycleKind.REMOVED else _endpoint("new_items", "target")
+    )
+    report = AnalysisReport(
+        app_path="target/app.py",
+        diff_source="change.diff",
+        total_endpoints=0,
+        endpoint_lifecycle=[
+            EndpointLifecycle(
+                identity="GET /items",
+                lifecycle=lifecycle,
+                baseline_endpoint=baseline,
+                target_endpoint=target,
+            )
+        ],
+    )
+    rendered = get_formatter(output_format).format(report)
+    normalized = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", rendered)
+    normalized = " ".join(normalized.split())
+    assert "Endpoint Lifecycle" in normalized
+    assert lifecycle.value in normalized
+    assert "GET /items" in normalized
+    for endpoint in (baseline, target):
+        if endpoint is not None:
+            assert endpoint.handler.name in normalized
+            assert str(endpoint.handler.file_path) + ":5" in normalized
 
 
 def _endpoint(name: str, snapshot: str) -> Endpoint:

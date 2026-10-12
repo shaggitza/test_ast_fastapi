@@ -352,6 +352,47 @@ def test_list_and_analyze_preserve_equivalent_app_configuration(tmp_path: Path) 
     assert analyze_request["diff_path"] == "/workspace/change.diff"
 
 
+def test_human_output_config_is_mounted_read_only_for_container_cli(tmp_path: Path) -> None:
+    app = tmp_path / "application.py"
+    app.write_text("application = None\n", encoding="utf-8")
+    cidfile = tmp_path / "container.cid"
+    executor = _executor(tmp_path)
+    executor._resolved_image = _DIGEST
+
+    command = executor._container_command(
+        app,
+        None,
+        "application",
+        "text",
+        cidfile,
+        "list-name",
+        output_config={
+            "show_confidence": False,
+            "show_dependency_chain": True,
+            "colorize": False,
+            "verbose": True,
+        },
+    )
+
+    config_path = cidfile.with_suffix(".output-config.json")
+    assert config_path.read_text(encoding="utf-8") == (
+        '{"output": {"colorize": false, "show_confidence": false, '
+        '"show_dependency_chain": true, "verbose": true}}'
+    )
+    assert "--mount" in command
+    mount_specs = [command[index + 1] for index, value in enumerate(command) if value == "--mount"]
+    assert (
+        f"type=bind,src={config_path},dst=/workspace/output-config.json,readonly,"
+        "bind-recursive=disabled"
+    ) in mount_specs
+    cli_start = command.index("fastapi-endpoint-detector")
+    assert command[cli_start : cli_start + 3] == [
+        "fastapi-endpoint-detector",
+        "--config",
+        "/workspace/output-config.json",
+    ]
+
+
 def test_lifespan_manifest_uses_same_hardened_worker_request(tmp_path: Path) -> None:
     app = tmp_path / "application.py"
     app.write_text("application = None\n", encoding="utf-8")

@@ -1152,6 +1152,7 @@ def test_handled_and_suppressed_context_exceptions_remain_conditional(
         secure_ast=True,
         use_cache=False,
     ).analyze_diff(diff)
+    assert baseline.effect_contract_audit is not None
     configured = ChangeMapper(
         app_path=tmp_path,
         config=Config(

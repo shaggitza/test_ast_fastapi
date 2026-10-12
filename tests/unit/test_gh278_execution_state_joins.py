@@ -248,3 +248,24 @@ def test_depth_limit_counts_only_resolved_project_targets(tmp_path: Path) -> Non
     assert depth_limitations
     assert depth_limitations[0].file_path.endswith("main.py")
     assert depth_limitations[0].call_line == 10
+
+
+def test_zero_or_more_loop_joins_preloop_and_body_callable_targets(tmp_path: Path) -> None:
+    (tmp_path / "helpers.py").write_text(
+        "def first(): return 1\ndef second(): return 2\n", encoding="utf-8"
+    )
+    (tmp_path / "main.py").write_text(
+        "from fastapi import FastAPI\nfrom helpers import first, second\n"
+        "app=FastAPI()\n@app.get('/loop-join')\ndef handler(items):\n"
+        "    callback = first\n    for item in items:\n"
+        "        callback = second\n    return callback()\n",
+        encoding="utf-8",
+    )
+    mapper = ChangeMapper(tmp_path, secure_ast=True, use_cache=False)
+
+    for line in (1, 2):
+        report = mapper.analyze_diff(_diff("helpers.py", line))
+        assert {item.endpoint.identifier for item in report.candidate_endpoints} == {
+            "GET /loop-join"
+        }
+        assert all(item.confidence.value != "high" for item in report.candidate_endpoints)
