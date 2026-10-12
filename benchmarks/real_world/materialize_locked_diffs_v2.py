@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import http.client
 import json
 import os
 import signal
@@ -16,7 +17,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -154,6 +155,60 @@ def _read_blob(dirfd: int, name: str, expected_size: int, expected_hash: str) ->
         os.close(fd)
 
 
+def _has_fixed_length_framing(response: Any, expected_size: int) -> bool:
+    if type(response) is not http.client.HTTPResponse:
+        return False
+    lengths = response.headers.get_all("Content-Length", [])
+    transfers = response.headers.get_all("Transfer-Encoding", [])
+    return (
+        len(lengths) == 1
+        and lengths[0].isascii()
+        and lengths[0].isdecimal()
+        and int(lengths[0]) == expected_size
+        and not transfers
+        and response.chunked is False
+        and type(response.length) is int
+        and response.length == expected_size
+    )
+
+
+def _completed_fixed_length_response(response: Any, framed: bool) -> bool:
+    return framed and response.length == 0 and response.fp is None
+
+
+def _read_response_chunk(response: Any, room: int, body: bytearray) -> bytes:
+    try:
+        return cast("bytes", response.read(min(64 * 1024, room)))
+    except http.client.IncompleteRead as exc:
+        body.extend(exc.partial)
+        raise CollectionFailure(
+            "size_mismatch", "diff response ended before its declared length"
+        ) from exc
+
+
+def _requires_unavailable_framing(
+    response: Any, byte_budget: int, expected_size: int, framed: bool
+) -> bool:
+    return (
+        type(response) is http.client.HTTPResponse
+        and byte_budget == expected_size
+        and not framed
+    )
+
+
+def _verify_budget_boundary(
+    response: Any, body_size: int, expected_size: int, byte_budget: int, framed: bool
+) -> None:
+    if (
+        body_size == expected_size
+        and byte_budget == expected_size
+        and not _completed_fixed_length_response(response, framed)
+    ):
+        raise CollectionFailure(
+            "aggregate_budget", "aggregate budget prevents verifying response EOF"
+        )
+
+
 def _fetch(
     url: str,
     repository: str,
@@ -183,6 +238,12 @@ def _fetch(
             kind = response.headers.get("Content-Type", "")
             if not (kind.startswith("text/plain") or kind.startswith("text/x-diff")):
                 raise CollectionFailure("invalid_resource", "invalid diff content type")
+            framed = _has_fixed_length_framing(response, expected_size)
+            if _requires_unavailable_framing(response, byte_budget, expected_size, framed):
+                raise CollectionFailure(
+                    "aggregate_budget",
+                    "aggregate budget requires unambiguous fixed-length framing",
+                )
             while True:
                 room = min(
                     byte_budget - len(body),
@@ -190,13 +251,11 @@ def _fetch(
                     MAX_ROW_BYTES + 1 - len(body),
                 )
                 if room <= 0:
-                    if len(body) == expected_size and byte_budget == expected_size:
-                        raise CollectionFailure(
-                            "aggregate_budget",
-                            "aggregate budget prevents verifying response EOF",
-                        )
+                    _verify_budget_boundary(
+                        response, len(body), expected_size, byte_budget, framed
+                    )
                     break
-                chunk = response.read(min(64 * 1024, room))
+                chunk = _read_response_chunk(response, room, body)
                 if not chunk:
                     break
                 body.extend(chunk)

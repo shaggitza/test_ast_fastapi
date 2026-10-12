@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
+import io
 import json
 import os
 import time
@@ -51,6 +53,21 @@ class _Response:
         return result
 
 
+def _local_http_response(
+    payload: bytes, url: str, headers: bytes
+) -> http.client.HTTPResponse:
+    raw = b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + payload
+
+    class _Socket:
+        def makefile(self, _mode: str) -> io.BytesIO:
+            return io.BytesIO(raw)
+
+    response = http.client.HTTPResponse(_Socket())
+    response.begin()
+    response.url = url
+    return response
+
+
 class _BlockingResponse(_Response):
     def read(self, size: int = -1) -> bytes:
         time.sleep(1)
@@ -86,16 +103,23 @@ def test_fetch_accepts_exact_redirect_and_rejects_wrong_host_or_size(
 ) -> None:
     url = f"https://github.com/{collector.REPOSITORY}/pull/1.diff"
     final = f"https://patch-diff.githubusercontent.com/raw/{collector.REPOSITORY}/pull/1.diff"
-    monkeypatch.setattr(
-        urllib.request, "build_opener", lambda *_args: _Opener(_Response(b"abc", final))
+    response = _local_http_response(
+        b"abc", final, b"Content-Type: text/plain\r\nContent-Length: 3\r\n"
     )
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: _Opener(response))
     body, fetched_url = collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 10)
     assert body == b"abc"
     assert fetched_url == final
     monkeypatch.setattr(
         urllib.request,
         "build_opener",
-        lambda *_args: _Opener(_Response(b"abc", "https://evil.example/1.diff")),
+        lambda *_args: _Opener(
+            _local_http_response(
+                b"abc",
+                "https://evil.example/1.diff",
+                b"Content-Type: text/plain\r\nContent-Length: 3\r\n",
+            )
+        ),
     )
     with pytest.raises(protocol.CorpusV2Error, match="redirect"):
         collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 10)
@@ -171,6 +195,38 @@ def test_fetch_exact_remaining_budget_fails_closed_on_unverified_eof(
     assert caught.value.failure_class == "aggregate_budget"
     assert caught.value.bytes_read == 3
     assert response.body == b"!"
+
+
+def test_fetch_exact_budget_accepts_only_completed_fixed_length_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = f"https://github.com/{collector.REPOSITORY}/pull/1.diff"
+    cases = [
+        (b"abc", b"Content-Length: 3\r\n", True),
+        (b"abc", b"", False),
+        (b"abc", b"Content-Length: 3\r\nTransfer-Encoding: identity\r\n", False),
+        (b"abc", b"Content-Length: 4\r\n", False),
+        (b"ab", b"Content-Length: 3\r\n", False),
+        (b"abc", b"Content-Length: 3\r\nContent-Length: 3\r\n", False),
+        (b"abc", b"Content-Length: 3, 3\r\n", False),
+        (b"abc", b"Content-Length: 3\r\nTransfer-Encoding: chunked\r\n", False),
+    ]
+    for payload, framing, succeeds in cases:
+        response = _local_http_response(
+            payload, url, b"Content-Type: text/plain\r\n" + framing
+        )
+        monkeypatch.setattr(urllib.request, "build_opener", lambda *_args, r=response: _Opener(r))
+        if succeeds:
+            body, _ = collector._fetch(
+                url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 3
+            )
+            assert body == b"abc"
+            assert response.fp is None
+            assert response.length == 0
+        else:
+            with pytest.raises(collector.CollectionFailure) as caught:
+                collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 3)
+            assert caught.value.failure_class in {"aggregate_budget", "size_mismatch"}
 
 
 def test_storage_failures_do_not_reuse_downloaded_byte_allowance(
