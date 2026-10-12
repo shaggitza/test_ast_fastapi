@@ -626,7 +626,7 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-finally-partial-capture-v11-context-suppression-alternatives"
+        "conditional-finally-partial-capture-v12-conditional-block-continuations"
     )
     MAX_CONTROL_EXIT_STATES = 32
     MAX_LOOP_FLOW_PASSES = 4
@@ -646,7 +646,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 10
+    EXECUTION_SUMMARY_VERSION = 11
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -7638,7 +7638,14 @@ class MypyAnalyzer:
             elif isinstance(n, Block):
                 block_exits: list[_TraceExit] = []
                 for stmt in n.body:
-                    outcome = _normal_flow(walk_node(stmt))
+                    conditional_continuation = bool(block_exits)
+                    if conditional_continuation:
+                        possible_execution_depth[0] += 1
+                    try:
+                        outcome = _normal_flow(walk_node(stmt))
+                    finally:
+                        if conditional_continuation:
+                            possible_execution_depth[0] -= 1
                     block_exits.extend(outcome.exits)
                     if not outcome.normal:
                         return _coalesce_trace_exits(False, block_exits)
