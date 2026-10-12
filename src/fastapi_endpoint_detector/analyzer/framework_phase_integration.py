@@ -13,15 +13,45 @@ import importlib.metadata
 import json
 from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from mypy.nodes import Decorator, FuncDef, TypeInfo
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from mypy.nodes import (
+    AssignmentExpr,
+    AssignmentStmt,
+    Block,
+    CallExpr,
+    CastExpr,
+    ClassDef,
+    ComparisonExpr,
+    ConditionalExpr,
+    Decorator,
+    DictExpr,
+    ExpressionStmt,
+    FuncDef,
+    IfStmt,
+    IndexExpr,
+    ListExpr,
+    MemberExpr,
+    NameExpr,
+    OpExpr,
+    RevealExpr,
+    SetExpr,
+    SliceExpr,
+    StarExpr,
+    TupleExpr,
+    TypeInfo,
+    UnaryExpr,
+)
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from fastapi_endpoint_detector.analyzer.framework_phase_bridge import (
     FrameworkPhase,
     SourceIdentity,
     canonical_framework_phase,
+)
+from fastapi_endpoint_detector.analyzer.immutable_typed_source import (
+    ImmutableTypedSource,
+    SourceCaptureError,
 )
 from fastapi_endpoint_detector.models.effect_contract import (
     CallResolutionStatus,
@@ -41,9 +71,35 @@ from fastapi_endpoint_detector.models.surface_contract import (
 )
 from fastapi_endpoint_detector.parser.custom_surface_extractor import CustomSurfaceExtractor
 
+_CONSTRUCTOR_SCAN_MAX_NODES = 20_000
+_CONSTRUCTOR_SCAN_MAX_DEPTH = 64
+_CONSTRUCTOR_SCAN_MAX_ITEMS = 20_000
+
 if TYPE_CHECKING:
     from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
     from fastapi_endpoint_detector.analyzer.mypy_incremental import TypedBuild
+
+
+class ConstructorLifespanEvidence(BaseModel):
+    """Typed evidence for a literal FastAPI(lifespan=callback) binding."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    constructor_symbol: str = Field(min_length=1)
+    constructor_file: str = Field(min_length=1)
+    constructor_file_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    provider_capture_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    constructor_line: int = Field(ge=1)
+    constructor_column: int = Field(ge=0)
+    constructor_end_line: int = Field(ge=1)
+    constructor_end_column: int = Field(ge=0)
+    callback_symbol: str = Field(min_length=1)
+    callback: SourceIdentity
+
+    @model_validator(mode="after")
+    def validate_constructor(self) -> ConstructorLifespanEvidence:
+        if self.constructor_symbol != "fastapi.applications.FastAPI":
+            raise ValueError("constructor evidence must identify FastAPI's exact typed constructor")
+        return self
 
 
 class FrameworkPhaseRecord(BaseModel):
@@ -56,6 +112,7 @@ class FrameworkPhaseRecord(BaseModel):
     registration: SourceIdentity | None = None
     typed_framework_symbol: str | None = None
     registration_call_site: ResolvedCallSite | None = None
+    constructor_lifespan: ConstructorLifespanEvidence | None = None
     resource: str = Field(min_length=1)
     callback_file_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     registration_file_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
@@ -72,6 +129,13 @@ class FrameworkPhaseRecord(BaseModel):
     inventory_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     engine_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     config_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @model_serializer(mode="wrap")
+    def omit_absent_constructor(self, handler: Any) -> Any:
+        value = handler(self)
+        if self.constructor_lifespan is None:
+            value.pop("constructor_lifespan", None)
+        return value
 
     @model_validator(mode="after")
     def validate_typed_registration(self) -> FrameworkPhaseRecord:
@@ -124,16 +188,42 @@ class FrameworkPhaseRecord(BaseModel):
             )
         ):
             raise ValueError("typed registration site must match exact physical provenance")
+        constructor = self.constructor_lifespan
+        if constructor is not None and (
+            self.contract_id not in {"fastapi-lifespan-startup", "fastapi-lifespan-shutdown"}
+            or site is not None
+            or self.registration is None
+            or self.registration.line != constructor.constructor_line
+            or self.registration.column != constructor.constructor_column
+            or self.registration.end_line != constructor.constructor_end_line
+            or self.registration.end_column != constructor.constructor_end_column
+            or self.callback != constructor.callback
+            or self.typed_callback_symbol != constructor.callback_symbol
+            or self.framework_declaration_sha256 != constructor.constructor_file_sha256
+        ):
+            raise ValueError("constructor lifespan evidence must match exact phase identities")
+        if self.contract_id in {"fastapi-lifespan-startup", "fastapi-lifespan-shutdown"} and (
+            site is not None or self.typed_framework_symbol is not None
+        ):
+            raise ValueError("FastAPI lifespan constructor evidence cannot be a method call site")
         return self
 
     @property
     def status(self) -> str:
+        has_registration = (
+            self.constructor_lifespan is not None
+            if self.contract_id in {"fastapi-lifespan-startup", "fastapi-lifespan-shutdown"}
+            else self.registration_call_site is not None
+        )
         if (
             self.limitations
             or self.registration is None
-            or self.registration_call_site is None
+            or not has_registration
             or self.typed_callback_symbol is None
-            or self.typed_framework_symbol is None
+            or (
+                self.contract_id not in {"fastapi-lifespan-startup", "fastapi-lifespan-shutdown"}
+                and self.typed_framework_symbol is None
+            )
             or self.framework_declaration_sha256 is None
             or self.callback_file_sha256 is None
             or self.registration_file_sha256 is None
@@ -264,6 +354,199 @@ def _typed_module_path(module_name: str, typed_build: TypedBuild) -> Path | None
     tree = getattr(state, "tree", None) if state is not None else None
     path = getattr(tree, "path", None)
     return Path(path).resolve() if isinstance(path, str) and path else None
+
+
+def _constructor_lifespan_evidence(  # noqa: PLR0911, PLR0912, PLR0915
+    endpoint: Endpoint,
+    typed_build: TypedBuild,
+    source_root: Path,
+    typed_callback: str | None,
+    captured_sources: ImmutableTypedSource,
+) -> ConstructorLifespanEvidence | None:
+    """Prove one module-level FastAPI constructor and its direct callback binding."""
+    surface = endpoint.surface
+    if surface is None:
+        return None
+    if surface.registration_file.resolve() != endpoint.handler.file_path.resolve():
+        return None
+    state = typed_build.modules.get(endpoint.handler.module)
+    tree = getattr(state, "tree", None) if state is not None else None
+    if tree is None or Path(tree.path).resolve() != endpoint.handler.file_path.resolve():
+        return None
+    constructors: list[tuple[CallExpr, NameExpr | MemberExpr, TypeInfo]] = []
+    # Walk only known module-level syntax edges. Semantic links (node/info/type)
+    # can fan out into the whole imported program and are deliberately excluded.
+    pending: list[tuple[object, int]] = [(item, 0) for item in getattr(tree, "defs", ())]
+    seen: set[int] = set()
+    work = 0
+    exhausted = False
+    while pending:
+        work += 1
+        if work > _CONSTRUCTOR_SCAN_MAX_NODES or len(pending) > _CONSTRUCTOR_SCAN_MAX_ITEMS:
+            exhausted = True
+            break
+        value, depth = pending.pop()
+        if depth > _CONSTRUCTOR_SCAN_MAX_DEPTH:
+            exhausted = True
+            break
+        if isinstance(value, (list, tuple)):
+            if len(value) > _CONSTRUCTOR_SCAN_MAX_ITEMS:
+                exhausted = True
+                break
+            pending.extend((child, depth + 1) for child in value)
+            continue
+        if not hasattr(type(value), "__mypyc_attrs__") or id(value) in seen:
+            continue
+        seen.add(id(value))
+        if len(seen) > _CONSTRUCTOR_SCAN_MAX_NODES:
+            exhausted = True
+            break
+        if isinstance(value, (FuncDef, ClassDef, Decorator)):
+            continue
+        if isinstance(value, CallExpr) and isinstance(value.callee, (NameExpr, MemberExpr)):
+            target = value.callee.node
+            if isinstance(target, TypeInfo) and target.name == "FastAPI":
+                constructors.append((value, value.callee, target))
+        fields: tuple[str, ...] = ()
+        if isinstance(value, AssignmentStmt):
+            fields = ("lvalues", "rvalue")
+        elif isinstance(value, ExpressionStmt):
+            fields = ("expr",)
+        elif isinstance(value, IfStmt):
+            fields = ("expr", "body", "else_body")
+        elif isinstance(value, Block):
+            fields = ("body",)
+        elif isinstance(value, CallExpr):
+            fields = ("args",)
+        elif isinstance(value, (ListExpr, TupleExpr, SetExpr, DictExpr)):
+            fields = ("items",)
+        elif isinstance(value, IndexExpr):
+            fields = ("base", "index")
+        elif isinstance(value, UnaryExpr):
+            fields = ("expr",)
+        elif isinstance(value, OpExpr):
+            fields = ("left", "right")
+        elif isinstance(value, ConditionalExpr):
+            fields = ("cond", "if_expr", "else_expr")
+        elif isinstance(value, ComparisonExpr):
+            fields = ("operands",)
+        elif isinstance(value, (CastExpr, RevealExpr, StarExpr)):
+            fields = ("expr",)
+        elif isinstance(value, AssignmentExpr):
+            fields = ("expr", "rvalue")
+        elif isinstance(value, SliceExpr):
+            fields = ("begin_index", "end_index", "stride")
+        elif isinstance(value, (NameExpr, MemberExpr)):
+            fields = ("expr",) if isinstance(value, MemberExpr) else ()
+        for field in fields:
+            child = getattr(value, field, None)
+            if child is not None:
+                pending.append((child, depth + 1))
+    if exhausted:
+        return None
+    if len(constructors) != 1:
+        return None
+    call, callee, info = constructors[0]
+    if not (
+        (isinstance(callee, NameExpr) and callee.name == "FastAPI")
+        or (
+            isinstance(callee, MemberExpr)
+            and callee.name == "FastAPI"
+            and isinstance(callee.expr, NameExpr)
+            and callee.expr.name == "fastapi"
+        )
+    ):
+        return None
+    constructor_symbol = info.fullname
+    module_name = info.module_name
+    module_path = _typed_module_path(module_name, typed_build)
+    if (
+        constructor_symbol != "fastapi.applications.FastAPI"
+        or module_name != "fastapi.applications"
+        or module_path is None
+        or module_path.is_relative_to(source_root.resolve())
+        or module_path.suffix != ".py"
+    ):
+        return None
+    try:
+        distribution = importlib.metadata.distribution("fastapi")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    files = distribution.files
+    if files is None or module_path not in {
+        Path(str(distribution.locate_file(item))).resolve() for item in files
+    }:
+        return None
+    module_matches = [
+        (name, candidate)
+        for name, candidate in typed_build.modules.items()
+        if (candidate_tree := getattr(candidate, "tree", None)) is not None
+        and (candidate_path := getattr(candidate_tree, "path", None)) is not None
+        and Path(candidate_path).resolve() == module_path
+    ]
+    if len(module_matches) != 1 or module_matches[0][0] != module_name:
+        return None
+    captured = captured_sources.files.get(str(module_path))
+    if captured is None or str(module_path) not in captured_sources.typed_paths:
+        return None
+    framework_source_digest = captured.sha256
+    framework_digest = "sha256:" + framework_source_digest
+    lifespan_values = [
+        expression
+        for name, expression in zip(call.arg_names, call.args, strict=True)
+        if name == "lifespan"
+    ]
+    if len(lifespan_values) != 1 or not isinstance(lifespan_values[0], NameExpr):
+        return None
+    value = lifespan_values[0]
+    callback_node = value.node
+    callback_func = callback_node.func if isinstance(callback_node, Decorator) else callback_node
+    if (
+        not isinstance(callback_func, FuncDef)
+        or typed_callback is None
+        or callback_func.name != endpoint.handler.name
+        or callback_func.line is None
+        or callback_func.line > endpoint.handler.line_number
+        or callback_func.end_line is None
+        or (
+            endpoint.handler.end_line_number is not None
+            and callback_func.end_line < endpoint.handler.end_line_number
+        )
+    ):
+        return None
+    selected_callback = _selected_callback_node(tree, endpoint, typed_callback)
+    if selected_callback is None or callback_func is not selected_callback:
+        return None
+    if call.line != surface.registration_line or call.column != surface.registration_column:
+        return None
+    end_line = call.end_line
+    end_column = call.end_column
+    if end_line is None or end_column is None:
+        return None
+    handler_path = str(endpoint.handler.file_path.resolve())
+    handler_capture = captured_sources.files.get(handler_path)
+    if handler_capture is None or handler_path not in captured_sources.typed_paths:
+        return None
+    source_digest = handler_capture.sha256
+    try:
+        raw_digest = hashlib.sha256(_bounded_source_bytes(endpoint.handler.file_path)).hexdigest()
+    except OSError:
+        return None
+    if source_digest != raw_digest:
+        return None
+    callback = _callback_identity(endpoint, typed_callback)
+    return ConstructorLifespanEvidence(
+        constructor_symbol=constructor_symbol,
+        constructor_file=str(module_path),
+        constructor_file_sha256=framework_digest,
+        provider_capture_sha256="sha256:" + captured_sources.identity,
+        constructor_line=call.line,
+        constructor_column=call.column,
+        constructor_end_line=end_line,
+        constructor_end_column=end_column,
+        callback_symbol=typed_callback,
+        callback=callback,
+    )
 
 
 def _trusted_framework_source(  # noqa: PLR0911
@@ -411,13 +694,50 @@ def _registration_identity(endpoint: Endpoint, site: ResolvedCallSite) -> Source
     )
 
 
-def _provider_file_digest(path: Path, typed_build: TypedBuild) -> str | None:
-    resolved = path.resolve()
-    for module, module_path in typed_build.module_paths.items():
-        if Path(module_path).resolve() != resolved:
-            continue
-        return dict(typed_build.report.source_digests_after).get(module)
-    return None
+def _bounded_source_bytes(path: Path, *, max_bytes: int = 8 * 1024 * 1024) -> bytes:
+    """Read one regular source file with a strict per-file bound."""
+    if not path.is_file() or path.stat().st_size > max_bytes:
+        raise OSError("source file is not regular or exceeds the evidence read limit")
+    with path.open("rb") as source:
+        data = source.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise OSError("source file grew beyond the evidence read limit")
+    return data
+
+
+def _captured_file_digest(path: Path, captured: ImmutableTypedSource | None) -> str | None:
+    if captured is None:
+        return None
+    canonical = str(path.resolve())
+    item = captured.files.get(canonical)
+    return item.sha256 if item is not None and canonical in captured.typed_paths else None
+
+
+def _selected_callback_node(
+    tree: object, endpoint: Endpoint, typed_callback: str | None
+) -> FuncDef | None:
+    """Return the unique retained module declaration matching inventory identity."""
+    if typed_callback is None or (
+        Path(getattr(tree, "path", "")).resolve() != endpoint.handler.file_path.resolve()
+    ):
+        return None
+    matches: list[FuncDef] = []
+    for item in getattr(tree, "defs", ()):
+        candidate = item.func if isinstance(item, Decorator) else item
+        if (
+            isinstance(candidate, FuncDef)
+            and candidate.name == endpoint.handler.name
+            and candidate.fullname == typed_callback
+            and candidate.line is not None
+            and candidate.end_line is not None
+            and candidate.line <= endpoint.handler.line_number <= candidate.end_line
+            and (
+                endpoint.handler.end_line_number is None
+                or endpoint.handler.end_line_number <= candidate.end_line
+            )
+        ):
+            matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
 
 
 def _source_snapshot_hash(inventory: EndpointInventory) -> str:
@@ -451,27 +771,6 @@ def _activation_key(endpoint: Endpoint) -> str | None:
     )
 
 
-def _provider_source_snapshot(typed_build: TypedBuild | None) -> tuple[dict[str, str], str | None]:
-    if typed_build is None:
-        return {}, None
-    digest_rows = dict(typed_build.report.source_digests_after)
-    if not digest_rows:
-        return digest_rows, "retained typed provider source snapshot is incomplete"
-    for module, path in typed_build.module_paths.items():
-        expected = digest_rows.get(module)
-        if expected is None:
-            return digest_rows, f"provider source digest is absent for module {module}"
-        try:
-            actual = hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        except OSError:
-            return digest_rows, f"provider source file is unreadable for module {module}"
-        if actual != expected:
-            return digest_rows, (
-                f"provider source file changed after typed build for module {module}"
-            )
-    return digest_rows, None
-
-
 def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
     inventory: EndpointInventory,
     contracts: LoadedSurfaceContracts,
@@ -490,7 +789,31 @@ def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
     body is followed. The physical registration must also occur as one exact
     mypy call site in that callback's typed source slice.
     """
-    provider_sources, provider_source_error = _provider_source_snapshot(typed_build)
+    provider_sources: dict[str, str] = {}
+    provider_source_error: str | None = None
+    captured_sources: ImmutableTypedSource | None = None
+    if typed_build is not None:
+        try:
+            captured_sources = ImmutableTypedSource.capture_build_result(
+                typed_build.result,
+                source_inventory=analyzer.source_inventory,
+            )
+            for module, raw_path in typed_build.module_paths.items():
+                path = str(Path(raw_path).resolve())
+                state = typed_build.modules.get(module)
+                tree_path = getattr(getattr(state, "tree", None), "path", None)
+                if (
+                    tree_path is None
+                    or Path(tree_path).resolve() != Path(path)
+                    or path not in captured_sources.files
+                    or path not in captured_sources.typed_paths
+                ):
+                    raise SourceCaptureError(
+                        f"provider module path is absent from retained source capture: {module}"
+                    )
+                provider_sources[module] = captured_sources.files[path].sha256
+        except (SourceCaptureError, OSError, ValueError) as exc:
+            provider_source_error = f"retained typed provider source capture unavailable: {exc}"
     canonical_inventory = CustomSurfaceExtractor(
         analyzer.source_root,
         contracts,
@@ -543,7 +866,8 @@ def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
             "typed_provider": (
                 typed_build.report.cache_fingerprint if typed_build is not None else None
             ),
-            "phase_bridge_schema": 2,
+            "phase_bridge_schema": 3,
+            "typed_source_capture": captured_sources.identity if captured_sources else None,
         }
     )
     config_hash = _digest(
@@ -554,6 +878,38 @@ def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
             ),
         }
     )
+    constructor_evidence_by_endpoint: dict[int, ConstructorLifespanEvidence | None] = {}
+    if typed_build is not None and provider_source_error is None and captured_sources is not None:
+        evidence_by_binding: dict[tuple[object, ...], ConstructorLifespanEvidence | None] = {}
+        endpoint_bindings: list[tuple[int, tuple[object, ...]]] = []
+        for endpoint in inventory.endpoints:
+            contract = _contract_for(endpoint, contracts) if endpoint.surface is not None else None
+            if contract is not None and contract.id in {
+                "fastapi-lifespan-startup",
+                "fastapi-lifespan-shutdown",
+            }:
+                callback_symbol = _typed_callback_symbol(endpoint, typed_build)
+                surface = endpoint.surface
+                assert surface is not None
+                binding_key = (
+                    callback_symbol,
+                    str(endpoint.handler.file_path.resolve()),
+                )
+                evidence = evidence_by_binding.get(binding_key)
+                if evidence is None:
+                    evidence = _constructor_lifespan_evidence(
+                        endpoint,
+                        typed_build,
+                        analyzer.source_root,
+                        callback_symbol,
+                        captured_sources,
+                    )
+                    evidence_by_binding[binding_key] = evidence
+                endpoint_bindings.append((id(endpoint), binding_key))
+        constructor_evidence_by_endpoint.update(
+            (endpoint_id, evidence_by_binding[binding_key])
+            for endpoint_id, binding_key in endpoint_bindings
+        )
     records: list[FrameworkPhaseRecord] = []
     limitations: set[str] = set()
     for endpoint in inventory.endpoints:
@@ -582,34 +938,43 @@ def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
             deps = None
             reason.append("selected callback range does not match the loaded contract")
         else:
-            deps = analyzer.analyze_endpoint(endpoint)
+            deps = None
         if typed_build is None:
             reason.append("retained typed provider evidence is absent")
+        sites: list[ResolvedCallSite] = []
+        is_constructor_lifespan = contract is not None and contract.id in {
+            "fastapi-lifespan-startup",
+            "fastapi-lifespan-shutdown",
+        }
+        typed_callback = _typed_callback_symbol(endpoint, typed_build)
+        constructor_evidence = constructor_evidence_by_endpoint.get(id(endpoint))
+        if (
+            contract is not None
+            and contract.execution_mode == SurfaceExecutionMode.FRAMEWORK
+            and (contract.callback_range == endpoint.surface.callback_range)
+        ):
+            deps = analyzer.analyze_endpoint(endpoint)
         sites = deps.resolved_call_sites if deps is not None else []
         typed_registration = (
             _typed_registration(endpoint, contract, sites, typed_build, analyzer.source_root)
-            if contract is not None and typed_build is not None
+            if contract is not None and typed_build is not None and not is_constructor_lifespan
             else None
         )
-        if typed_registration is None:
-            reason.append(
-                "no unique exact mypy call site matched the physical registration occurrence; "
-                "registration form may lie outside callback scope"
-            )
+        if typed_registration is None and constructor_evidence is None:
+            reason.append("no unique typed registration evidence matched the physical occurrence")
         callback_file_digest = (
-            _provider_file_digest(endpoint.handler.file_path, typed_build)
+            _captured_file_digest(endpoint.handler.file_path, captured_sources)
             if typed_build is not None
             else None
         )
         registration_file_digest = (
-            _provider_file_digest(endpoint.surface.registration_file, typed_build)
+            _captured_file_digest(endpoint.surface.registration_file, captured_sources)
             if typed_build is not None
             else None
         )
         if callback_file_digest is None or registration_file_digest is None:
             reason.append("callback or registration file is absent from provider source inventory")
         conditions = _condition(endpoint, phase)
-        typed_callback = _typed_callback_symbol(endpoint, typed_build)
         if typed_callback is None:
             reason.append("selected callback does not resolve to one retained typed declaration")
         record = FrameworkPhaseRecord(
@@ -619,20 +984,45 @@ def collect_framework_phase_evidence(  # noqa: PLR0912, PLR0915
             registration=(
                 _registration_identity(endpoint, typed_registration[0])
                 if typed_registration
+                else SourceIdentity(
+                    module=endpoint.handler.module,
+                    symbol="FastAPI",
+                    file=str(endpoint.surface.registration_file.resolve()),
+                    line=constructor_evidence.constructor_line,
+                    column=constructor_evidence.constructor_column,
+                    end_line=constructor_evidence.constructor_end_line,
+                    end_column=constructor_evidence.constructor_end_column,
+                    source_sha256=endpoint.surface.registration_source_hash,
+                )
+                if constructor_evidence is not None
                 else None
             ),
             typed_framework_symbol=(
                 typed_registration[0].canonical_symbol if typed_registration else None
             ),
             registration_call_site=typed_registration[0] if typed_registration else None,
+            constructor_lifespan=constructor_evidence,
             callback_file_sha256=callback_file_digest,
             registration_file_sha256=registration_file_digest,
-            framework_declaration_sha256=(typed_registration[1] if typed_registration else None),
+            framework_declaration_sha256=(
+                typed_registration[1]
+                if typed_registration
+                else constructor_evidence.constructor_file_sha256
+                if constructor_evidence is not None
+                else None
+            ),
             canonical_contract_sha256=contracts.document.contract_hashes[
                 endpoint.surface.contract_id
             ],
             typed_provider_fingerprint=(
-                typed_build.report.cache_fingerprint if typed_build is not None else None
+                _digest(
+                    {
+                        "provider": typed_build.report.cache_fingerprint,
+                        "source_capture": (captured_sources.identity if captured_sources else None),
+                    }
+                )
+                if typed_build is not None
+                else None
             ),
             contract_id=endpoint.surface.contract_id,
             resource=endpoint.surface.resource,

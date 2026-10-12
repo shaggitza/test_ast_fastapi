@@ -4,11 +4,35 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
 from fastapi_endpoint_detector.analyzer.framework_phase_bridge import FrameworkPhase, SourceIdentity
+
+
+class ConstructorRegistrationEvidence(BaseModel):
+    """Strict identity for a direct FastAPI constructor lifespan binding."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    constructor_symbol: str = Field(min_length=1)
+    constructor_file: str = Field(min_length=1)
+    constructor_file_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    provider_capture_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    constructor_line: int = Field(ge=1)
+    constructor_column: int = Field(ge=0)
+    constructor_end_line: int = Field(ge=1)
+    constructor_end_column: int = Field(ge=0)
+    callback_symbol: str = Field(min_length=1)
+    callback: SourceIdentity
+
+    @model_validator(mode="after")
+    def validate_constructor(self) -> ConstructorRegistrationEvidence:
+        if self.constructor_symbol != "fastapi.applications.FastAPI" or self.callback_symbol != (
+            f"{self.callback.module}.{self.callback.symbol}"
+        ):
+            raise ValueError("constructor evidence is not bound to typed FastAPI and callback")
+        return self
 
 
 class PhaseManifestEntry(BaseModel):
@@ -25,6 +49,14 @@ class PhaseManifestEntry(BaseModel):
     inventory_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     engine_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     config_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    constructor_lifespan: ConstructorRegistrationEvidence | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_constructor(self, handler: Any) -> Any:
+        value = handler(self)
+        if self.constructor_lifespan is None:
+            value.pop("constructor_lifespan", None)
+        return value
 
     @model_validator(mode="after")
     def validate_contract_binding(self) -> PhaseManifestEntry:
@@ -52,6 +84,18 @@ class PhaseManifestEntry(BaseModel):
             )
         if catalog.document.contract_hashes.get(self.contract_id) != self.contract_sha256:
             raise ValueError("runtime phase manifest contract digest does not match framework-v1")
+        if self.constructor_lifespan is not None:
+            if not self.contract_id.startswith("fastapi-lifespan-"):
+                raise ValueError("constructor evidence is only valid for FastAPI lifespan entries")
+            if (
+                self.registration.line != self.constructor_lifespan.constructor_line
+                or self.registration.column != self.constructor_lifespan.constructor_column
+                or self.registration.end_line != self.constructor_lifespan.constructor_end_line
+                or self.registration.end_column != self.constructor_lifespan.constructor_end_column
+                or self.callback != self.constructor_lifespan.callback
+                or self.registration.symbol != "FastAPI"
+            ):
+                raise ValueError("constructor evidence does not match manifest identities")
         return self
 
 
@@ -397,7 +441,7 @@ def manifest_from_report(report: object) -> PhaseManifest:
             continue
         callback = getattr(record, "callback", None)
         registration = getattr(record, "registration", None)
-        required = (
+        required: tuple[object | None, ...] = (
             callback,
             registration,
             getattr(record, "framework_declaration_sha256", None),
@@ -407,6 +451,13 @@ def manifest_from_report(report: object) -> PhaseManifest:
             getattr(record, "typed_framework_symbol", None),
             getattr(record, "registration_call_site", None),
         )
+        constructor = getattr(record, "constructor_lifespan", None)
+        if record.contract_id in {"fastapi-lifespan-startup", "fastapi-lifespan-shutdown"}:
+            required = required[:-2]
+            if constructor is None:
+                continue
+        elif constructor is not None:
+            continue
         limitations = getattr(record, "limitations", None)
         if any(item is None for item in required) or bool(limitations):
             continue
@@ -426,6 +477,13 @@ def manifest_from_report(report: object) -> PhaseManifest:
                 inventory_sha256=record.inventory_sha256,
                 engine_sha256=record.engine_sha256,
                 config_sha256=record.config_sha256,
+                constructor_lifespan=(
+                    ConstructorRegistrationEvidence.model_validate(
+                        constructor.model_dump(mode="python")
+                    )
+                    if constructor is not None
+                    else None
+                ),
             )
         )
     return PhaseManifest(entries=tuple(entries))

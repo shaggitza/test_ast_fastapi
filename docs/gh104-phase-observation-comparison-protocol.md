@@ -4,6 +4,20 @@ compare_phase_observation(manifest, observation) compares the existing static ph
 positive-only lifecycle observation rows. It joins the full callback identity, registration identity,
 phase, source hashes, source coordinates, and execution conditions under one matching manifest digest.
 
+FastAPI `lifespan` constructor registrations carry a separate optional `constructor_lifespan` record in
+each manifest entry. It identifies the exact typed `FastAPI(...)` constructor span, installed FastAPI
+source hash, and directly bound callback. Entries without this field retain their prior serialized
+shape. A constructor entry is accepted only for the bundled `fastapi-lifespan-startup` or
+`fastapi-lifespan-shutdown` contract; it does not masquerade as an ordinary method call site. The
+runtime still matches the loaded app's actual lifespan callback to the manifest identity.
+
+The constructor source hash comes from the bounded immutable source capture of the completed
+provider build. The capture requires the installed module's retained graph state and verifies the
+captured bytes against that state's source hash. A missing graph row, changed source, or capture
+limit failure leaves constructor evidence unavailable. The capture identity also contributes to the
+phase engine fingerprint, so changed imported framework source cannot reuse an earlier phase
+identity.
+
 The returned PhaseComparison contains one row per static occurrence. Its statuses distinguish
 observed_positive, self_reported_observation, callback_unavailable, and not_observed_positive_only.
 The observation role is preserved. A self-reported observation is not promoted to a positive
