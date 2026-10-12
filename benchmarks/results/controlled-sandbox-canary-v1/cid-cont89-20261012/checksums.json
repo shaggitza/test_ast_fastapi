@@ -1,0 +1,10 @@
+{
+  "observed-result.json": {
+    "bytes": 6543,
+    "sha256": "63a60b12214f30718d47eb9ff62d1c2e1cbc4f441b463b56de26beba0e14182f"
+  },
+  "parent-cleanup-check.json": {
+    "bytes": 1395,
+    "sha256": "80dfa9952a4dd134f93408d17820ee15d71415c79a2f9f87c8551d42f68af9a4"
+  }
+}
