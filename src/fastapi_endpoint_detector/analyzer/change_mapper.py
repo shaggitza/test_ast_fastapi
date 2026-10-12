@@ -2108,9 +2108,17 @@ class ChangeMapper:
                 if contract_id is None:
                     continue
                 contract = contract_by_id[contract_id]
-                resource_identity = occurrence.resource_identity
-                if resource_identity is None:
+                context = next(
+                    (
+                        item
+                        for item in occurrence.invocation_contexts
+                        if item.endpoint_id == endpoint_id
+                    ),
+                    None,
+                )
+                if context is None or context.resource_identity is None:
                     continue
+                resource_identity = context.resource_identity
                 evidence.append(
                     ContractEffectEvidence(
                         contract=contract,

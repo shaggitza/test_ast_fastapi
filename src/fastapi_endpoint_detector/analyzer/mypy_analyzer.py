@@ -1578,60 +1578,93 @@ class MypyAnalyzer:
         """Return effective mypy options captured when the retained build completed."""
         return self._retained_build_options
 
-    def _open_project_source(self, path: Path) -> int | None:
-        """Open one in-root regular source file without following symlinks."""
-        directory_flag = getattr(os, "O_DIRECTORY", 0)
-        nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
-        if (
-            not directory_flag
-            or not nofollow_flag
-            or os.open not in os.supports_dir_fd
-            or not self.source_root.is_absolute()
-        ):
+    @staticmethod
+    def _source_stat_identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            item.st_dev,
+            item.st_ino,
+            item.st_size,
+            item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+
+    def _project_source_stat(self, path: Path) -> os.stat_result | None:
+        """Validate canonical confinement and reject linked path components."""
+        root = self.source_root
+        if not root.is_absolute() or not path.is_absolute():
             return None
         try:
-            relative = path.relative_to(self.source_root)
-        except ValueError:
+            relative = path.relative_to(root)
+            if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+                return None
+            if root.resolve(strict=True) != root or path.resolve(strict=True) != path:
+                return None
+            path.resolve(strict=True).relative_to(root)
+            current = Path(path.anchor)
+            components = (
+                current,
+                *(
+                    current.joinpath(*path.parts[1:index])
+                    for index in range(2, len(path.parts) + 1)
+                ),
+            )
+            for component in components:
+                info = component.lstat()
+                is_junction = getattr(component, "is_junction", None)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or (callable(is_junction) and is_junction())
+                    or getattr(info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                ):
+                    return None
+                if component != path and not stat.S_ISDIR(info.st_mode):
+                    return None
+            leaf = path.lstat()
+            return leaf if stat.S_ISREG(leaf.st_mode) else None
+        except (OSError, ValueError, RuntimeError):
             return None
-        if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+
+    def _open_project_source(self, path: Path) -> int | None:
+        """Open a confined source snapshot using the available platform primitives."""
+        expected = self._project_source_stat(path)
+        if expected is None:
             return None
-        current = self.source_root
+        nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+        binary_flag = getattr(os, "O_BINARY", 0)
+        leaf_flags = os.O_RDONLY | binary_flag | getattr(os, "O_NONBLOCK", 0)
         leaf_descriptor = -1
         directory_descriptor = -1
         try:
-            for part in relative.parts:
-                current = current / part
-                if current.is_symlink():
+            if nofollow_flag and os.open in os.supports_dir_fd:
+                relative = path.relative_to(self.source_root)
+                directory_flags = (
+                    os.O_RDONLY | binary_flag | nofollow_flag | getattr(os, "O_DIRECTORY", 0)
+                )
+                directory_descriptor = os.open(self.source_root.anchor, directory_flags)
+                if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
                     return None
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(self.source_root)
-            directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
-            directory_descriptor = os.open(os.path.sep, directory_flags)
-            for part in self.source_root.parts[1:]:
-                next_descriptor = os.open(
-                    part,
-                    directory_flags,
+                for part in (*self.source_root.parts[1:], *relative.parts[:-1]):
+                    next_descriptor = os.open(part, directory_flags, dir_fd=directory_descriptor)
+                    os.close(directory_descriptor)
+                    directory_descriptor = next_descriptor
+                    if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
+                        return None
+                leaf_descriptor = os.open(
+                    relative.parts[-1],
+                    leaf_flags | nofollow_flag,
                     dir_fd=directory_descriptor,
                 )
-                os.close(directory_descriptor)
-                directory_descriptor = next_descriptor
-            for part in relative.parts[:-1]:
-                next_descriptor = os.open(
-                    part,
-                    directory_flags,
-                    dir_fd=directory_descriptor,
-                )
-                os.close(directory_descriptor)
-                directory_descriptor = next_descriptor
-            leaf_descriptor = os.open(
-                relative.parts[-1],
-                os.O_RDONLY | nofollow_flag | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=directory_descriptor,
-            )
+            else:
+                leaf_descriptor = os.open(path, leaf_flags)
             opened = os.fstat(leaf_descriptor)
-            if not stat.S_ISREG(opened.st_mode):
-                os.close(leaf_descriptor)
-                leaf_descriptor = -1
+            current = self._project_source_stat(path)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or current is None
+                or self._source_stat_identity(expected) != self._source_stat_identity(opened)
+                or self._source_stat_identity(opened) != self._source_stat_identity(current)
+            ):
                 return None
             result = leaf_descriptor
             leaf_descriptor = -1
@@ -1675,7 +1708,10 @@ class MypyAnalyzer:
         """Open a regular dependency or metadata file without reading it all at once."""
         descriptor = -1
         try:
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
+            )
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 os.close(descriptor)
                 return None
@@ -1695,8 +1731,12 @@ class MypyAnalyzer:
             if before.st_size > max_bytes:
                 return None
             contents = self._read_bounded_descriptor(descriptor, max_bytes)
-            if contents is None or not self._source_descriptor_stable(
-                path, descriptor, before, follow_symlinks=False
+            if (
+                contents is None
+                or not self._source_descriptor_stable(
+                    path, descriptor, before, follow_symlinks=False
+                )
+                or self._project_source_stat(path) is None
             ):
                 return None
             return contents
@@ -1736,19 +1776,12 @@ class MypyAnalyzer:
         except OSError:
             return False
 
-        def identity_and_version(item: os.stat_result) -> tuple[int, int, int, int, int]:
-            return (
-                item.st_dev,
-                item.st_ino,
-                item.st_size,
-                item.st_mtime_ns,
-                item.st_ctime_ns,
-            )
-
         return (
             stat.S_ISREG(current_path.st_mode)
-            and identity_and_version(before) == identity_and_version(after)
-            and (after.st_dev, after.st_ino) == (current_path.st_dev, current_path.st_ino)
+            and MypyAnalyzer._source_stat_identity(before)
+            == MypyAnalyzer._source_stat_identity(after)
+            and MypyAnalyzer._source_stat_identity(after)
+            == MypyAnalyzer._source_stat_identity(current_path)
         )
 
     def _source_file_digests(self, path: Path) -> tuple[str, str] | None:
@@ -1776,6 +1809,11 @@ class MypyAnalyzer:
                         descriptor,
                         before,
                         follow_symlinks=not self._is_project_source_path(path),
+                    ):
+                        return None
+                    if (
+                        self._is_project_source_path(path)
+                        and self._project_source_stat(path) is None
                     ):
                         return None
                     return sha1.hexdigest(), sha256.hexdigest()
@@ -3921,15 +3959,71 @@ class MypyAnalyzer:
             return fullname.startswith(f"{path}.") or path == fullname
 
         def is_imported_module_expression(expression: ast.AST, aliases: dict[str, str]) -> bool:
-            for child in ast.walk(expression):
-                if not isinstance(child, ast.expr):
-                    continue
-                path = imported_path(child, aliases)
-                if path is None or path == "*" or path not in aliases.values():
-                    continue
-                resolved = self._resolve_fullname_to_file(path)
-                if resolved is not None and resolved[1] == path:
+            """Recognize escaped module values without confusing calls with their receivers."""
+            pending = [expression]
+            visited = 0
+            while pending:
+                candidate = pending.pop()
+                visited += 1
+                if visited > self.MAX_CALL_SPAN_SOURCE_NODES:
                     return True
+                if isinstance(candidate, (ast.Name, ast.Attribute)):
+                    path = imported_path(candidate, aliases)
+                    if path == "*":
+                        return True
+                    if path is None:
+                        if isinstance(candidate, ast.Attribute):
+                            if len(pending) >= self.MAX_CALL_SPAN_SOURCE_NODES - visited:
+                                return True
+                            pending.append(candidate.value)
+                        continue
+                    if path == "sys.modules":
+                        return True
+                    if isinstance(candidate, ast.Attribute) and candidate.attr == "__dict__":
+                        owner = imported_path(candidate.value, aliases)
+                        resolved_owner = self._resolve_fullname_to_file(owner) if owner else None
+                        if resolved_owner is not None and resolved_owner[1] == owner:
+                            return True
+                    resolved = self._resolve_fullname_to_file(path)
+                    if resolved is not None and resolved[1] == path:
+                        return True
+                    continue
+                if isinstance(candidate, ast.Call):
+                    callee = imported_path(candidate.func, aliases)
+                    if callee in {
+                        "importlib.import_module",
+                        "importlib.util.module_from_spec",
+                        "importlib.reload",
+                        "builtins.__import__",
+                    } or (
+                        isinstance(candidate.func, ast.Name) and candidate.func.id == "__import__"
+                    ):
+                        return True
+                    # An imported receiver nested in a call does not establish
+                    # that the call result is a module. Module arguments are
+                    # checked separately by the escape scan below.
+                    continue
+                children: list[ast.AST] = []
+                if isinstance(candidate, (ast.Tuple, ast.List, ast.Set)):
+                    children.extend(candidate.elts)
+                elif isinstance(candidate, ast.Dict):
+                    children.extend(key for key in candidate.keys if key is not None)
+                    children.extend(candidate.values)
+                elif isinstance(candidate, ast.IfExp):
+                    children.extend((candidate.body, candidate.orelse))
+                elif isinstance(candidate, ast.BoolOp):
+                    children.extend(candidate.values)
+                elif isinstance(candidate, (ast.Starred, ast.NamedExpr, ast.Subscript)):
+                    children.append(candidate.value)
+                elif isinstance(candidate, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                    children.append(candidate.elt)
+                elif isinstance(candidate, ast.DictComp):
+                    children.extend((candidate.key, candidate.value))
+                elif isinstance(candidate, ast.Lambda):
+                    children.append(candidate.body)
+                if len(children) + len(pending) > self.MAX_CALL_SPAN_SOURCE_NODES - visited:
+                    return True
+                pending.extend(children)
             return False
 
         found_mutation = False

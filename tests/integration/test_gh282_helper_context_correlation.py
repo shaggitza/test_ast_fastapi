@@ -149,6 +149,22 @@ def test_shared_helper_resource_identity_stays_endpoint_correlated(tmp_path: Pat
         assert contexts[path].resource_identity is not None
         assert contexts[path].resource_identity.status.value == "unavailable"
 
+    identities_by_path = {}
+    for candidate in report.affected_endpoints:
+        if candidate.endpoint.path not in {"/write-a", "/write-b"}:
+            continue
+        evidence = [
+            item for item in candidate.contract_evidence if item.contract.id == "write-state"
+        ]
+        assert len(evidence) == 1
+        item = evidence[0]
+        context = contexts[candidate.endpoint.path]
+        assert item.endpoint_audit_id == context.endpoint_id
+        assert item.resource_identity == context.resource_identity
+        identities_by_path[candidate.endpoint.path] = item.resource_identity
+    assert set(identities_by_path) == {"/write-a", "/write-b"}
+    assert identities_by_path["/write-a"] != identities_by_path["/write-b"]
+
     endpoint_by_id = {
         endpoint.id: endpoint
         for occurrence in audit.occurrences
