@@ -213,6 +213,36 @@ def test_earlier_nested_deadline_shortens_outer_deadline() -> None:
     assert time.monotonic() - started < 0.5
 
 
+def test_pending_owned_alarm_during_teardown_restores_guard_and_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_mask = signal.pthread_sigmask
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    injected = False
+
+    def block_then_deliver(how: int, mask: set[signal.Signals]) -> set[signal.Signals]:
+        nonlocal injected
+        previous = original_mask(how, mask)
+        if how == signal.SIG_BLOCK and not injected:
+            injected = True
+            os.kill(os.getpid(), signal.SIGALRM)
+        return previous
+
+    monkeypatch.setattr(signal, "pthread_sigmask", block_then_deliver)
+    with (
+        pytest.raises(collector.CollectionFailure, match="wall-clock limit"),
+        collector._wall_deadline(time.monotonic() + 5),
+    ):
+        pass
+    assert injected
+    assert collector._deadline_depth == 0
+    assert collector._deadline_at is None
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    assert signal.getsignal(signal.SIGALRM) is previous_handler
+    with collector._wall_deadline(time.monotonic() + 5):
+        pass
+
+
 def test_already_expired_nested_deadline_leaves_no_alarm_or_guard_state() -> None:
     with (  # noqa: SIM117
         collector._wall_deadline(time.monotonic() + 5),
@@ -691,6 +721,35 @@ def test_capture_is_single_source_for_rows_when_paths_change(
     assert all(
         row["http_status"] == 404 for row in result["rows"] if row["failure_class"] == "http_error"
     )
+
+
+def test_wrong_hash_records_complete_fetch_observations_without_blob(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed_number: int | None = None
+
+    final_url = ""
+
+    def fetched(_url: str, _repo: str, number: int, *_args: object) -> tuple[bytes, str]:
+        nonlocal observed_number, final_url
+        if observed_number is None:
+            observed_number = number
+            final_url = f"https://patch-diff.githubusercontent.com/raw/{collector.REPOSITORY}/pull/{number}.diff"
+            return b"xyz", final_url
+        raise collector.CollectionFailure("request_error", "offline")
+
+    monkeypatch.setattr(collector, "_fetch", fetched)
+    result = collector.collect(tmp_path / "observed")
+    assert observed_number is not None
+    row = next(item for item in result["rows"] if item["pr"] == observed_number)
+    assert row["status"] == "mismatch"
+    assert row["failure_class"] == "hash_mismatch"
+    assert row["observed_sha256"] == hashlib.sha256(b"xyz").hexdigest()
+    assert row["observed_bytes"] == 3
+    assert row["observed_final_url"] == final_url
+    assert "blob" not in row
+    assert result["summary"]["bytes"] == 3
+    assert (tmp_path / "observed" / "receipts.json").is_file()
 
 
 def test_existing_blob_read_is_bounded_and_rejects_symlink_and_growth(tmp_path: Path) -> None:

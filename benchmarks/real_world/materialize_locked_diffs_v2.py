@@ -52,7 +52,7 @@ class CollectionFailure(protocol.CorpusV2Error):
 
 
 @contextlib.contextmanager
-def _wall_deadline(deadline: float) -> Iterator[None]:
+def _wall_deadline(deadline: float) -> Iterator[None]:  # noqa: PLR0912, PLR0915
     """Enforce one non-extending POSIX alarm deadline across nested work."""
     global _deadline_depth, _deadline_at  # noqa: PLW0603
     if (
@@ -95,11 +95,34 @@ def _wall_deadline(deadline: float) -> Iterator[None]:
     try:
         yield
     finally:
-        _deadline_depth -= 1
         if outermost:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, previous_handler)
-            _deadline_at = None
+            # A real alarm can become pending after the body returns but before
+            # cleanup. Keep it from interrupting restoration, consume that
+            # owned alarm, then propagate the deadline failure once state is safe.
+            old_mask: set[signal.Signals | int] | None = None
+            expired_during_teardown = False
+            try:
+                old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                pending = signal.sigpending()
+                if signal.SIGALRM in pending:
+                    signal.sigwait({signal.SIGALRM})
+                    expired_during_teardown = True
+            finally:
+                try:
+                    signal.setitimer(signal.ITIMER_REAL, 0)
+                finally:
+                    try:
+                        signal.signal(signal.SIGALRM, previous_handler)
+                    finally:
+                        _deadline_depth -= 1
+                        _deadline_at = None
+                        if old_mask is not None:
+                            signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+            if expired_during_teardown:
+                raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
+        else:
+            _deadline_depth -= 1
 
 
 def _open_dir_chain(path: Path, *, create: bool) -> int:
@@ -469,6 +492,14 @@ def _collect(  # noqa: PLR0912, PLR0915
                 )
                 fetched = True
                 total += len(body)
+                observed_hash = hashlib.sha256(body).hexdigest()
+                entry.update(
+                    {
+                        "observed_sha256": observed_hash,
+                        "observed_bytes": len(body),
+                        "observed_final_url": final_url,
+                    }
+                )
                 with _wall_deadline(deadline):
                     digest = _store_verified(cachefd, body, expected_hash)
                     if time.monotonic() >= deadline:
