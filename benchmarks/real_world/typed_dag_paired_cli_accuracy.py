@@ -1307,14 +1307,25 @@ def main() -> int:
     parser.add_argument("--timeout-seconds", type=int, default=CLI_TIMEOUT_SECONDS)
     args = parser.parse_args()
     document = run(args.output, args.analyzer_project_root, args.timeout_seconds)
+    runner_provenance = document.get("runner_provenance")
+    analyzer_provenance = document.get("analyzer_provenance")
+    runner_revision = (
+        runner_provenance.get("revision") if isinstance(runner_provenance, dict) else None
+    )
+    analyzer_revision = (
+        analyzer_provenance.get("revision")
+        if isinstance(analyzer_provenance, dict)
+        else None
+    )
     print(
         json.dumps(
             {
                 "gate_status": document["gate_status"],
-                "runner_revision": document["runner_provenance"]["revision"],
-                "analyzer_revision": document["analyzer_provenance"]["revision"],
-                "case_coverage": document["case_coverage"],
-                "metrics": document["metrics"],
+                "run_validity": document.get("run_validity"),
+                "runner_revision": runner_revision,
+                "analyzer_revision": analyzer_revision,
+                "case_coverage": document.get("case_coverage"),
+                "metrics": document.get("metrics"),
                 "output": str(args.output),
             },
             sort_keys=True,

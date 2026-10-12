@@ -125,6 +125,41 @@ def test_failed_final_validation_publishes_invalid_report(
     assert "receipt mismatch" in saved["integrity_errors"][0]
 
 
+def test_main_summarizes_invalid_provenance_document_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    output = tmp_path / "report.json"
+    document: dict[str, Any] = {
+        "gate_status": "failed",
+        "run_validity": "invalid",
+        "integrity_errors": ["runner provenance unavailable"],
+    }
+    monkeypatch.setattr(gate, "run", lambda *_args: document)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "typed_dag_paired_cli_accuracy",
+            "--analyzer-project-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert gate.main() == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary == {
+        "gate_status": "failed",
+        "run_validity": "invalid",
+        "runner_revision": None,
+        "analyzer_revision": None,
+        "case_coverage": None,
+        "metrics": None,
+        "output": str(output),
+    }
+
+
 def test_all_cases_have_exact_paired_baseline_target_inputs() -> None:
     assert len(gate.CASES) == 18
     assert len({case.case_id for case in gate.CASES}) == 18
