@@ -1,0 +1,71 @@
+{
+  "distribution": "graphifyy",
+  "version": "0.9.30",
+  "version_output_expected_from_source": "graphify 0.9.30",
+  "version_command_executed": false,
+  "pypi_wheel": {
+    "filename": "graphifyy-0.9.30-py3-none-any.whl",
+    "sha256": "bb614b7736d37d6a3c7ffe66d6edfff88b9582b066bdc9b27f0a07f6c8f5c58b"
+  },
+  "pypi_sdist": {
+    "filename": "graphifyy-0.9.30.tar.gz",
+    "sha256": "fe5f86be50b66f14ea74765bcf4d13d695d6d72b5a38b525075667fca6b37763"
+  },
+  "official_source": {
+    "repository": "https://github.com/Graphify-Labs/graphify",
+    "tag": "v0.9.30",
+    "commit": "ecfcd160d56b420eb8241430fa7b5b1951c7829f",
+    "tree": "c3a95cb81dd181b52e43d7874aa930808bed8bb3",
+    "pyproject_sha256": "9dd818130df8e07c47167c76aa56fd9ce5b5ee466d6c412a0b64705271285206",
+    "files": {
+      "graphify/__main__.py": "a388ae6c903eb8b753ed6afdd63e4258df3980e347b3441669f3d402e7ca7ccf",
+      "graphify/cli.py": "855c3ef93a3441176cbfd9f6f6ebcec001b06308532620c1b4acc129412b8523",
+      "graphify/extract.py": "2875f39ab80c0c1efe4f57f6ece3020ae2bdf1cc3776fbade6791b4bd39b1575",
+      "graphify/export.py": "6320a1266bf1445dbac0c77ff153386e4ad332bcdd777199dad19fc976ad43c5",
+      "graphify/build.py": "17eb81d317bfadd367c476ea58d18b6dca5e5c1c70ea997f60a5739b81ca6772"
+    },
+    "wheel_source_file_bytes_match": true
+  },
+  "project_lock": {
+    "filename": "uv.lock",
+    "sha256": "885ec5a2955af280fc814dec7389f9a291d5f89494e39cf5ed2f62a51018f2cb",
+    "graphifyy_entry_present": false
+  },
+  "package_interface": {
+    "console_script": "graphify = graphify.__main__:main",
+    "ast_code_only_argv": [
+      "graphify",
+      "extract",
+      "<fixture-root>",
+      "--code-only",
+      "--out",
+      "<external-output-root>"
+    ],
+    "raw_no_cluster_argv_addition": "--no-cluster",
+    "no_cluster_output_contract": "raw {nodes, edges, hyperedges, token counts}; not adapter node-link contract",
+    "adapter_contract": "directed MultiDiGraph node-link object with nodes and links",
+    "extract_command_parses_directed_option": false,
+    "clustered_extract_graph_directed_default": false,
+    "clustered_extract_graph_multigraph_default": false,
+    "source_node_locations": "line markers (L<number>), not byte/column spans",
+    "code_only_skips_non_code_semantic_pass": true,
+    "extract_does_not_generate_community_labels": true,
+    "extract_writes_html": false,
+    "extract_no_viz_flag": "unsupported and silently ignored by the extract option loop",
+    "extract_has_no_query_log_or_hook_flags": true
+  },
+  "runtime_observation": {
+    "runsc_found": false,
+    "docker_runtime_names": ["io.containerd.runc.v2", "runc"],
+    "trusted_101_receipts_present": false,
+    "extraction_executed": false,
+    "package_installed_or_imported": false
+  },
+  "extraction_blockers": [
+    "issue-101 trusted runtime/image/policy receipts absent",
+    "host runtime inventory has runc only and no runsc",
+    "graphify extract --code-only --no-cluster emits raw edges shape, not adapter links shape",
+    "graphify extract parser has no supported directed option; adapter requires directed true",
+    "no extraction run permitted until trusted sandbox pins are independently verified"
+  ]
+}
