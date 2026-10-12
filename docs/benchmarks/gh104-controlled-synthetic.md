@@ -106,11 +106,11 @@ before callbacks because that image's framework-v1 contract digest differed
 from the host manifest. They were failures. The source-aligned image fixed
 that compatibility mismatch while preserving the manifest validation.
 
-## Prerequisites before a real assay
+## Prerequisites for future runs and historical pins
 
 The executor configuration must be populated with reviewed, exact pins. Do not
 reuse the historical pins below as evidence for this new fixture root or for
-an image's contents. Before executing a prepared command, independently verify:
+an image's contents. For a future assay, independently verify:
 
 1. The immutable image digest and its embedded `runtime_worker.py` contents.
 2. The exact dependency lock, snapshot lock, SBOM, seccomp profile, and expected
