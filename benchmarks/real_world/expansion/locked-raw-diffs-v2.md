@@ -24,6 +24,7 @@ as bounding the whole collection. Failures include a structured
 `failure_class`; HTTP failures also include numeric `http_status` without
 recording response headers. Bytes returned by a successful fetch are charged
 before cache storage, so local write failures cannot restore aggregate budget.
+Local storage failures are reported as unavailable (`missing`), not content mismatches.
 An HTTP error response is closed without reading its body; `bytes` counts bytes
 read by this collector, not bytes the server may have sent in an unconsumed error
 body. If the remaining aggregate budget ends exactly at a row's expected size,

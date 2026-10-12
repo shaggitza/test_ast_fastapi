@@ -202,6 +202,9 @@ def test_storage_failures_do_not_reuse_downloaded_byte_allowance(
     first_size = result["rows"][0]["expected_bytes"]
     assert allowances[1] == collector.MAX_TOTAL_BYTES - first_size
     assert all(row["failure_class"] == "local_storage_error" for row in result["rows"])
+    assert all(row["status"] == "missing" for row in result["rows"])
+    assert result["summary"]["missing"] == 50
+    assert result["summary"]["mismatch"] == 0
 
 
 def test_publish_is_no_clobber_and_safe_output_rejects_symlink(tmp_path: Path) -> None:

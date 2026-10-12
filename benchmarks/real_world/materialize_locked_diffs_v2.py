@@ -411,6 +411,7 @@ def collect(  # noqa: PLR0912, PLR0915
                     in {
                         "request_error",
                         "http_error",
+                        "local_storage_error",
                         "aggregate_budget",
                         "aggregate_limit",
                         "deadline",
