@@ -17,17 +17,22 @@ from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
     EndpointOccurrenceBinding,
     GraphSide,
+    SourceDependencyDeclarationSite,
     SourceDependencyUncertainty,
     SourceSpan,
     TypedReverseGraph,
     build_typed_reverse_graph,
+    dependency_declaration_spelling,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
     from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
-    from fastapi_endpoint_detector.models.endpoint import Endpoint
+    from fastapi_endpoint_detector.models.endpoint import (
+        Endpoint,
+        NativeRouteDependencyExpressionEvidence,
+    )
 
 
 class TypedGraphBridgeError(RuntimeError):
@@ -309,11 +314,13 @@ _MAX_DEPENDENCY_IMPORT_BINDINGS = 32768
 _MAX_DEPENDENCY_CALLS_PER_HANDLER = 64
 _MAX_DEPENDENCY_TYPED_NODES = 32768
 _MAX_DEPENDENCY_METADATA = 8192
+_MAX_ROUTE_DEPENDENCY_EXPRESSIONS_PER_ENDPOINT = 256
 _DEPENDENCY_SCOPE_LIMITATION = (
-    "Only handler signature dependency candidates are inspected. String annotations "
-    "are not expanded. Route decorators and module-level dependency declarations "
-    "are not scanned; FastAPI selector source ownership is not authenticated, so "
-    "no positive dependency binding is emitted."
+    "Handler signature candidates and supplied native app/router/include/route declarations "
+    "are recorded as source uncertainties only. Native route association, FastAPI selector "
+    "ownership, provider execution, and transfer are not independently authenticated. "
+    "String annotations and handler-body declarations are not expanded; no positive "
+    "dependency binding is emitted."
 )
 
 
@@ -592,6 +599,7 @@ def _dependency_uncertainty_key(item: SourceDependencyUncertainty) -> tuple[Any,
         item.span.end_column,
         item.reason_code,
         item.source_spelling,
+        item.scope,
     )
 
 
@@ -662,6 +670,129 @@ def _dependency_source_uncertainties(
     return tuple(sorted(output, key=_dependency_uncertainty_key))
 
 
+def _route_dependency_groups(
+    endpoint: Endpoint,
+) -> tuple[tuple[str, tuple[NativeRouteDependencyExpressionEvidence, ...]], ...]:
+    provenance = endpoint.native_provenance
+    if provenance is None:
+        return ()
+    if len(provenance.object_chain) > 256 or len(provenance.assembly_chain) > 256:
+        raise TypedGraphBridgeError("route dependency provenance exceeds chain budget")
+    groups: list[tuple[str, tuple[NativeRouteDependencyExpressionEvidence, ...]]] = [
+        ("route", provenance.registration.dependency_expressions)
+    ]
+    groups.extend(
+        (node.object_kind, node.dependency_expressions) for node in provenance.object_chain
+    )
+    for edge in provenance.assembly_chain:
+        if edge.operation != "include_router" and edge.dependency_expressions:
+            raise TypedGraphBridgeError("route dependency assembly scope is unsupported")
+        groups.append(("include", edge.dependency_expressions))
+    return tuple(groups)
+
+
+def _route_dependency_source_metadata(  # noqa: PLR0912, PLR0915
+    inventory: Any,
+    endpoints: tuple[Endpoint, ...],
+    bindings: tuple[EndpointOccurrenceBinding, ...],
+    source_snapshots: dict[str, bytes],
+) -> tuple[tuple[SourceDependencyDeclarationSite, ...], tuple[SourceDependencyUncertainty, ...]]:
+    """Retain supplied native declaration sites without proving route transfer."""
+    by_occurrence = {item.occurrence_id: item for item in bindings}
+    if len(by_occurrence) != len(bindings) or len(endpoints) != len(bindings):
+        raise TypedGraphBridgeError("endpoint occurrence bindings are incomplete or duplicated")
+    if len(inventory.files) > 4096:
+        raise TypedGraphBridgeError("route dependency source inventory exceeds file budget")
+    records_by_path: dict[str, Any] = {}
+    modules: set[str] = set()
+    for record in inventory.files:
+        try:
+            path = str(Path(record.path).resolve())
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise TypedGraphBridgeError("route dependency source path is unresolved") from exc
+        if path in records_by_path or record.module in modules:
+            raise TypedGraphBridgeError("route dependency source identity is ambiguous")
+        records_by_path[path] = record
+        modules.add(record.module)
+
+    lines_by_module: dict[str, tuple[bytes, ...]] = {}
+    sites: dict[tuple[Any, ...], SourceDependencyDeclarationSite] = {}
+    rows: dict[tuple[Any, ...], SourceDependencyUncertainty] = {}
+    total = 0
+    for endpoint in endpoints:
+        owner = by_occurrence.get(_bridge_occurrence_id(endpoint))
+        if owner is None or owner.symbol != f"{endpoint.handler.module}.{endpoint.handler.name}":
+            raise TypedGraphBridgeError("route dependency lacks an exact endpoint occurrence")
+        endpoint_count = 0
+        for expected_scope, expressions in _route_dependency_groups(endpoint):
+            endpoint_count += len(expressions)
+            total += len(expressions)
+            if endpoint_count > _MAX_ROUTE_DEPENDENCY_EXPRESSIONS_PER_ENDPOINT:
+                raise TypedGraphBridgeError("route dependency metadata exceeds endpoint budget")
+            if total > _MAX_DEPENDENCY_METADATA:
+                raise TypedGraphBridgeError("route dependency metadata exceeds total budget")
+            for item in expressions:
+                provenance = endpoint.native_provenance
+                if (
+                    item.scope != expected_scope
+                    or provenance is None
+                    or item.side != provenance.side
+                ):
+                    raise TypedGraphBridgeError("route dependency provenance scope or side differs")
+                native_span = item.source_span
+                try:
+                    path = str(native_span.file_path.resolve())
+                except (OSError, RuntimeError, ValueError) as exc:
+                    raise TypedGraphBridgeError("route dependency span path is unresolved") from exc
+                record = records_by_path.get(path)
+                if record is None:
+                    raise TypedGraphBridgeError(
+                        "route dependency span is outside the source inventory"
+                    )
+                if record.module not in lines_by_module:
+                    raw = source_snapshots.get(record.module)
+                    if raw is None or hashlib.sha256(raw).hexdigest() != record.sha256:
+                        raise TypedGraphBridgeError(
+                            "route dependency source differs from retained snapshot"
+                        )
+                    lines_by_module[record.module] = tuple(raw.splitlines(keepends=True))
+                span = SourceSpan(
+                    record.module,
+                    path,
+                    record.sha256,
+                    native_span.start_line,
+                    native_span.start_column,
+                    native_span.end_line,
+                    native_span.end_column,
+                )
+                spelling = dependency_declaration_spelling(span, lines_by_module[record.module])
+                if spelling is None:
+                    raise TypedGraphBridgeError(
+                        "route dependency span is invalid or exceeds source budget"
+                    )
+                key = (
+                    owner.occurrence_id,
+                    owner.symbol,
+                    item.scope,
+                    span,
+                    spelling,
+                )
+                sites[key] = SourceDependencyDeclarationSite(
+                    owner.occurrence_id, owner.symbol, item.scope, span
+                )
+                rows[key] = SourceDependencyUncertainty(
+                    owner.occurrence_id,
+                    owner.symbol,
+                    span,
+                    "route_dependency_association_origin_and_transfer_unverified",
+                    spelling,
+                    item.scope,
+                )
+    return tuple(sorted(sites.values())), tuple(
+        sorted(rows.values(), key=_dependency_uncertainty_key)
+    )
+
+
 def build_shadow_graph(
     analyzer: MypyAnalyzer,
     inventory: Any,
@@ -671,8 +802,16 @@ def build_shadow_graph(
     typed, snapshots, config = retained_typed_build(analyzer, inventory)
     selected = tuple(endpoints)
     bindings = exact_handler_bindings(typed, inventory, selected)
-    uncertainties = _dependency_source_uncertainties(
+    signature_uncertainties = _dependency_source_uncertainties(
         typed, inventory, selected, bindings, snapshots
+    )
+    declaration_sites, route_uncertainties = _route_dependency_source_metadata(
+        inventory, selected, bindings, snapshots
+    )
+    if len(signature_uncertainties) + len(route_uncertainties) > _MAX_DEPENDENCY_METADATA:
+        raise TypedGraphBridgeError("combined dependency metadata exceeds row budget")
+    uncertainties = tuple(
+        sorted((*signature_uncertainties, *route_uncertainties), key=_dependency_uncertainty_key)
     )
     graph = build_typed_reverse_graph(
         inventory,
@@ -681,6 +820,7 @@ def build_shadow_graph(
         config_fingerprint=config,
         source_snapshots=snapshots,
         source_dependency_uncertainties=uncertainties,
+        source_dependency_declaration_sites=declaration_sites,
     )
     return replace(
         graph,
