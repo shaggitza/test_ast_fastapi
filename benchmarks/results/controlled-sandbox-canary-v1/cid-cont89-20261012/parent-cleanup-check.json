@@ -1,0 +1,39 @@
+{
+  "all_absent": true,
+  "checks": [
+    {
+      "case": "canary",
+      "exit_code": 1,
+      "field": "container_id",
+      "stderr": "Error response from daemon: No such container: f7b1ab99fd44a716e986950e1396547e64ee224514d36405c1b4ce4ab88e578e\n",
+      "stdout": "[]\n",
+      "value": "f7b1ab99fd44a716e986950e1396547e64ee224514d36405c1b4ce4ab88e578e"
+    },
+    {
+      "case": "canary",
+      "exit_code": 1,
+      "field": "container_name",
+      "stderr": "Error response from daemon: No such container: gh101-canary-60c016073e2bc860b813da28\n",
+      "stdout": "[]\n",
+      "value": "gh101-canary-60c016073e2bc860b813da28"
+    },
+    {
+      "case": "timeout",
+      "exit_code": 1,
+      "field": "container_id",
+      "stderr": "Error response from daemon: No such container: 8ff2cea980e98c55c1d3c12d24067a33c40cdf03e3e21d42603f1e5ba420c5ed\n",
+      "stdout": "[]\n",
+      "value": "8ff2cea980e98c55c1d3c12d24067a33c40cdf03e3e21d42603f1e5ba420c5ed"
+    },
+    {
+      "case": "timeout",
+      "exit_code": 1,
+      "field": "container_name",
+      "stderr": "Error response from daemon: No such container: gh101-canary-bf317fbc495aa4e7717cbd8c\n",
+      "stdout": "[]\n",
+      "value": "gh101-canary-bf317fbc495aa4e7717cbd8c"
+    }
+  ],
+  "observed_result_sha256": "63a60b12214f30718d47eb9ff62d1c2e1cbc4f441b463b56de26beba0e14182f",
+  "schema": "owned-container-absence-v1"
+}
