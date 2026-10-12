@@ -682,8 +682,7 @@ def test_conflicting_arguments_for_one_endpoint_context_fail_closed(tmp_path: Pa
 
 def test_shared_call_preserves_all_129_endpoint_invocation_contexts(tmp_path: Path) -> None:
     endpoints = [
-        _endpoint(tmp_path, f"handler_{index}", route=f"/route-{index}")
-        for index in range(129)
+        _endpoint(tmp_path, f"handler_{index}", route=f"/route-{index}") for index in range(129)
     ]
     loaded = _loaded(tmp_path / "effects.yaml")
     emit = loaded.document.contracts[0].model_copy(
@@ -732,8 +731,7 @@ def test_shared_call_preserves_all_129_endpoint_invocation_contexts(tmp_path: Pa
     }
     assert set(contexts_by_path) == set(expected_hashes)
     assert {
-        path: context.arguments[0].value_hashes[0]
-        for path, context in contexts_by_path.items()
+        path: context.arguments[0].value_hashes[0] for path, context in contexts_by_path.items()
     } == expected_hashes
     assert {
         path: context.resource_identity.value_hashes[0]
