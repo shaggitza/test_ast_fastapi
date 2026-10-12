@@ -5,7 +5,7 @@ inspects annotations and default expressions in each exact handler signature usi
 hash-authenticated source bytes and the retained typed argument nodes. It does not import or
 execute project source.
 
-Candidates with a finite Depends or Security spelling, including explicit import aliases, retain
+Candidates with a finite Depends or Security spelling, including explicit import aliases discovered across module-level control-flow suites, retain
 their physical call span and each owning route occurrence. The collector distinguishes missing or
 ambiguous typed calls, project-local shadows, unsupported argument binding, and provider identity
 that is not the exact function node in a retained project module symbol table.
@@ -17,8 +17,12 @@ emits no positive dependency binding and infers no invocation or execution. Stri
 not expanded. Route decorators, module-level dependency declarations, and handler bodies are
 outside this signature scan. These limits are recorded in graph limitations.
 
-The scan bounds syntax and typed nodes to 32,768 per handler, candidate calls to 64 per handler,
-and output rows to 8,192. Excess fails with TypedGraphBridgeError rather than truncating silently.
+Module import candidate discovery follows explicit if, try/except/else/finally, context-manager,
+loop and match suites while excluding function and class bodies. A selector alias remains a
+candidate across conflicting imports; this does not establish which binding exists at runtime.
+Module statements and import bindings each have a 32,768-item budget. The signature scan bounds
+syntax and typed nodes to 32,768 per handler, candidate calls to 64 per handler, and output rows
+to 8,192. Excess fails with TypedGraphBridgeError rather than truncating silently.
 If the host syntax parser cannot parse retained source accepted by the target mypy build, the
 collector records a handler-span parse-unavailable uncertainty and preserves the existing graph.
 

@@ -537,3 +537,93 @@ def test_signature_dependency_call_budget_is_enforced_before_return(monkeypatch:
     monkeypatch.setattr(graph_bridge, "_MAX_DEPENDENCY_CALLS_PER_HANDLER", 1)
     with pytest.raises(TypedGraphBridgeError, match="call budget"):
         graph_bridge._signature_dependency_calls(function, {})
+
+
+def test_module_scope_control_flow_imports_find_selectors_without_nested_leakage() -> None:
+    parsed = ast.parse(
+        "def helper():\n"
+        "    from fastapi import Depends as Nested\n"
+        "class Container:\n"
+        "    from fastapi import Security as ClassNested\n"
+        "try:\n"
+        "    from fastapi import Depends as Need\n"
+        "except ImportError:\n"
+        "    from fastapi.params import Depends as Need\n"
+    )
+    imports = graph_bridge._source_module_imports(parsed)
+    assert imports["Need"].rsplit(".", 1)[-1] == "Depends"
+    assert "Nested" not in imports
+    assert "ClassNested" not in imports
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "if flag:\n    from fastapi import Depends as Need\n"
+        "else:\n    from other import ordinary as Need\n",
+        "with manager:\n    from fastapi import Depends as Need\n",
+        "for item in items:\n    from fastapi import Depends as Need\n"
+        "else:\n    from other import ordinary as Need\n",
+        "while flag:\n    from other import ordinary as Need\n"
+        "else:\n    from fastapi import Depends as Need\n",
+        "match value:\n    case 0:\n        from fastapi import Depends as Need\n"
+        "    case _:\n        from other import ordinary as Need\n",
+        "try:\n    pass\n"
+        "except Exception:\n    pass\n"
+        "else:\n    from fastapi import Depends as Need\n"
+        "finally:\n    from other import ordinary as Need\n",
+    ],
+)
+def test_conditional_module_selector_alias_candidates_survive_conflicting_imports(
+    source: str,
+) -> None:
+    imports = graph_bridge._source_module_imports(ast.parse(source))
+    assert imports["Need"].rsplit(".", 1)[-1] == "Depends"
+
+
+def test_module_import_statement_budget_is_explicit(monkeypatch: Any) -> None:
+    parsed = ast.parse("import first\nimport second\n")
+    monkeypatch.setattr(graph_bridge, "_MAX_DEPENDENCY_IMPORT_STATEMENTS", 1)
+    with pytest.raises(TypedGraphBridgeError, match="statement budget"):
+        graph_bridge._source_module_imports(parsed)
+
+
+def test_module_import_alias_budget_is_explicit(monkeypatch: Any) -> None:
+    parsed = ast.parse("from fastapi import Depends as Need, Security as Guard")
+    monkeypatch.setattr(graph_bridge, "_MAX_DEPENDENCY_IMPORT_BINDINGS", 1)
+    with pytest.raises(TypedGraphBridgeError, match="alias budget"):
+        graph_bridge._source_module_imports(parsed)
+
+
+def test_try_imported_dependency_alias_is_retained_as_uncertainty(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "def provider() -> int: return 1\n"
+        "try:\n"
+        "    from fastapi import Depends as Need\n"
+        "except ImportError:\n"
+        "    from fastapi.params import Depends as Need\n"
+        "@app.get('/')\n"
+        "def handler(value: int = Need(dependency=provider)) -> int: return value\n",
+        encoding="utf-8",
+    )
+    inventory = build_source_inventory(tmp_path)
+    analyzer = MypyAnalyzer(app, module_root=tmp_path, source_inventory=inventory)
+    analyzer._ensure_mypy_built()
+
+    graph = build_shadow_graph(analyzer, inventory, [_endpoint(app, "app", line=9)])
+
+    assert graph.source_dependency_bindings == ()
+    rows = [row for row in graph.source_dependency_uncertainties if row.source_spelling == "Need"]
+    assert len(rows) == 1
+    line = app.read_text(encoding="utf-8").splitlines()[8]
+    assert rows[0].span.start_line == rows[0].span.end_line == 9
+    assert line[rows[0].span.start_column : rows[0].span.end_column] == "Need(dependency=provider)"
+    assert rows[0].reason_code in {
+        "fastapi_selector_origin_unverified",
+        "dependency_selector_identity_unverified",
+        "dependency_selector_typed_call_ambiguous",
+        "dependency_selector_typed_call_unavailable",
+    }

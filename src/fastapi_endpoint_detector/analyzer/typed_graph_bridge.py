@@ -7,7 +7,7 @@ import hashlib
 import json
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from mypy.nodes import ARG_NAMED, ARG_POS, CallExpr, Decorator, FuncDef
 from mypy.server.update import FineGrainedBuildManager
@@ -304,6 +304,8 @@ _DEPENDENCY_SELECTORS = frozenset(
 )
 _DEPENDENCY_SPELLINGS = frozenset({"Depends", "Security"})
 _MAX_DEPENDENCY_AST_NODES = 32768
+_MAX_DEPENDENCY_IMPORT_STATEMENTS = 32768
+_MAX_DEPENDENCY_IMPORT_BINDINGS = 32768
 _MAX_DEPENDENCY_CALLS_PER_HANDLER = 64
 _MAX_DEPENDENCY_TYPED_NODES = 32768
 _MAX_DEPENDENCY_METADATA = 8192
@@ -381,15 +383,65 @@ def _dependency_spelling(expression: ast.expr, imports: dict[str, str]) -> str |
     return None
 
 
+def _module_import_suites(statement: ast.stmt) -> tuple[list[ast.stmt], ...]:
+    """Return only suites that execute in the surrounding module scope."""
+    if isinstance(statement, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+        return statement.body, statement.orelse
+    if isinstance(statement, (ast.With, ast.AsyncWith)):
+        return (statement.body,)
+    if isinstance(statement, (ast.Try, getattr(ast, "TryStar", ast.Try))):
+        # TryStar shares suite fields; this cast supports Python 3.10 typing.
+        try_statement = cast("ast.Try", statement)
+        return (
+            try_statement.body,
+            *(handler.body for handler in try_statement.handlers),
+            try_statement.orelse,
+            try_statement.finalbody,
+        )
+    if isinstance(statement, ast.Match):
+        return tuple(case.body for case in statement.cases)
+    return ()
+
+
 def _source_module_imports(parsed: ast.Module) -> dict[str, str]:
+    """Collect selector alias candidates across bounded module-level suites."""
     imports: dict[str, str] = {}
-    for statement in parsed.body:
+    if len(parsed.body) > _MAX_DEPENDENCY_IMPORT_STATEMENTS:
+        raise TypedGraphBridgeError("dependency module imports exceed statement budget")
+    pending = list(reversed(parsed.body))
+    seen: set[int] = set()
+    alias_count = 0
+
+    def remember(name: str, target: str) -> None:
+        nonlocal alias_count
+        alias_count += 1
+        if alias_count > _MAX_DEPENDENCY_IMPORT_BINDINGS:
+            raise TypedGraphBridgeError("dependency module imports exceed alias budget")
+        previous = imports.get(name)
+        # This table discovers candidates, not established runtime bindings.
+        # Retain a selector spelling across conflicting branch imports.
+        if previous is None or previous.rsplit(".", 1)[-1] not in _DEPENDENCY_SPELLINGS:
+            imports[name] = target
+
+    while pending:
+        statement = pending.pop()
+        if id(statement) in seen:
+            continue
+        seen.add(id(statement))
+        if len(seen) > _MAX_DEPENDENCY_IMPORT_STATEMENTS:
+            raise TypedGraphBridgeError("dependency module imports exceed statement budget")
         if isinstance(statement, ast.ImportFrom):
             for item in statement.names:
-                imports[item.asname or item.name] = f"{statement.module or ''}.{item.name}"
+                remember(item.asname or item.name, f"{statement.module or ''}.{item.name}")
         elif isinstance(statement, ast.Import):
             for item in statement.names:
-                imports[item.asname or item.name.split(".", 1)[0]] = item.name
+                remember(item.asname or item.name.split(".", 1)[0], item.name)
+
+        # Function and class bodies start a different lexical scope.
+        for suite in reversed(_module_import_suites(statement)):
+            if len(seen) + len(pending) + len(suite) > _MAX_DEPENDENCY_IMPORT_STATEMENTS:
+                raise TypedGraphBridgeError("dependency module imports exceed statement budget")
+            pending.extend(reversed(suite))
     return imports
 
 
