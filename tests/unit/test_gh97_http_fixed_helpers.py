@@ -461,6 +461,7 @@ def test_extraction_uses_verified_snapshot_after_wheel_path_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original = PACKAGES["requests"]["wheel"]
+    _require_or_skip_wheel(original, "requests")
     snapshot = _verified_wheel_bytes("requests")
     replacement = tmp_path / "requests.whl"
     replacement.write_bytes(b"changed after snapshot")
