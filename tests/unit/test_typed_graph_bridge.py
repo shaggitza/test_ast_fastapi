@@ -473,7 +473,7 @@ def test_dependency_candidates_keep_route_occurrences_and_call_spans(
     excerpts = {line[row.span.start_column : row.span.end_column] for row in rows}
     assert "Need(dependency=first)" in excerpts
     assert "Guard(second, scopes=['x'])" in excerpts
-    assert any("selector source ownership" in item for item in graph.limitations)
+    assert any("FastAPI selector ownership" in item for item in graph.limitations)
 
 
 def test_project_local_depends_spelling_is_reported_as_shadow(tmp_path: Path) -> None:

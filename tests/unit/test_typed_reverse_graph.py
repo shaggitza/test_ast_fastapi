@@ -14,12 +14,16 @@ from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildConfig, Myp
 from fastapi_endpoint_detector.analyzer.typed_graph_bridge import seeds_for_changed_lines
 from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
+    EdgeWitness,
     EndpointOccurrenceBinding,
     SourceDependencyBinding,
     SourceDependencyUncertainty,
     SourceSpan,
+    Symbol,
     TraversalBudgets,
     TypedGraphCache,
+    TypedReverseGraph,
+    UncertaintyWitness,
     build_typed_reverse_graph,
     seeds_for_changed_coordinates,
 )
@@ -126,6 +130,75 @@ def test_snapshot_graph_preserves_reconvergent_physical_paths_and_occurrences(
     assert {item.occurrence.occurrence_id for item in occurrence_result.evidence} == {"route-a"}
     assert {len(item.witnesses) for item in result.evidence} == {2}
     assert not result.incomplete.capped
+
+
+def test_occurrence_scoped_uncertainty_does_not_cap_other_seed_occurrence() -> None:
+    span = SourceSpan("app", "/app.py", "0" * 64, 1, 0, 1, 1)
+
+    def edge(witness_id: str, caller: str, callee: str) -> EdgeWitness:
+        return EdgeWitness(
+            witness_id,
+            caller,
+            callee,
+            "call",
+            span,
+            None,
+            "HIGH",
+            "function",
+            "executed",
+            "invocation",
+            "direct_call",
+        )
+
+    graph = TypedReverseGraph(
+        schema_version=8,
+        root="/",
+        inventory_fingerprint="inventory",
+        source_hashes=(),
+        engine="mypy",
+        engine_version="1",
+        config_fingerprint="config",
+        graph_provenance="test",
+        symbols=(
+            Symbol("app", "handler_a", "function", span),
+            Symbol("app", "handler_b", "function", span),
+            Symbol("app", "changed", "function", span),
+            Symbol("app", "parent_a1", "function", span),
+            Symbol("app", "parent_a2", "function", span),
+        ),
+        edges=(
+            edge("changed-b", "handler_b", "changed"),
+            edge("a1", "parent_a1", "handler_a"),
+            edge("a2", "parent_a2", "handler_a"),
+        ),
+        endpoint_bindings=(
+            EndpointOccurrenceBinding("occ-a", "GET /a", "handler_a", span),
+            EndpointOccurrenceBinding("occ-b", "GET /b", "handler_b", span),
+        ),
+        uncertainties=(
+            UncertaintyWitness(
+                "unc-a",
+                "handler_a",
+                span,
+                "dependency_injection",
+                "unresolved_dependency",
+                "Depends",
+                "occ-a",
+            ),
+        ),
+    )
+
+    result = graph.query(
+        [ChangedSeed("target", "changed", occurrence_id="occ-b")],
+        side="target",
+        budgets=TraversalBudgets(frontier=1),
+    )
+
+    assert not result.incomplete.capped
+    assert [(item.occurrence.occurrence_id, item.confidence) for item in result.evidence] == [
+        ("occ-b", "HIGH")
+    ]
+    assert result.uncertain_evidence == ()
 
 
 def test_global_relations_and_lambda_execution_state_are_distinct(tmp_path: Path) -> None:

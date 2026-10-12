@@ -405,6 +405,12 @@ class TypedReverseGraph:
             for uncertainty in self.uncertainties:
                 if uncertainty.category == "effect_summary":
                     continue
+                if (
+                    seed.occurrence_id
+                    and uncertainty.occurrence_id
+                    and seed.occurrence_id != uncertainty.occurrence_id
+                ):
+                    continue
                 uncertainty_queue: deque[tuple[str, tuple[EdgeWitness, ...], frozenset[str]]] = (
                     deque([(uncertainty.owner, (), frozenset({uncertainty.owner}))])
                 )
