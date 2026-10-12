@@ -162,6 +162,7 @@ def _has_fixed_length_framing(response: Any, expected_size: int) -> bool:
     transfers = response.headers.get_all("Transfer-Encoding", [])
     return (
         len(lengths) == 1
+        and len(lengths[0]) <= len(str(MAX_ROW_BYTES))
         and lengths[0].isascii()
         and lengths[0].isdecimal()
         and int(lengths[0]) == expected_size
@@ -190,9 +191,7 @@ def _requires_unavailable_framing(
     response: Any, byte_budget: int, expected_size: int, framed: bool
 ) -> bool:
     return (
-        type(response) is http.client.HTTPResponse
-        and byte_budget == expected_size
-        and not framed
+        type(response) is http.client.HTTPResponse and byte_budget == expected_size and not framed
     )
 
 
@@ -251,9 +250,7 @@ def _fetch(
                     MAX_ROW_BYTES + 1 - len(body),
                 )
                 if room <= 0:
-                    _verify_budget_boundary(
-                        response, len(body), expected_size, byte_budget, framed
-                    )
+                    _verify_budget_boundary(response, len(body), expected_size, byte_budget, framed)
                     break
                 chunk = _read_response_chunk(response, room, body)
                 if not chunk:

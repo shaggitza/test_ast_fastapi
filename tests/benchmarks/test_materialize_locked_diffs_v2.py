@@ -53,9 +53,7 @@ class _Response:
         return result
 
 
-def _local_http_response(
-    payload: bytes, url: str, headers: bytes
-) -> http.client.HTTPResponse:
+def _local_http_response(payload: bytes, url: str, headers: bytes) -> http.client.HTTPResponse:
     raw = b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + payload
 
     class _Socket:
@@ -209,17 +207,14 @@ def test_fetch_exact_budget_accepts_only_completed_fixed_length_response(
         (b"ab", b"Content-Length: 3\r\n", False),
         (b"abc", b"Content-Length: 3\r\nContent-Length: 3\r\n", False),
         (b"abc", b"Content-Length: 3, 3\r\n", False),
+        (b"abc", b"Content-Length: " + b"9" * 5000 + b"\r\n", False),
         (b"abc", b"Content-Length: 3\r\nTransfer-Encoding: chunked\r\n", False),
     ]
     for payload, framing, succeeds in cases:
-        response = _local_http_response(
-            payload, url, b"Content-Type: text/plain\r\n" + framing
-        )
+        response = _local_http_response(payload, url, b"Content-Type: text/plain\r\n" + framing)
         monkeypatch.setattr(urllib.request, "build_opener", lambda *_args, r=response: _Opener(r))
         if succeeds:
-            body, _ = collector._fetch(
-                url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 3
-            )
+            body, _ = collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 3)
             assert body == b"abc"
             assert response.fp is None
             assert response.length == 0
