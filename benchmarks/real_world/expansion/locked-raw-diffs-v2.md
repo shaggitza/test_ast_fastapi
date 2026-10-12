@@ -26,6 +26,10 @@ row missing with its fetched bytes still charged. Expiration during final receip
 publication may prevent a receipt from being written. Collection requires the
 POSIX main thread and refuses to start while the caller has an active
 `ITIMER_REAL`/`SIGALRM` timer, preserving that caller handler and timer unchanged.
+If publication expires before its private temporary file can be removed, the
+collector leaves that incomplete, mode-0600 `.raw-diff-*` file in place. It does
+not report a successful publication or treat the temporary as a blob or receipt;
+these deferred cleanup files are not automatically swept by a later run.
 Failures include a structured
 `failure_class`; HTTP failures also include numeric `http_status` without
 recording response headers. Bytes returned by a successful fetch are charged

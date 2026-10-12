@@ -138,16 +138,28 @@ def _publish(dirfd: int, name: str, body: bytes) -> None:
         dir_fd=dirfd,
     )
     try:
-        with os.fdopen(fd, "wb") as out:
-            out.write(body)
-            out.flush()
-            os.fsync(out.fileno())
+        view = memoryview(body)
+        written = 0
+        while written < len(view):
+            count = os.write(fd, view[written:])
+            if count <= 0:
+                raise OSError("temporary file write made no progress")
+            written += count
+        os.fsync(fd)
         os.link(temp_name, name, src_dir_fd=dirfd, dst_dir_fd=dirfd, follow_symlinks=False)
         os.fsync(dirfd)
     except FileExistsError as exc:
         raise protocol.CorpusV2Error(f"refusing to overwrite existing cache entry: {name}") from exc
     finally:
-        os.unlink(temp_name, dir_fd=dirfd)
+        try:
+            os.close(fd)
+        finally:
+            deadline = _deadline_at
+            if deadline is None:
+                os.unlink(temp_name, dir_fd=dirfd)
+            elif time.monotonic() < deadline:
+                with _wall_deadline(deadline):
+                    os.unlink(temp_name, dir_fd=dirfd)
 
 
 def _read_blob(dirfd: int, name: str, expected_size: int, expected_hash: str) -> None:

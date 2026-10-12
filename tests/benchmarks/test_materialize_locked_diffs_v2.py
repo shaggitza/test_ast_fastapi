@@ -261,6 +261,87 @@ def test_deadline_interrupts_blocking_cache_io(
     assert time.monotonic() - started < 0.5
 
 
+@pytest.mark.parametrize("blocked_operation", ["write", "fsync"])
+def test_publish_expiry_skips_temporary_unlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_operation: str
+) -> None:
+    rootfd = collector._open_dir_chain(tmp_path, create=False)
+    original = getattr(os, blocked_operation)
+    unlink_calls: list[str] = []
+
+    def blocked(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(os, blocked_operation, blocked)
+    original_unlink = os.unlink
+
+    def record_unlink(path: str, **kwargs: Any) -> None:
+        unlink_calls.append(path)
+        original_unlink(path, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", record_unlink)
+    started = time.monotonic()
+    try:
+        with (
+            pytest.raises(collector.CollectionFailure, match="wall-clock limit"),
+            collector._wall_deadline(started + 0.05),
+        ):
+            collector._publish(rootfd, "receipt.json", b"private content")
+    finally:
+        os.close(rootfd)
+    assert time.monotonic() - started < 0.5
+    assert unlink_calls == []
+    assert not (tmp_path / "receipt.json").exists()
+    leftovers = list(tmp_path.glob(".raw-diff-*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].stat().st_mode & 0o777 == 0o600
+
+
+def test_publish_bounds_unlink_with_remaining_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rootfd = collector._open_dir_chain(tmp_path, create=False)
+    original_unlink = os.unlink
+
+    def blocked_unlink(path: str, **kwargs: Any) -> None:
+        time.sleep(1)
+        original_unlink(path, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", blocked_unlink)
+    started = time.monotonic()
+    try:
+        with (
+            pytest.raises(collector.CollectionFailure, match="wall-clock limit"),
+            collector._wall_deadline(started + 0.05),
+        ):
+            collector._publish(rootfd, "receipt.json", b"complete")
+    finally:
+        os.close(rootfd)
+    assert time.monotonic() - started < 0.5
+
+
+def test_publish_retries_partial_unbuffered_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rootfd = collector._open_dir_chain(tmp_path, create=False)
+    original_write = os.write
+    calls = 0
+
+    def partial_write(fd: int, data: Any) -> int:
+        nonlocal calls
+        calls += 1
+        return original_write(fd, data[:2])
+
+    monkeypatch.setattr(os, "write", partial_write)
+    try:
+        collector._publish(rootfd, "receipt.json", b"complete body")
+        assert (tmp_path / "receipt.json").read_bytes() == b"complete body"
+        assert calls > 1
+    finally:
+        os.close(rootfd)
+
+
 def test_fetch_never_reads_beyond_remaining_aggregate_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
