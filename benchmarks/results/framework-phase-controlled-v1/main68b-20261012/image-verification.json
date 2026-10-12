@@ -9,7 +9,7 @@
   "derived_sbom_sha256": "f25a3aabbd0460bd8dbad0059d080b067dceff10f29244f709111ba9a9f439ab",
   "dockerfile_sha256": "89229e58241e514451762836d71b8b0c36801788530be710c2d4b6ea8b20e763",
   "framework_contract_hash_method": "data-only YAML plus canonical JSON using declared serialized defaults; no product imports",
-  "framework_fastapi_on_event_contract_sha256": "sha256:4f0571c2e88052140fce50f61106591bb7a7dac3d5653f534e059efbb4c7179",
+  "framework_fastapi_on_event_contract_sha256": "sha256:4f0571c2e88052140fce50f61106591cb7a7dac3d5653f534e059febbb4c7179",
   "framework_preset_raw_sha256": "806c527790edbc251df635a417cbc7c7368112aea78b5c941dcb1bf00b4a1295",
   "gvisor_execution": "not performed",
   "image_id": "sha256:6cd983b64b21c18cb2a72afcc9b68cdaf9acdcd9bf35813f42641562f89ff4b0",
