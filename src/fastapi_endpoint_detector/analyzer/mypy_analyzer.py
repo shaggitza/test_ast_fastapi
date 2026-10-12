@@ -21,7 +21,7 @@ import stat
 import sys
 import tempfile
 import tokenize
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from email.parser import BytesParser
@@ -614,6 +614,168 @@ class _ExecutorSummary:
     control_keywords: frozenset[str] = frozenset()
 
 
+def _context_binding_census(body: Any, *, node_limit: int, item_limit: int) -> set[str] | None:
+    """Bound lexical binders without resolving or executing application calls."""
+    from types import GetSetDescriptorType, MemberDescriptorType
+
+    from mypy.nodes import (
+        Argument,
+        AssertStmt,
+        AssignmentExpr,
+        AssignmentStmt,
+        Block,
+        BreakStmt,
+        ClassDef,
+        ContinueStmt,
+        Decorator,
+        DelStmt,
+        ExpressionStmt,
+        ForStmt,
+        FuncDef,
+        GlobalDecl,
+        IfStmt,
+        Import,
+        ImportFrom,
+        ListExpr,
+        NameExpr,
+        Node,
+        NonlocalDecl,
+        OperatorAssignmentStmt,
+        PassStmt,
+        RaiseStmt,
+        ReturnStmt,
+        StarExpr,
+        Statement,
+        TryStmt,
+        TupleExpr,
+        WhileStmt,
+        WithStmt,
+    )
+
+    names: set[str] = set()
+    pending = [body]
+    seen: set[int] = set()
+    items = 0
+
+    def bind(target: Any) -> bool:
+        nonlocal items
+        targets = [target]
+        while targets:
+            current = targets.pop()
+            items += 1
+            if items > item_limit:
+                return False
+            if current is None:
+                continue
+            if isinstance(current, NameExpr):
+                names.add(current.name)
+            elif isinstance(current, (ListExpr, TupleExpr)):
+                if len(current.items) > item_limit - items:
+                    return False
+                targets.extend(current.items)
+            elif isinstance(current, StarExpr):
+                targets.append(current.expr)
+            else:
+                return False
+        return True
+
+    while pending:
+        item = pending.pop()
+        items += 1
+        if items > item_limit:
+            return None
+        if isinstance(item, (list, tuple)):
+            if len(item) > item_limit - items:
+                return None
+            pending.extend(item)
+            continue
+        if not isinstance(item, Node) or id(item) in seen:
+            continue
+        seen.add(id(item))
+        if len(seen) > node_limit:
+            return None
+        if isinstance(item, AssignmentStmt):
+            if not all(bind(target) for target in item.lvalues):
+                return None
+        elif isinstance(item, AssignmentExpr):
+            if not bind(item.target):
+                return None
+        elif isinstance(item, OperatorAssignmentStmt):
+            if not bind(item.lvalue):
+                return None
+        elif isinstance(item, DelStmt):
+            if not bind(item.expr):
+                return None
+        elif isinstance(item, ForStmt):
+            if not bind(item.index):
+                return None
+        elif isinstance(item, WithStmt):
+            if not all(bind(target) for target in item.target):
+                return None
+        elif isinstance(item, TryStmt):
+            if not all(bind(target) for target in item.vars):
+                return None
+        elif isinstance(item, (GlobalDecl, NonlocalDecl)):
+            if len(item.names) > item_limit - items:
+                return None
+            items += len(item.names)
+            names.update(item.names)
+        elif isinstance(item, (FuncDef, Decorator, ClassDef)):
+            names.add(item.name)
+        elif isinstance(item, Argument):
+            names.add(item.variable.name)
+        elif isinstance(item, Import):
+            if len(item.ids) > item_limit - items:
+                return None
+            items += len(item.ids)
+            names.update(alias or module.split(".")[0] for module, alias in item.ids)
+        elif isinstance(item, ImportFrom):
+            if len(item.names) > item_limit - items:
+                return None
+            items += len(item.names)
+            names.update(alias or name for name, alias in item.names)
+        elif isinstance(item, Statement) and not isinstance(
+            item,
+            (
+                AssertStmt,
+                Block,
+                BreakStmt,
+                ContinueStmt,
+                ExpressionStmt,
+                IfStmt,
+                PassStmt,
+                RaiseStmt,
+                ReturnStmt,
+                WhileStmt,
+            ),
+        ):
+            # Match patterns, import-star and unknown future binder forms abstain.
+            return None
+        fields = set(getattr(item, "__dict__", {}))
+        for cls in type(item).__mro__:
+            fields.update(
+                attribute
+                for attribute, descriptor in cls.__dict__.items()
+                if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
+            )
+        for attribute in fields:
+            if attribute.startswith("__") or attribute in {
+                "node",
+                "info",
+                "type",
+                "unanalyzed_type",
+                "analyzed",
+                "original_def",
+                "expanded",
+                "original_decorators",
+            }:
+                continue
+            child = getattr(item, attribute, None)
+            if isinstance(child, (Node, list, tuple)):
+                pending.append(child)
+    return names
+
+
 class MypyAnalyzer:
     """
     Analyze endpoint dependencies using mypy's type system.
@@ -626,7 +788,7 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-finally-partial-capture-v12-conditional-block-continuations"
+        "conditional-finally-partial-capture-v14-context-exit-aliases-imported-callable-source"
     )
     MAX_CONTROL_EXIT_STATES = 32
     MAX_LOOP_FLOW_PASSES = 4
@@ -646,7 +808,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 11
+    EXECUTION_SUMMARY_VERSION = 13
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -744,6 +906,7 @@ class MypyAnalyzer:
             str, dict[tuple[str, int, int], tuple[ast.Lambda, ...]] | None
         ] = {}
         self._resolved_call_site_cache: dict[int, ResolvedCallSite | None] = {}
+        self._imported_callable_mutation_cache: dict[str, bool] = {}
         self._finite_global_value_cache: dict[str, _FinitePointsTo | None] = {}
         self._finite_global_in_progress: set[str] = set()
         self._exact_project_identity_cache: dict[str, tuple[str, str] | None] = {}
@@ -1261,6 +1424,8 @@ class MypyAnalyzer:
                 (key, repr(getattr(built_options, key))) for key in sorted(option_fields)
             )
             analyzed_source_hashes: dict[str, str] = {}
+            typed_source_snapshots: dict[str, bytes | None] = {}
+            typed_source_snapshot_bytes = 0
             scanned_metadata_roots: set[Path] = set()
             authenticated_metadata_hashes: dict[str, str] = {}
             parsed_top_levels_by_root: dict[Path, set[str]] = {}
@@ -1312,6 +1477,21 @@ class MypyAnalyzer:
                             # The module remains useful for type resolution, but
                             # unreadable bytes cannot authenticate package evidence.
                             vendor_bytes = None
+                        try:
+                            source_file.relative_to(self.source_root)
+                        except ValueError:
+                            pass
+                        else:
+                            typed_source_snapshots[state_path] = None
+                            if (
+                                vendor_bytes is not None
+                                and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
+                                and len(vendor_bytes) <= self.MAX_LAMBDA_SOURCE_FILE_BYTES
+                                and typed_source_snapshot_bytes + len(vendor_bytes)
+                                <= self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+                            ):
+                                typed_source_snapshots[state_path] = vendor_bytes
+                                typed_source_snapshot_bytes += len(vendor_bytes)
                         if vendor_bytes is not None:
                             parts = module_name.split(".")
                             package_root = source_file.parent
@@ -1521,6 +1701,22 @@ class MypyAnalyzer:
                     or retained_bytes + len(snapshot) > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
                     or self._decode_analysis_source(snapshot) is None
                 ):
+                    self._analysis_source_snapshots[canonical] = None
+                    continue
+                self._analysis_source_snapshots[canonical] = snapshot
+                retained_bytes += len(snapshot)
+            # Imported project stubs are not part of the .py source inventory,
+            # but mypy still parsed them. Preserve their bytes only when the
+            # captured bytes match mypy's parsed digest. This keeps later source
+            # guards tied to the build even if package applicability is
+            # invalidated by a subsequent metadata snapshot.
+            for canonical, snapshot in typed_source_snapshots.items():
+                if canonical in self._analysis_source_snapshots:
+                    continue
+                if snapshot is None:
+                    self._analysis_source_snapshots[canonical] = None
+                    continue
+                if retained_bytes + len(snapshot) > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES:
                     self._analysis_source_snapshots[canonical] = None
                     continue
                 self._analysis_source_snapshots[canonical] = snapshot
@@ -1762,6 +1958,7 @@ class MypyAnalyzer:
         self._python_ast_nodes_cache.clear()
         self._python_verified_call_spans.clear()
         self._python_call_span_abstained.clear()
+        self._imported_callable_mutation_cache.clear()
         self._call_source_snapshot_cache.clear()
         self._source_bytes_cache.clear()
         if clear_source_records:
@@ -3509,6 +3706,834 @@ class MypyAnalyzer:
             receiver = MypyAnalyzer._explicit_import_fullname(expression.expr, import_map)
             return f"{receiver}.{expression.name}" if receiver is not None else None
         return None
+
+    def _source_callable_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
+        """Follow source-visible re-exports for a call target, including dependencies."""
+        visited: set[str] = set()
+        current = fullname
+        for _depth in range(self.max_depth + 1):
+            if current in visited:
+                return None
+            visited.add(current)
+            resolved = self._resolve_fullname_to_file(current)
+            if resolved is None:
+                return None
+            _path, module = resolved
+            tree = self._trees.get(module)
+            if tree is None or not current.startswith(f"{module}."):
+                return None
+            qualified = current[len(module) + 1 :]
+            if "." in qualified:
+                return None
+            symbol = tree.names.get(qualified)
+            if symbol is not None:
+                declaration = self._callable_declaration(symbol.node)
+                if declaration is not None:
+                    return declaration
+            reexport = self._import_map_for_tree(tree, module).get(qualified)
+            if reexport is None:
+                return None
+            current = reexport
+        return None
+
+    def _imported_callable_is_mutated(self, fullname: str) -> bool:
+        """Fail closed when analyzed source rebinds an imported callable or module."""
+        cached = self._imported_callable_mutation_cache.get(fullname)
+        if cached is not None:
+            return cached
+
+        def imported_path(expression: ast.expr, aliases: dict[str, str]) -> str | None:
+            if isinstance(expression, ast.Name):
+                return aliases.get(expression.id)
+            if isinstance(expression, ast.Attribute):
+                receiver = imported_path(expression.value, aliases)
+                if receiver == "*":
+                    return "*"
+                return f"{receiver}.{expression.attr}" if receiver else None
+            return None
+
+        def module_aliases(nodes: Sequence[ast.AST], module_name: str) -> dict[str, str]:
+            aliases: dict[str, str] = {}
+            package = module_name.rpartition(".")[0].split(".") if "." in module_name else []
+
+            def bind(local: str, imported: str) -> None:
+                previous = aliases.get(local)
+                aliases[local] = imported if previous in {None, imported} else "*"
+
+            for statement in nodes:
+                if isinstance(statement, ast.Import):
+                    for item in statement.names:
+                        local = item.asname or item.name.split(".")[0]
+                        bind(local, item.name if item.asname else item.name.split(".")[0])
+                elif isinstance(statement, ast.ImportFrom):
+                    imported = statement.module or ""
+                    if statement.level:
+                        parent = package[: max(0, len(package) - statement.level + 1)]
+                        imported = ".".join([*parent, imported] if imported else parent)
+                    for item in statement.names:
+                        if item.name != "*":
+                            bind(item.asname or item.name, f"{imported}.{item.name}".strip("."))
+                elif isinstance(statement, (ast.Assign, ast.AnnAssign)):
+                    value = statement.value
+                    resolved = imported_path(value, aliases) if value is not None else None
+                    targets = (
+                        statement.targets
+                        if isinstance(statement, ast.Assign)
+                        else [statement.target]
+                    )
+                    if resolved is not None:
+                        for target in targets:
+                            if isinstance(target, ast.Name):
+                                bind(target.id, resolved)
+
+            return aliases
+
+        def scoped_import_aliases(
+            tree: ast.Module, module_name: str
+        ) -> tuple[
+            dict[str, str],
+            dict[tuple[str, int], list[tuple[int, int, str, str | None]]],
+        ]:
+            """Record ordered function-local import and rebinding events."""
+            aliases: dict[str, str] = {}
+            events_by_scope: dict[tuple[str, int], list[tuple[int, int, str, str | None]]] = {}
+            package = module_name.rpartition(".")[0].split(".") if "." in module_name else []
+
+            class Imports(ast.NodeVisitor):
+                def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                    self._scope(node)
+
+                def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                    self._scope(node)
+
+                def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                    for statement in node.body:
+                        self.visit(statement)
+
+                def _scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+                    events: list[tuple[int, int, str, str | None]] = []
+
+                    def record(statement: ast.AST, local: str, imported: str | None) -> None:
+                        events.append(
+                            (
+                                getattr(statement, "lineno", 0),
+                                getattr(statement, "col_offset", 0),
+                                local,
+                                imported,
+                            )
+                        )
+                        if imported is not None:
+                            prior = aliases.get(local)
+                            aliases[local] = imported if prior in {None, imported} else "*"
+
+                    class LocalImports(ast.NodeVisitor):
+                        def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                            if child is node:
+                                self.generic_visit(child)
+
+                        def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                            if child is node:
+                                self.generic_visit(child)
+
+                        def visit_Lambda(self, child: ast.Lambda) -> None:
+                            return
+
+                        def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                            return
+
+                        def visit_Import(self, child: ast.Import) -> None:
+                            for item in child.names:
+                                local = item.asname or item.name.split(".")[0]
+                                record(
+                                    child,
+                                    local,
+                                    item.name if item.asname else item.name.split(".")[0],
+                                )
+
+                        def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
+                            imported = child.module or ""
+                            if child.level:
+                                parent = package[: max(0, len(package) - child.level + 1)]
+                                imported = ".".join([*parent, imported] if imported else parent)
+                            for item in child.names:
+                                if item.name != "*":
+                                    record(
+                                        child,
+                                        item.asname or item.name,
+                                        f"{imported}.{item.name}".strip("."),
+                                    )
+
+                        def _record_targets(
+                            self, child: ast.AST, targets: Sequence[ast.AST]
+                        ) -> None:
+                            for target in targets:
+                                for name in ast.walk(target):
+                                    if isinstance(name, ast.Name) and isinstance(
+                                        name.ctx, ast.Store
+                                    ):
+                                        record(child, name.id, None)
+
+                        def visit_Assign(self, child: ast.Assign) -> None:
+                            self._record_targets(child, child.targets)
+                            self.generic_visit(child)
+
+                        def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+                            self._record_targets(child, [child.target])
+                            self.generic_visit(child)
+
+                        def visit_AugAssign(self, child: ast.AugAssign) -> None:
+                            self._record_targets(child, [child.target])
+                            self.generic_visit(child)
+
+                        def visit_NamedExpr(self, child: ast.NamedExpr) -> None:
+                            self._record_targets(child, [child.target])
+                            self.generic_visit(child)
+
+                        def visit_Delete(self, child: ast.Delete) -> None:
+                            for target in child.targets:
+                                for name in ast.walk(target):
+                                    if isinstance(name, ast.Name):
+                                        record(child, name.id, None)
+
+                    scanner = LocalImports()
+                    for statement in node.body:
+                        scanner.visit(statement)
+                    scope = (node.name, node.lineno)
+                    events_by_scope[scope] = sorted(events)
+
+                    for child in node.body:
+                        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            self.visit(child)
+                        else:
+                            for nested in ast.iter_child_nodes(child):
+                                if isinstance(
+                                    nested,
+                                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                                ):
+                                    self.visit(nested)
+
+            Imports().visit(tree)
+            return aliases, events_by_scope
+
+        def target_is_mutation(
+            target: ast.expr, aliases: dict[str, str], imported_names: set[str]
+        ) -> bool:
+            path = imported_path(target, aliases)
+            if path is None:
+                if (
+                    isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Attribute)
+                    and target.value.attr == "__dict__"
+                ):
+                    receiver = imported_path(target.value.value, aliases)
+                    if receiver and fullname.startswith(f"{receiver}."):
+                        key = target.slice
+                        return not (
+                            isinstance(key, ast.Constant)
+                            and isinstance(key.value, str)
+                            and not fullname.startswith(f"{receiver}.{key.value}.")
+                            and fullname != f"{receiver}.{key.value}"
+                        )
+                return False
+            if path == "*":
+                return True
+            declaration = self._source_callable_declaration(path)
+            if declaration is not None:
+                return declaration[0] == fullname
+            if isinstance(target, ast.Name):
+                resolved_module = self._resolve_fullname_to_file(path)
+                if resolved_module is not None and resolved_module[1] == path:
+                    # Assigning a fresh alias (api = client) does not rebind the
+                    # original imported module name. Direct import-name rebinding
+                    # remains a conservative ownership failure.
+                    return target.id in imported_names and fullname.startswith(f"{path}.")
+            return fullname.startswith(f"{path}.") or path == fullname
+
+        def is_imported_module_expression(expression: ast.AST, aliases: dict[str, str]) -> bool:
+            """Recognize escaped module values without confusing calls with their receivers."""
+            pending = [expression]
+            visited = 0
+            while pending:
+                candidate = pending.pop()
+                visited += 1
+                if visited > self.MAX_CALL_SPAN_SOURCE_NODES:
+                    return True
+                if isinstance(candidate, (ast.Name, ast.Attribute)):
+                    path = imported_path(candidate, aliases)
+                    if path == "*":
+                        return True
+                    if path is None:
+                        if isinstance(candidate, ast.Attribute):
+                            if len(pending) >= self.MAX_CALL_SPAN_SOURCE_NODES - visited:
+                                return True
+                            pending.append(candidate.value)
+                        continue
+                    if path == "sys.modules":
+                        return True
+                    if isinstance(candidate, ast.Attribute) and candidate.attr == "__dict__":
+                        owner = imported_path(candidate.value, aliases)
+                        resolved_owner = self._resolve_fullname_to_file(owner) if owner else None
+                        if resolved_owner is not None and resolved_owner[1] == owner:
+                            return True
+                    resolved = self._resolve_fullname_to_file(path)
+                    if resolved is not None and resolved[1] == path:
+                        return True
+                    continue
+                if isinstance(candidate, ast.Call):
+                    callee = imported_path(candidate.func, aliases)
+                    if callee in {
+                        "importlib.import_module",
+                        "importlib.util.module_from_spec",
+                        "importlib.reload",
+                        "builtins.__import__",
+                    } or (
+                        isinstance(candidate.func, ast.Name) and candidate.func.id == "__import__"
+                    ):
+                        return True
+                    # An imported receiver nested in a call does not establish
+                    # that the call result is a module. Module arguments are
+                    # checked separately by the escape scan below.
+                    continue
+                children: list[ast.AST] = []
+                if isinstance(candidate, (ast.Tuple, ast.List, ast.Set)):
+                    children.extend(candidate.elts)
+                elif isinstance(candidate, ast.Dict):
+                    children.extend(key for key in candidate.keys if key is not None)
+                    children.extend(candidate.values)
+                elif isinstance(candidate, ast.IfExp):
+                    children.extend((candidate.body, candidate.orelse))
+                elif isinstance(candidate, ast.BoolOp):
+                    children.extend(candidate.values)
+                elif isinstance(candidate, (ast.Starred, ast.NamedExpr, ast.Subscript)):
+                    children.append(candidate.value)
+                elif isinstance(candidate, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                    children.append(candidate.elt)
+                elif isinstance(candidate, ast.DictComp):
+                    children.extend((candidate.key, candidate.value))
+                elif isinstance(candidate, ast.Lambda):
+                    children.append(candidate.body)
+                if len(children) + len(pending) > self.MAX_CALL_SPAN_SOURCE_NODES - visited:
+                    return True
+                pending.extend(children)
+            return False
+
+        found_mutation = False
+        uncertain = False
+
+        class ScopeBindings(ast.NodeVisitor):
+            """Record lexical locals for the mutation scan, preserving outer bindings."""
+
+            def __init__(self, aliases: dict[str, str]) -> None:
+                self.shadowed: set[str] = set()
+                self.by_node: dict[int, frozenset[str]] = {}
+                self.global_names_by_node: dict[int, frozenset[str]] = {}
+                self.local_imports_by_node: dict[int, frozenset[str]] = {}
+                self.local_aliases_by_node: dict[int, dict[str, str]] = {}
+                self.class_local_store_targets: set[int] = set()
+                self.local_import_events_by_scope: dict[
+                    tuple[str, int], list[tuple[int, int, str, str | None]]
+                ] = {}
+                self._current_local_imports: frozenset[str] = frozenset()
+                self._current_local_aliases: dict[str, str] = {}
+                self._active_import_events: list[tuple[int, int, str, str | None]] = []
+                self._import_event_index = 0
+                self._local_alias_base: dict[str, str] = {}
+                self._current_global_names: frozenset[str] = frozenset()
+                self.unsupported_nonlocal = False
+                self.unsupported_module_alias = False
+                self.aliases = aliases
+
+            def visit(self, node: ast.AST) -> Any:
+                if self._active_import_events:
+                    position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+                    while self._import_event_index < len(self._active_import_events):
+                        line, column, name, imported = self._active_import_events[
+                            self._import_event_index
+                        ]
+                        if (line, column) > position:
+                            break
+                        if imported is None:
+                            self._current_local_aliases.pop(name, None)
+                        else:
+                            self._current_local_aliases[name] = imported
+                        self._import_event_index += 1
+                self.by_node[id(node)] = frozenset(self.shadowed)
+                self.global_names_by_node[id(node)] = self._current_global_names
+                self._current_local_imports = frozenset(self._current_local_aliases)
+                self.local_imports_by_node[id(node)] = self._current_local_imports
+                self.local_aliases_by_node[id(node)] = dict(self._current_local_aliases)
+                return super().visit(node)
+
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                self._visit_function_scope(node)
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+                self._visit_function_scope(node)
+
+            def _visit_function_scope(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+                self.by_node[id(node)] = frozenset(self.shadowed)
+                import_events = self.local_import_events_by_scope.get((node.name, node.lineno), [])
+                local_names: set[str] = {
+                    arg.arg
+                    for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+                }
+                global_names: set[str] = set()
+                if node.args.vararg is not None:
+                    local_names.add(node.args.vararg.arg)
+                if node.args.kwarg is not None:
+                    local_names.add(node.args.kwarg.arg)
+
+                class Bindings(ast.NodeVisitor):
+                    def visit_Name(self, child: ast.Name) -> None:
+                        if isinstance(child.ctx, ast.Store):
+                            local_names.add(child.id)
+
+                    def visit_Global(self, child: ast.Global) -> None:
+                        global_names.update(child.names)
+
+                    def visit_Nonlocal(self, child: ast.Nonlocal) -> None:
+                        local_names.difference_update(child.names)
+                        self_nonlocal[0] = True
+
+                    def visit_Import(self, child: ast.Import) -> None:
+                        local_names.update(
+                            item.asname or item.name.split(".")[0] for item in child.names
+                        )
+
+                    def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
+                        local_names.update(
+                            item.asname or item.name for item in child.names if item.name != "*"
+                        )
+
+                    def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_Assign(self, child: ast.Assign) -> None:
+                        if child.value is not None and is_imported_module_expression(
+                            child.value, self_aliases
+                        ):
+                            bindings_owner[0].unsupported_module_alias = True
+                        self.generic_visit(child)
+
+                    def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+                        if child.value is not None and is_imported_module_expression(
+                            child.value, self_aliases
+                        ):
+                            bindings_owner[0].unsupported_module_alias = True
+                        self.generic_visit(child)
+
+                    def visit_Lambda(self, child: ast.Lambda) -> None:
+                        return
+
+                    def visit_ListComp(self, child: ast.ListComp) -> None:
+                        return
+
+                    def visit_SetComp(self, child: ast.SetComp) -> None:
+                        return
+
+                    def visit_DictComp(self, child: ast.DictComp) -> None:
+                        return
+
+                    def visit_GeneratorExp(self, child: ast.GeneratorExp) -> None:
+                        return
+
+                self_nonlocal = [False]
+                bindings_owner = [self]
+                self_aliases = self.aliases
+                bindings = Bindings()
+                for statement in node.body:
+                    bindings.visit(statement)
+                local_names.difference_update(global_names)
+                if self_nonlocal[0]:
+                    self.unsupported_nonlocal = True
+                inherited_aliases = {
+                    name: imported
+                    for name, imported in self._current_local_aliases.items()
+                    if name not in local_names and name not in global_names
+                }
+                previous = self.shadowed
+                previous_imports: frozenset[str] = self._current_local_imports
+                previous_aliases = self._current_local_aliases
+                previous_events = self._active_import_events
+                previous_index = self._import_event_index
+                previous_base = self._local_alias_base
+                previous_globals = self._current_global_names
+                self._local_alias_base = inherited_aliases
+                self._current_local_aliases = dict(inherited_aliases)
+                self._active_import_events = import_events
+                self._import_event_index = 0
+                self._current_global_names = frozenset(global_names)
+                self.shadowed = (previous - global_names) | local_names
+                for statement in node.body:
+                    self.visit(statement)
+                    self.shadowed = (previous - global_names) | local_names
+                self.shadowed = previous
+                self._current_local_imports = previous_imports
+                self._current_local_aliases = previous_aliases
+                self._active_import_events = previous_events
+                self._import_event_index = previous_index
+                self._local_alias_base = previous_base
+                self._current_global_names = previous_globals
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.by_node[id(node)] = frozenset(self.shadowed)
+                local_names: set[str] = set()
+                scope_owner = [self]
+                class_global_names: set[str] = set()
+
+                class GlobalNames(ast.NodeVisitor):
+                    def visit_Global(self, child: ast.Global) -> None:
+                        class_global_names.update(child.names)
+
+                    def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                        return
+
+                    def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                        return
+
+                    def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                        return
+
+                global_names = GlobalNames()
+                for statement in node.body:
+                    global_names.visit(statement)
+
+                class ClassBindings(ast.NodeVisitor):
+                    def visit_Name(self, child: ast.Name) -> None:
+                        if isinstance(child.ctx, ast.Store) and child.id not in class_global_names:
+                            local_names.add(child.id)
+                            scope_owner[0].class_local_store_targets.add(id(child))
+
+                    def visit_AnnAssign(self, child: ast.AnnAssign) -> None:
+                        # A bare annotation does not create a class namespace
+                        # value, so attribute assignment can fall back globally.
+                        if child.value is not None:
+                            self.generic_visit(child)
+
+                    def visit_Global(self, child: ast.Global) -> None:
+                        local_names.difference_update(child.names)
+
+                    def visit_FunctionDef(self, child: ast.FunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_AsyncFunctionDef(self, child: ast.AsyncFunctionDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_ClassDef(self, child: ast.ClassDef) -> None:
+                        local_names.add(child.name)
+
+                    def visit_Import(self, child: ast.Import) -> None:
+                        local_names.update(
+                            item.asname or item.name.split(".")[0] for item in child.names
+                        )
+
+                    def visit_ImportFrom(self, child: ast.ImportFrom) -> None:
+                        local_names.update(
+                            item.asname or item.name for item in child.names if item.name != "*"
+                        )
+
+                    def visit_Lambda(self, child: ast.Lambda) -> None:
+                        return
+
+                    def visit_ListComp(self, child: ast.ListComp) -> None:
+                        return
+
+                    def visit_SetComp(self, child: ast.SetComp) -> None:
+                        return
+
+                    def visit_DictComp(self, child: ast.DictComp) -> None:
+                        return
+
+                    def visit_GeneratorExp(self, child: ast.GeneratorExp) -> None:
+                        return
+
+                previous = self.shadowed
+                if any(
+                    isinstance(child, (ast.Assign, ast.AnnAssign))
+                    and child.value is not None
+                    and is_imported_module_expression(child.value, self.aliases)
+                    for statement in node.body
+                    for child in ast.walk(statement)
+                ):
+                    self.unsupported_module_alias = True
+                seen_class_names: set[str] = set()
+                for statement in node.body:
+                    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        self.shadowed = previous
+                    collected_names = set(local_names)
+                    local_names.clear()
+                    deleted_names: set[str] = set()
+
+                    class StatementBindings(ClassBindings):
+                        def __init__(self, deleted: set[str]) -> None:
+                            self.deleted = deleted
+
+                        def visit_Name(self, child: ast.Name) -> None:
+                            if isinstance(child.ctx, ast.Del):
+                                self.deleted.add(child.id)
+                            else:
+                                super().visit_Name(child)
+
+                    StatementBindings(deleted_names).visit(statement)
+                    seen_class_names.difference_update(deleted_names)
+                    seen_class_names.update(local_names)
+                    local_names.clear()
+                    local_names.update(collected_names)
+                    # Class bodies use LOAD_NAME: a name falls back to globals
+                    # until an earlier statement has created a class value.
+                    self.visit(statement)
+                    self.shadowed = previous | seen_class_names
+                self.shadowed = previous
+
+            def _visit_comprehension(
+                self,
+                node: ast.AST,
+                generators: list[ast.comprehension],
+                results: list[ast.expr],
+            ) -> None:
+                previous = self.shadowed
+                self.by_node[id(node)] = frozenset(previous)
+                if any(
+                    is_imported_module_expression(generator.iter, self.aliases)
+                    for generator in generators
+                ):
+                    self.unsupported_module_alias = True
+                bound: set[str] = set()
+                for generator in generators:
+                    self.shadowed = previous | bound
+                    self.by_node[id(generator)] = frozenset(self.shadowed)
+                    self.visit(generator.iter)
+                    bound.update(
+                        item.id
+                        for item in ast.walk(generator.target)
+                        if isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+                    )
+                    self.shadowed = previous | bound
+                    for condition in generator.ifs:
+                        self.visit(condition)
+                self.shadowed = previous | bound
+                for child in results:
+                    self.visit(child)
+                self.shadowed = previous
+
+            def visit_ListComp(self, node: ast.ListComp) -> None:
+                self._visit_comprehension(node, node.generators, [node.elt])
+
+            def visit_SetComp(self, node: ast.SetComp) -> None:
+                self._visit_comprehension(node, node.generators, [node.elt])
+
+            def visit_DictComp(self, node: ast.DictComp) -> None:
+                self._visit_comprehension(node, node.generators, [node.key, node.value])
+
+            def visit_GeneratorExp(self, node: ast.GeneratorExp) -> None:
+                self._visit_comprehension(node, node.generators, [node.elt])
+
+        def is_shadowed(node: ast.AST, target: ast.expr, scopes: ScopeBindings) -> bool:
+            if id(target) in scopes.class_local_store_targets:
+                return True
+            root = target
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            return isinstance(root, ast.Name) and root.id in scopes.by_node.get(
+                id(node), frozenset()
+            )
+
+        def aliases_at_node(node: ast.AST, scopes: ScopeBindings) -> dict[str, str]:
+            """Apply lexical shadows, then overlay imports active at this node."""
+            local_aliases = scopes.local_aliases_by_node.get(id(node), {})
+            result = dict(aliases)
+            for name in scopes.by_node.get(id(node), frozenset()):
+                if name not in local_aliases:
+                    result[name] = "!shadowed_local"
+            result.update(local_aliases)
+            return result
+
+        def imported_module_at_node(
+            node: ast.AST, expression: ast.expr, scopes: ScopeBindings
+        ) -> str | None:
+            """Resolve a module object even when its local name shadows a global."""
+            path = imported_path(expression, aliases_at_node(node, scopes))
+            if path is None or path == "*":
+                return None
+            resolved = self._resolve_fullname_to_file(path)
+            return path if resolved is not None and resolved[1] == path else None
+
+        for module_name in sorted(self._project_modules):
+            path = self._module_to_path.get(module_name)
+            if path is None:
+                uncertain = True
+                break
+            snapshot = self._bounded_call_source_snapshot(path)
+            if snapshot is None:
+                uncertain = True
+                break
+            try:
+                tree = ast.parse(snapshot.decode("utf-8"), filename=path)
+            except (SyntaxError, UnicodeError, RecursionError):
+                uncertain = True
+                break
+            bounded_nodes = self._python_ast_nodes(str(Path(path).resolve()), tree)
+            if bounded_nodes is None:
+                uncertain = True
+                break
+            aliases = module_aliases(tree.body, module_name)
+            local_module_aliases, local_import_events_by_scope = scoped_import_aliases(
+                tree, module_name
+            )
+            imported_names = {
+                item.asname or item.name.split(".")[0]
+                for statement in tree.body
+                if isinstance(statement, ast.Import)
+                for item in statement.names
+            }
+            imported_names.update(
+                item.asname or item.name
+                for statement in tree.body
+                if isinstance(statement, ast.ImportFrom)
+                for item in statement.names
+                if item.name != "*"
+            )
+            scopes = ScopeBindings(aliases)
+            scopes.local_import_events_by_scope = local_import_events_by_scope
+            scopes.visit(bounded_nodes[0])
+            if scopes.unsupported_nonlocal or scopes.unsupported_module_alias:
+                uncertain = True
+                break
+            for node in bounded_nodes:
+                if isinstance(node, ast.comprehension):
+                    stack = [node.target]
+                    while stack:
+                        candidate = stack.pop()
+                        if not isinstance(candidate, ast.Name) and target_is_mutation(
+                            candidate, aliases_at_node(node, scopes), imported_names
+                        ):
+                            found_mutation = True
+                            break
+                        if isinstance(candidate, (ast.Tuple, ast.List)):
+                            stack.extend(candidate.elts)
+                    if found_mutation:
+                        break
+                targets: list[ast.expr] = []
+                if isinstance(node, ast.Assign):
+                    targets = list(node.targets)
+                elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                    targets = [node.target]
+                elif isinstance(node, ast.Delete):
+                    targets = list(node.targets)
+                for target in targets:
+                    target_root = target
+                    while isinstance(target_root, (ast.Attribute, ast.Subscript)):
+                        target_root = target_root.value
+                    local_import_target = (
+                        isinstance(target_root, ast.Name)
+                        and target_root.id in local_module_aliases
+                        and target_root.id
+                        in scopes.local_imports_by_node.get(id(node), frozenset())
+                    )
+                    if (
+                        isinstance(target, ast.Name)
+                        and target.id in scopes.local_imports_by_node.get(id(node), frozenset())
+                        and target.id not in scopes.global_names_by_node.get(id(node), frozenset())
+                    ):
+                        # Rebinding a function-local import name changes only
+                        # that local binding; it does not mutate the module.
+                        continue
+                    if is_shadowed(node, target, scopes) and not local_import_target:
+                        continue
+                    stack = [target]
+                    while stack:
+                        candidate = stack.pop()
+                        if target_is_mutation(
+                            candidate, aliases_at_node(node, scopes), imported_names
+                        ):
+                            found_mutation = True
+                            break
+                        if isinstance(candidate, (ast.Tuple, ast.List)):
+                            stack.extend(candidate.elts)
+                    if found_mutation:
+                        break
+                if found_mutation:
+                    break
+                if isinstance(node, ast.Call):
+                    node_aliases = aliases_at_node(node, scopes)
+                    dynamic_name = node.func.id if isinstance(node.func, ast.Name) else ""
+                    dynamic_fullname = node_aliases.get(dynamic_name, "")
+                    if dynamic_name in {"exec", "eval"} or dynamic_fullname in {
+                        "builtins.exec",
+                        "builtins.eval",
+                    }:
+                        if any(
+                            module == "*"
+                            or fullname.startswith(f"{module}.")
+                            or (
+                                (declaration := self._source_callable_declaration(module))
+                                is not None
+                                and declaration[0] == fullname
+                            )
+                            for module in node_aliases.values()
+                        ):
+                            found_mutation = True
+                            break
+                    # Passing an imported module into analyzed callable code escapes
+                    # the local proof: that code can rebind its attributes.
+                    if any(
+                        (
+                            not is_shadowed(node, argument, scopes)
+                            or imported_module_at_node(node, argument, scopes) is not None
+                        )
+                        and (argument_path := imported_path(argument, node_aliases)) is not None
+                        and argument_path != "*"
+                        and argument_path in node_aliases.values()
+                        and (module_identity := self._resolve_fullname_to_file(argument_path))
+                        is not None
+                        and module_identity[1] == argument_path
+                        for argument in node.args
+                    ):
+                        found_mutation = True
+                        break
+                    if dynamic_name in {"setattr", "delattr"} or dynamic_fullname in {
+                        "builtins.setattr",
+                        "builtins.delattr",
+                    }:
+                        if len(node.args) < 2:
+                            continue
+                        receiver = (
+                            None
+                            if is_shadowed(node, node.args[0], scopes)
+                            and imported_module_at_node(node, node.args[0], scopes) is None
+                            else imported_path(node.args[0], node_aliases)
+                        )
+                        attribute = node.args[1]
+                        if receiver == "*" or (receiver and fullname.startswith(f"{receiver}.")):
+                            if receiver == "*":
+                                found_mutation = True
+                                break
+                            if not isinstance(attribute, ast.Constant) or not isinstance(
+                                attribute.value, str
+                            ):
+                                found_mutation = True
+                                break
+                            mutated_path = f"{receiver}.{attribute.value}"
+                            declaration = self._source_callable_declaration(mutated_path)
+                            if (
+                                (declaration is not None and declaration[0] == fullname)
+                                or fullname.startswith(f"{mutated_path}.")
+                                or mutated_path == fullname
+                            ):
+                                found_mutation = True
+                                break
+            if found_mutation:
+                break
+
+        result = found_mutation or uncertain
+        self._imported_callable_mutation_cache[fullname] = result
+        return result
 
     def _project_member_declaration(self, fullname: str) -> tuple[str, InvocationKind] | None:
         """Resolve a method through an exact source-proven project class export."""
@@ -5322,6 +6347,25 @@ class MypyAnalyzer:
                 reason_code = None
             else:
                 reason_code = "unresolved_super_dispatch"
+        if status == CallResolutionStatus.EXACT and canonical_symbol is not None:
+            imported_fullname = self._explicit_import_fullname(callee, import_map)
+            if imported_fullname is None and isinstance(callee, NameExpr):
+                imported_fullname = import_map.get(callee.name)
+            imported_declaration = (
+                self._source_callable_declaration(imported_fullname)
+                if imported_fullname is not None
+                else None
+            )
+            if (
+                imported_declaration is not None
+                and imported_declaration[0] == canonical_symbol
+                and self._imported_callable_is_mutated(canonical_symbol)
+            ):
+                status = CallResolutionStatus.AMBIGUOUS
+                canonical_symbol = None
+                invocation = None
+                receiver_candidates = ()
+                reason_code = "mutated_imported_callable"
         resolver_version = self._resolver_version
         receiver_origin = (
             self._receiver_origin_identity(callee, current_file, import_map, line)
@@ -7269,6 +8313,7 @@ class MypyAnalyzer:
 
         loop_body_evaluations = [0]
         finally_body_evaluations = [0]
+        context_parameter_bindings: list[set[str] | None] = []
 
         def _trace_snapshot() -> _TraceEnvironment:
             return _TraceEnvironment(
@@ -8235,6 +9280,29 @@ class MypyAnalyzer:
                     clear_alias_target(context_target)
                 context_entry = _trace_snapshot()
                 written_names = context_bound_names(n.body)
+                if not context_parameter_bindings:
+                    context_parameter_bindings.append(
+                        _context_binding_census(
+                            function_node.body,
+                            node_limit=self.MAX_CALL_SPAN_MYPY_NODES,
+                            item_limit=self.MAX_CALL_SPAN_MYPY_ITEMS,
+                        )
+                    )
+                manager_bindings = context_parameter_bindings[0]
+                parameter_variables = {
+                    id(argument.variable) for argument in function_node.arguments
+                }
+                pristine_parameter_managers = manager_bindings is not None and all(
+                    isinstance(expression, NameExpr)
+                    and id(expression.node) in parameter_variables
+                    and expression.name not in manager_bindings
+                    and expression.name not in context_entry.callables
+                    and expression.name not in context_entry.partials
+                    and expression.name not in context_entry.lambdas
+                    for expression in n.expr
+                )
+                if manager_bindings is None:
+                    _trace_cap(n, "UNKNOWN_CONTEXT_PARAMETER_BINDING")
                 body_flow = _normal_flow(walk_node(n.body))
                 context_normals = [_trace_snapshot()] if body_flow.normal else []
                 context_exits: list[_TraceExit] = []
@@ -8260,17 +9328,39 @@ class MypyAnalyzer:
                         for context_target in n.target:
                             clear_alias_target(context_target)
                     after = _trace_snapshot()
-                    if after.callables or after.partials or after.lambdas:
-                        # The suite's writes do not account for the manager's
-                        # implicit __exit__, which may mutate captured locals.
-                        # No manager-exit effect summary is established here.
-                        _trace_cap(n, "UNKNOWN_CONTEXT_MANAGER_EXIT")
-                        _restore_trace_snapshot(_widen_loop_state(after))
+                    # A direct pristine parameter cannot itself close over this
+                    # invocation's locals. Preserve only untouched entry aliases;
+                    # values dropped by body/exposure handling are never restored.
+                    # Other managers retain the existing callable-only LOW widening.
+                    _trace_cap(n, "UNKNOWN_CONTEXT_MANAGER_EXIT")
+                    widened = _widen_loop_state(after)
+                    if pristine_parameter_managers:
+                        _restore_trace_snapshot(
+                            _TraceEnvironment(
+                                {},
+                                {},
+                                {},
+                                widened.callables,
+                                {
+                                    name: value
+                                    for name, value in context_entry.partials.items()
+                                    if after.partials.get(name) == value
+                                },
+                                {
+                                    name: value
+                                    for name, value in context_entry.lambdas.items()
+                                    if after.lambdas.get(name) is value
+                                },
+                            )
+                        )
+                    else:
+                        _restore_trace_snapshot(widened)
                     return _trace_snapshot()
 
                 for context_exit in body_flow.exits:
                     sanitized = sanitize_context_state(context_exit.environment)
                     context_exits.append(_TraceExit(context_exit.kind, sanitized))
+                    context_exits.append(_TraceExit("raise", sanitized))
                     if context_exit.kind == "raise":
                         # Keep both possible exception outcomes in the call
                         # inventory. Suppression stays conditional; retaining
@@ -8282,6 +9372,10 @@ class MypyAnalyzer:
                             )
                         )
                 context_normals = [sanitize_context_state(state) for state in context_normals]
+                # An unmodeled __exit__ may raise even when the body completed
+                # normally. Add the alternative once after sanitation, so it
+                # reaches enclosing handlers/loops without replaying this manager.
+                context_exits.extend(_TraceExit("raise", state) for state in context_normals)
                 if context_normals:
                     _restore_trace_snapshot(_join_trace_snapshots(context_normals, n))
                 return _coalesce_trace_exits(bool(context_normals), context_exits)
@@ -8530,6 +9624,8 @@ class MypyAnalyzer:
                     def sanitize_final_state(
                         candidate: _TraceEnvironment,
                         incoming: _TraceEnvironment,
+                        *,
+                        keep_normal_writes: bool = False,
                     ) -> _TraceEnvironment:
                         if written_names is None:
                             _trace_cap(n, "UNKNOWN_FINALLY_EXIT_BINDING")
@@ -8549,6 +9645,25 @@ class MypyAnalyzer:
                             for name, value in incoming.lambdas.items()
                             if name not in written_names and candidate.lambdas.get(name) is value
                         }
+                        if keep_normal_writes:
+                            # Use only the joined normal-finalizer snapshot. A
+                            # conditional write keeps its LOW union or abstention;
+                            # immutable partial captures and lambda identity survive.
+                            callables.update(
+                                (name, value)
+                                for name, value in candidate.callables.items()
+                                if name in written_names
+                            )
+                            partials.update(
+                                (name, value)
+                                for name, value in candidate.partials.items()
+                                if name in written_names
+                            )
+                            lambdas.update(
+                                (name, value)
+                                for name, value in candidate.lambdas.items()
+                                if name in written_names
+                            )
                         dropped = (
                             ((set(incoming.callables) | set(candidate.callables)) - set(callables))
                             | ((set(incoming.partials) | set(candidate.partials)) - set(partials))
@@ -8589,7 +9704,9 @@ class MypyAnalyzer:
                             if conditional_finally:
                                 possible_execution_depth[0] -= 1
                         if final_flow.normal:
-                            final_state = sanitize_final_state(_trace_snapshot(), incoming)
+                            final_state = sanitize_final_state(
+                                _trace_snapshot(), incoming, keep_normal_writes=True
+                            )
                             if pending_kind == "normal":
                                 final_normals.append(final_state)
                             else:
