@@ -753,16 +753,21 @@ def _validate_case_scan(value: Any, case_input: dict[str, Any]) -> dict[str, Any
             ):
                 raise NonPythonFixtureError("observation lies outside the selected source")
             if key == "deployment_observations":
+                deployment_value = observation.get("value")
                 if (
-                    not isinstance(observation.get("kind"), str)
+                    "value" not in observation
+                    or not isinstance(observation.get("kind"), str)
                     or observation.get("certainty") not in {"exact", "uncertain"}
                     or not isinstance(observation.get("key"), (str, type(None)))
                     or not isinstance(observation.get("uncertainty"), (str, type(None)))
                     or not (
-                        isinstance(observation.get("value"), str)
+                        isinstance(deployment_value, str)
                         or (
-                            isinstance(observation.get("value"), list)
-                            and all(isinstance(item, str) for item in observation["value"])
+                            isinstance(deployment_value, list)
+                            and all(isinstance(item, str) for item in deployment_value)
+                        )
+                        or (
+                            observation.get("certainty") == "uncertain" and deployment_value is None
                         )
                     )
                 ):

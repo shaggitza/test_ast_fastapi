@@ -297,3 +297,58 @@ def test_synthetic_absolute_client_has_no_unattested_origin_join(
         ]
         == evaluator.PROJECT_SCANNER_SHA256
     )
+
+
+def _deployment_case(value: Any, certainty: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    case = _case_input()
+    case["deployment_patterns"] = ["Dockerfile"]
+    case["expected_selected_paths"] = ["Dockerfile", "client.ts"]
+    snapshot = copy.deepcopy(_snapshot())
+    snapshot["expected_selected_paths"] = case["expected_selected_paths"]
+    snapshot["source_selection"]["deployment_include_patterns"] = ["Dockerfile"]
+    snapshot["scanned_files"] = 2
+    snapshot["selection_file_count_matches"] = True
+    snapshot["deployment_observations"] = [
+        {
+            "source_path": "Dockerfile",
+            "line": 1,
+            "kind": "docker_workdir",
+            "certainty": certainty,
+            "key": "WORKDIR",
+            "uncertainty": "dynamic_value" if certainty == "uncertain" else None,
+            "value": value,
+        }
+    ]
+    return snapshot, case
+
+
+def test_uncertain_deployment_observation_may_have_explicit_null_value() -> None:
+    snapshot, case = _deployment_case(None, "uncertain")
+    result = evaluator._validate_case_scan(snapshot, case)
+    assert result["deployment_observations"][0]["value"] is None
+    assert result["deployment_observations"][0]["certainty"] == "uncertain"
+    assert result["surface_matches"] == []
+
+
+@pytest.mark.parametrize(
+    ("certainty", "value"),
+    [
+        ("exact", None),
+        ("uncertain", 7),
+        ("uncertain", True),
+        ("uncertain", ["ok", 7]),
+        ("uncertain", {}),
+    ],
+)
+def test_invalid_null_or_malformed_deployment_value_is_rejected(certainty: str, value: Any) -> None:
+    snapshot, case = _deployment_case(value, certainty)
+    with pytest.raises(evaluator.NonPythonFixtureError, match="deployment observation"):
+        evaluator._validate_case_scan(snapshot, case)
+
+
+@pytest.mark.parametrize("certainty", ["exact", "uncertain"])
+def test_deployment_value_field_is_required(certainty: str) -> None:
+    snapshot, case = _deployment_case(None, certainty)
+    snapshot["deployment_observations"][0].pop("value")
+    with pytest.raises(evaluator.NonPythonFixtureError, match="deployment observation"):
+        evaluator._validate_case_scan(snapshot, case)
