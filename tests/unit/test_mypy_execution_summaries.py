@@ -368,9 +368,36 @@ def test_distinct_callback_argument_environments_are_traced_separately(
 
     deps = MypyAnalyzer(tmp_path, max_depth=5).analyze_endpoint(_endpoint(main, line=5))
 
-    assert deps.references_symbol_at_line("services.py", 2) is not None
-    assert deps.references_symbol_at_line("services.py", 6) is not None
-    assert deps.references_lines_low_only("services.py", {2, 6})
+    diagnostics = {
+        "handler_calls": [
+            (
+                site.line,
+                site.source_spelling,
+                site.status.value,
+                site.canonical_symbol,
+                site.reason_code,
+            )
+            for site in deps.get_resolved_call_sites(str(main))
+        ],
+        "callback_calls": [
+            (
+                site.line,
+                site.source_spelling,
+                site.status.value,
+                site.canonical_symbol,
+                site.reason_code,
+            )
+            for site in deps.get_resolved_call_sites(str(callbacks))
+        ],
+        "analysis_incomplete": deps.analysis_incomplete,
+        "analysis_limitations": [
+            (cap.file_path, cap.call_line, cap.cap, cap.target_count, cap.limit, cap.call_column)
+            for cap in deps.analysis_limitations
+        ],
+    }
+    assert deps.references_symbol_at_line("services.py", 2) is not None, diagnostics
+    assert deps.references_symbol_at_line("services.py", 6) is not None, diagnostics
+    assert deps.references_lines_low_only("services.py", {2, 6}), diagnostics
 
 
 @pytest.mark.parametrize(
