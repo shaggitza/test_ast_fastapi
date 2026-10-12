@@ -22,7 +22,15 @@ read, including bytes from failed validation rows, and reads stop at the remaini
 aggregate budget. The wall deadline interrupts blocked network operations as well
 as bounding the whole collection. Failures include a structured
 `failure_class`; HTTP failures also include numeric `http_status` without
-recording response headers. Existing output files are never replaced. Output
+recording response headers. Bytes returned by a successful fetch are charged
+before cache storage, so local write failures cannot restore aggregate budget.
+An HTTP error response is closed without reading its body; `bytes` counts bytes
+read by this collector, not bytes the server may have sent in an unconsumed error
+body. If the remaining aggregate budget ends exactly at a row's expected size,
+the collector cannot read once more to establish EOF and records
+`aggregate_budget` as unavailable rather than claiming the prefix matched. This
+may leave the final row unverified at the exact 443,496-byte ceiling; it does not
+mean the locked content mismatched. Existing output files are never replaced. Output
 directories are opened component by component without following symlinks, and
 creation and publication remain relative to those verified directory handles.
 The collector enforces 2 MB per diff, 443,496 aggregate bytes, 180 seconds,

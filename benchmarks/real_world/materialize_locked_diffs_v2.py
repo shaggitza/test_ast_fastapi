@@ -51,10 +51,15 @@ class CollectionFailure(protocol.CorpusV2Error):
 @contextlib.contextmanager
 def _wall_deadline(deadline: float) -> Iterator[None]:
     """Interrupt a blocking urllib operation at the collector's wall deadline."""
-    if threading.current_thread() is not threading.main_thread():
-        raise CollectionFailure("deadline", "deadline guard requires the main thread")
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "setitimer")
+        or not hasattr(signal, "SIGALRM")
+    ):
+        raise CollectionFailure("deadline", "exact deadline requires POSIX main-thread collection")
     previous_handler = signal.getsignal(signal.SIGALRM)
     previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    started = time.monotonic()
 
     def expired(_signum: int, _frame: Any) -> None:
         raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
@@ -68,8 +73,17 @@ def _wall_deadline(deadline: float) -> Iterator[None]:
     try:
         yield
     finally:
-        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        # Account for time spent under our guard so nested operations cannot
+        # postpone a timer installed by the caller.
+        elapsed = time.monotonic() - started
+        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0]:
+            signal.setitimer(
+                signal.ITIMER_REAL,
+                max(0.000001, previous_timer[0] - elapsed),
+                previous_timer[1],
+            )
 
 
 def _open_dir_chain(path: Path, *, create: bool) -> int:
@@ -141,7 +155,11 @@ def _read_blob(dirfd: int, name: str, expected_size: int, expected_hash: str) ->
 
 
 def _fetch(
-    url: str, repository: str, number: int, expected_size: int, deadline: float,
+    url: str,
+    repository: str,
+    number: int,
+    expected_size: int,
+    deadline: float,
     byte_budget: int,
 ) -> tuple[bytes, str]:
     redirects = protocol._SafeDiffRedirects(repository, number)
@@ -159,7 +177,7 @@ def _fetch(
             response_context = opener.open(
                 request, timeout=max(0.1, min(20, deadline - time.monotonic()))
             )
-        with response_context as response:
+        with _wall_deadline(deadline), response_context as response:
             final_url = response.geturl()
             redirects._validate(final_url)
             kind = response.headers.get("Content-Type", "")
@@ -172,9 +190,13 @@ def _fetch(
                     MAX_ROW_BYTES + 1 - len(body),
                 )
                 if room <= 0:
+                    if len(body) == expected_size and byte_budget == expected_size:
+                        raise CollectionFailure(
+                            "aggregate_budget",
+                            "aggregate budget prevents verifying response EOF",
+                        )
                     break
-                with _wall_deadline(deadline):
-                    chunk = response.read(min(64 * 1024, room))
+                chunk = response.read(min(64 * 1024, room))
                 if not chunk:
                     break
                 body.extend(chunk)
@@ -184,7 +206,11 @@ def _fetch(
                     raise CollectionFailure(
                         "size_mismatch", "diff exceeded locked/task byte ceiling"
                     )
-    except urllib.error.HTTPError:
+    except urllib.error.HTTPError as exc:
+        # The error body is deliberately not collected or included in `bytes`.
+        # Close it without reading so it cannot escape the request budget.
+        with contextlib.suppress(OSError):
+            exc.close()
         raise
     except CollectionFailure as exc:
         exc.bytes_read = len(body)
@@ -240,9 +266,18 @@ def _store_verified(cache_fd: int, body: bytes, expected_hash: str) -> str:
     try:
         _read_blob(cache_fd, digest, len(body), digest)
     except FileNotFoundError:
-        _publish(cache_fd, digest, body)
+        try:
+            _publish(cache_fd, digest, body)
+        except protocol.CorpusV2Error as exc:
+            raise CollectionFailure(
+                "local_storage_error", "content-addressed cache publication failed"
+            ) from exc
+    except protocol.CorpusV2Error as exc:
+        raise CollectionFailure("local_storage_error", "content-addressed cache collision") from exc
     except OSError as exc:
-        raise protocol.CorpusV2Error("content-addressed cache collision") from exc
+        raise CollectionFailure(
+            "local_storage_error", "content-addressed cache I/O failed"
+        ) from exc
     return digest
 
 
@@ -324,18 +359,24 @@ def collect(  # noqa: PLR0912, PLR0915
             "expected_sha256": expected_hash,
             "expected_bytes": row["diff_bytes"],
         }
+        fetched = False
         try:
             if time.monotonic() >= deadline:
-                raise protocol.CorpusV2Error("collector wall-clock limit exceeded")
+                raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
             remaining = MAX_TOTAL_BYTES - total
             if remaining <= 0:
                 raise CollectionFailure("aggregate_limit", "aggregate byte ceiling exhausted")
             body, final_url = _fetch(
-                row["diff_final_url"], REPOSITORY, row["pr"], row["diff_bytes"], deadline,
+                row["diff_final_url"],
+                REPOSITORY,
+                row["pr"],
+                row["diff_bytes"],
+                deadline,
                 remaining,
             )
-            digest = _store_verified(cachefd, body, expected_hash)
+            fetched = True
             total += len(body)
+            digest = _store_verified(cachefd, body, expected_hash)
             entry.update(
                 {
                     "status": "matched",
@@ -346,15 +387,18 @@ def collect(  # noqa: PLR0912, PLR0915
                 }
             )
         except Exception as exc:  # retain one explicit status for every frozen row
-            total += getattr(exc, "bytes_read", 0)
+            if not fetched:
+                total += getattr(exc, "bytes_read", 0)
             classification = (
                 "http_error"
                 if isinstance(exc, urllib.error.HTTPError)
                 else exc.failure_class
                 if isinstance(exc, CollectionFailure)
                 else (
-                    "request_error"
-                    if isinstance(exc, (urllib.error.URLError, TimeoutError, OSError))
+                    "local_storage_error"
+                    if isinstance(exc, OSError)
+                    else "request_error"
+                    if isinstance(exc, (urllib.error.URLError, TimeoutError))
                     else "validation_error"
                     if isinstance(exc, protocol.CorpusV2Error)
                     else "collector_error"
@@ -363,7 +407,14 @@ def collect(  # noqa: PLR0912, PLR0915
             entry.update(
                 {
                     "status": "missing"
-                    if classification in {"request_error", "http_error"}
+                    if classification
+                    in {
+                        "request_error",
+                        "http_error",
+                        "aggregate_budget",
+                        "aggregate_limit",
+                        "deadline",
+                    }
                     else "mismatch",
                     "failure_class": classification,
                     **(

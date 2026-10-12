@@ -160,6 +160,50 @@ def test_fetch_never_reads_beyond_remaining_aggregate_budget(
         collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 10)
 
 
+def test_fetch_exact_remaining_budget_fails_closed_on_unverified_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url = f"https://github.com/{collector.REPOSITORY}/pull/1.diff"
+    response = _Response(b"abc!", url)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_args: _Opener(response))
+    with pytest.raises(collector.CollectionFailure) as caught:
+        collector._fetch(url, collector.REPOSITORY, 1, 3, time.monotonic() + 5, 3)
+    assert caught.value.failure_class == "aggregate_budget"
+    assert caught.value.bytes_read == 3
+    assert response.body == b"!"
+
+
+def test_storage_failures_do_not_reuse_downloaded_byte_allowance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = (collector.LOCK, collector.MANIFEST, collector.CHECKSUMS)
+    captured = {path: path.read_bytes() for path in paths}
+    original_read = protocol._read_bounded
+    monkeypatch.setattr(
+        protocol,
+        "_read_bounded",
+        lambda path, *args: captured[path] if path in captured else original_read(path, *args),
+    )
+    allowances: list[int] = []
+
+    def fetched(
+        _url: str, _repo: str, _number: int, size: int, _deadline: float, budget: int
+    ) -> tuple[bytes, str]:
+        allowances.append(budget)
+        return b"x" * size, "https://github.com/fastapi/full-stack-fastapi-template/pull/1.diff"
+
+    def fail_store(*_args: object) -> str:
+        raise OSError("mocked local disk failure")
+
+    monkeypatch.setattr(collector, "_fetch", fetched)
+    monkeypatch.setattr(collector, "_store_verified", fail_store)
+    result = collector.collect(tmp_path / "out")
+    assert result["summary"]["bytes"] == collector.MAX_TOTAL_BYTES
+    first_size = result["rows"][0]["expected_bytes"]
+    assert allowances[1] == collector.MAX_TOTAL_BYTES - first_size
+    assert all(row["failure_class"] == "local_storage_error" for row in result["rows"])
+
+
 def test_publish_is_no_clobber_and_safe_output_rejects_symlink(tmp_path: Path) -> None:
     fd = collector._open_dir_chain(tmp_path, create=False)
     collector._publish(fd, "blob", b"abc")
