@@ -6,13 +6,51 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
+
+
+class RecordedExecutor(VMExecutor):
+    """Test-only observer that records the owned CID before core cleanup."""
+
+    cleanup_receipt: ClassVar[dict[str, Any]] = {}
+    cleanup_command_sha256 = ""
+
+    @classmethod
+    def _cleanup_container(cls, cidfile: Path, name: str) -> None:
+        cid: str | None = None
+        capture_error: str | None = None
+        try:
+            candidate = cidfile.read_text(encoding="utf-8").strip()
+            if re.fullmatch(r"[0-9a-fA-F]{64}", candidate) is None:
+                capture_error = "CID missing or invalid"
+            else:
+                cid = candidate
+        except (OSError, UnicodeError) as exc:
+            capture_error = f"CID capture failed: {type(exc).__name__}"
+        cls.cleanup_receipt = {
+            "container_name": name,
+            "container_id": cid,
+            "cleanup_command_sha256": cls.cleanup_command_sha256,
+            "cid_capture_error": capture_error,
+            "cleanup_verified": False,
+        }
+        try:
+            super()._cleanup_container(cidfile, name)
+        except Exception as exc:
+            cls.cleanup_receipt["cleanup_error"] = str(exc)
+            raise
+        else:
+            cls.cleanup_receipt["name_absence_verified"] = True
+            cls.cleanup_receipt["cid_absence_verified"] = cid is not None
+            cls.cleanup_receipt["cleanup_verified"] = cid is not None
+
 
 IMAGE = (
     "test-ast-runtime-phase-15508bc@sha256:"
@@ -51,10 +89,10 @@ def _fixture_lock(source: bytes) -> str:
     return _sha256(b"controlled-synthetic-v1\0canary.py\0" + _sha256(source).encode())
 
 
-def _executor(source: bytes, timeout: int) -> VMExecutor:
+def _executor(source: bytes, timeout: int) -> RecordedExecutor:
     dependency_hash = _sha256(DEPENDENCY_LOCK.read_bytes())
     sbom_hash = _sha256(SBOM.read_bytes())
-    return VMExecutor(
+    return RecordedExecutor(
         image=IMAGE,
         runtime="runsc",
         timeout=timeout,
@@ -108,6 +146,10 @@ def _run_case(parent: Path, mode: str, timeout: int, *, inspect_only: bool) -> d
         cidfile = root / "container.cid"
         name = "gh101-canary-" + os.urandom(12).hex()
         command = _command(executor, root / "fixture", cidfile, name, mode, marker)
+        if re.fullmatch(r"gh101-canary-[0-9a-f]{24}", name) is None:
+            raise RuntimeError("generated owned container name is invalid")
+        type(executor).cleanup_command_sha256 = _sha256("\0".join(command).encode())
+        type(executor).cleanup_receipt = {}
         pins = {
             "source_sha256": _sha256(source),
             "fixture_lock_sha256": _fixture_lock(source),
@@ -135,7 +177,8 @@ def _run_case(parent: Path, mode: str, timeout: int, *, inspect_only: bool) -> d
                 return {
                     "mode": "controlled_synthetic",
                     "host_execution_deadline_observed": True,
-                    "cleanup_verified": True,
+                    "cleanup_verified": False,
+                    **executor.cleanup_receipt,
                     "pins": pins,
                 }
             raise RuntimeError("timeout fixture unexpectedly completed")
@@ -145,7 +188,12 @@ def _run_case(parent: Path, mode: str, timeout: int, *, inspect_only: bool) -> d
             raise RuntimeError(
                 "canary preflight failed: " + json.dumps(observation, sort_keys=True)
             )
-        return {"mode": "controlled_synthetic", "canary_observation": observation, "pins": pins}
+        return {
+            "mode": "controlled_synthetic",
+            "canary_observation": observation,
+            **executor.cleanup_receipt,
+            "pins": pins,
+        }
     finally:
         # The private temp root and its own files are the only paths removed.
         for child in root.iterdir():
