@@ -5,6 +5,9 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from fastapi_endpoint_detector.analyzer import framework_phase_integration as phase_integration
 from fastapi_endpoint_detector.analyzer.framework_phase_graph import (
     adapt_framework_phases_to_graph,
 )
@@ -273,3 +276,42 @@ def test_local_module_shadow_with_framework_fullname_is_rejected_by_distribution
     assert report.records[0].status == "unavailable"
     assert report.records[0].registration is None
     assert report.records[0].framework_declaration_sha256 is None
+
+
+@pytest.mark.parametrize(("suffix", "accepted"), ((".py", True), (".pyi", False)))
+def test_only_executable_framework_sources_attest_runtime_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    accepted: bool,
+) -> None:
+    source_root = tmp_path / "project"
+    module_path = tmp_path / "site-packages" / "fastapi" / f"applications{suffix}"
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("class FastAPI: pass\n", encoding="utf-8")
+    distribution = SimpleNamespace(
+        files=(Path(module_path.name),),
+        locate_file=lambda _item: module_path,
+    )
+    monkeypatch.setattr(
+        phase_integration.importlib.metadata, "distribution", lambda _name: distribution
+    )
+    typed_build = SimpleNamespace(
+        modules={
+            "fastapi.applications": SimpleNamespace(tree=SimpleNamespace(path=str(module_path)))
+        }
+    )
+    site = SimpleNamespace(
+        canonical_symbol="fastapi.applications.FastAPI.on_event",
+        receiver_candidates=("fastapi.applications.FastAPI",),
+    )
+
+    actual = phase_integration._trusted_framework_source(site, typed_build, source_root)
+
+    if accepted:
+        assert actual == (
+            module_path.resolve(),
+            "sha256:" + hashlib.sha256(module_path.read_bytes()).hexdigest(),
+        )
+    else:
+        assert actual is None

@@ -3,8 +3,16 @@ from pathlib import Path
 
 import pytest
 
-from fastapi_endpoint_detector.analyzer.evidence_graph import source_evidence_graph
-from fastapi_endpoint_detector.analyzer.source_inventory import build_source_inventory
+from fastapi_endpoint_detector.analyzer.evidence_graph import (
+    EvidenceGraph,
+    EvidenceProvenance,
+    source_evidence_graph,
+)
+from fastapi_endpoint_detector.analyzer.source_inventory import (
+    SourceFile,
+    SourceInventory,
+    build_source_inventory,
+)
 from fastapi_endpoint_detector.config import Config
 
 
@@ -19,6 +27,9 @@ def test_source_inventory_follows_local_imports_with_scope_and_stable_hash(tmp_p
     assert len(graph.nodes) == 2
     assert len(graph.edges) == 1
     assert graph.edges[0].kind == "imports"
+    assert graph.schema_version == 2
+    assert (graph.edges[0].provenance.start_line, graph.edges[0].provenance.end_line) == (1, 1)
+    assert graph.edges[0].provenance.source_path == "main.py"
     assert graph.edges[0].provenance.confidence == "low"
     assert graph.edges[0].provenance.engine_version == (
         f"{platform.python_implementation()} {platform.python_version()}"
@@ -274,3 +285,206 @@ def test_import_depth_cap_is_explicitly_unresolved(tmp_path: Path) -> None:
     assert {item.relative_path for item in inventory.files} == {"app.py", "first.py"}
     assert inventory.unresolved_imports == (("first.py", "second"),)
     assert any("maximum import depth 1 was reached" in item for item in inventory.limitations)
+
+
+def test_import_edges_preserve_each_source_statement_span(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text(
+        "# heading\nimport lib\nfrom lib import helper\n", encoding="utf-8"
+    )
+    (tmp_path / "lib.py").write_text("def helper(): pass\n", encoding="utf-8")
+    inventory = build_source_inventory(tmp_path)
+    graph = source_evidence_graph(inventory, side="baseline")
+    edges = [
+        edge
+        for edge in graph.edges
+        if edge.source == "baseline:file:main.py" and edge.target == "baseline:file:lib.py"
+    ]
+    assert [(edge.provenance.start_line, edge.provenance.end_line) for edge in edges] == [
+        (2, 2),
+        (3, 3),
+    ]
+    assert all(edge.provenance.side == "baseline" for edge in edges)
+    assert all(edge.provenance.source_path == "main.py" for edge in edges)
+    assert all(edge.provenance.confidence == "low" for edge in edges)
+    assert all(edge.provenance.engine == "python-ast" for edge in edges)
+    assert all(edge.provenance.engine_version for edge in edges)
+    assert all(
+        "Import reachability does not establish execution" in edge.provenance.limitations
+        for edge in edges
+    )
+    main = next(item for item in inventory.files if item.relative_path == "main.py")
+    assert main.imports == ("lib", "lib.helper")
+
+
+@pytest.mark.parametrize("prefix", ("", "label = 'é'; "))
+def test_same_line_imports_keep_distinct_utf8_byte_columns(tmp_path: Path, prefix: str) -> None:
+    source = prefix + "import lib; from lib import helper\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8")
+    (tmp_path / "lib.py").write_text("def helper(): pass\n", encoding="utf-8")
+    graph = source_evidence_graph(build_source_inventory(tmp_path))
+    edges = [
+        edge
+        for edge in graph.edges
+        if edge.source == "target:file:main.py" and edge.target == "target:file:lib.py"
+    ]
+    assert len(edges) == 2
+    first_column = len(prefix.encode("utf-8"))
+    second_column = first_column + len(b"import lib; ")
+    expected = (
+        (first_column, first_column + len(b"import lib"), b"import lib"),
+        (second_column, second_column + len(b"from lib import helper"), b"from lib import helper"),
+    )
+    for edge, (start_column, end_column, spelling) in zip(edges, expected, strict=True):
+        assert (edge.provenance.start_line, edge.provenance.end_line) == (1, 1)
+        assert (edge.provenance.start_column, edge.provenance.end_column) == (
+            start_column,
+            end_column,
+        )
+        assert source.encode("utf-8")[start_column:end_column] == spelling
+
+
+def test_multiline_import_retains_full_ast_span(tmp_path: Path) -> None:
+    (tmp_path / "main.py").write_text("from lib import (\n    helper,\n)\n", encoding="utf-8")
+    (tmp_path / "lib.py").write_text("def helper(): pass\n", encoding="utf-8")
+    graph = source_evidence_graph(build_source_inventory(tmp_path))
+    edge = next(edge for edge in graph.edges if edge.source == "target:file:main.py")
+    assert (
+        edge.provenance.start_line,
+        edge.provenance.start_column,
+        edge.provenance.end_line,
+        edge.provenance.end_column,
+    ) == (1, 0, 3, 1)
+
+
+@pytest.mark.parametrize(
+    ("mode", "reason"),
+    (
+        ("no_follow", "follow_imports is disabled"),
+        ("excluded", "excluded source"),
+        ("depth", "maximum import depth"),
+        ("collision", "is ambiguous"),
+        ("symlink", "rejected symlink source"),
+    ),
+)
+def test_unresolved_import_causes_preserve_statement_coordinates(
+    tmp_path: Path, mode: str, reason: str
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "main.py").write_text("\nimport helper\nimport helper\n", encoding="utf-8")
+    options = {"include_patterns": ("main.py",)}
+    if mode == "symlink":
+        outside = tmp_path / "outside.py"
+        outside.write_text("value = 1\n", encoding="utf-8")
+        (root / "helper.py").symlink_to(outside)
+    else:
+        (root / "helper.py").write_text("value = 1\n", encoding="utf-8")
+    if mode == "no_follow":
+        options["follow_imports"] = False
+    elif mode == "excluded":
+        options["exclude_patterns"] = ("helper.py",)
+    elif mode == "depth":
+        options["max_depth"] = 0
+    elif mode == "collision":
+        (root / "helper").mkdir()
+        (root / "helper" / "__init__.py").write_text("", encoding="utf-8")
+    inventory = build_source_inventory(root, **options)
+    assert inventory.unresolved_imports == (("main.py", "helper"),)
+    assert len(inventory.unresolved_import_occurrences) == 2
+    graph = source_evidence_graph(inventory)
+    edges = [edge for edge in graph.edges if edge.source == "target:file:main.py"]
+    assert len(edges) == 2
+    assert edges[0].target == edges[1].target
+    assert all(edge.target.startswith("target:unresolved-import:") for edge in edges)
+    assert [
+        (
+            edge.provenance.start_line,
+            edge.provenance.start_column,
+            edge.provenance.end_line,
+            edge.provenance.end_column,
+        )
+        for edge in edges
+    ] == [(2, 0, 2, 13), (3, 0, 3, 13)]
+    assert all(any(reason in item for item in edge.provenance.limitations) for edge in edges)
+
+
+def test_legacy_inventory_imports_keep_spanless_edges(tmp_path: Path) -> None:
+    main = SourceFile(tmp_path / "main.py", "main.py", "main", "a" * 64, ("helper",))
+    helper = SourceFile(tmp_path / "helper.py", "helper.py", "helper", "b" * 64, ())
+    inventory = SourceInventory(tmp_path, (main, helper), (), (), True, 10)
+    graph = source_evidence_graph(inventory)
+    resolved = next(edge for edge in graph.edges if edge.target == "target:file:helper.py")
+    assert resolved.provenance.start_line is resolved.provenance.end_line is None
+    assert resolved.provenance.start_column is resolved.provenance.end_column is None
+
+    unresolved = SourceInventory(tmp_path, (main,), (("main.py", "outside"),), (), True, 10)
+    unresolved_graph = source_evidence_graph(unresolved)
+    unresolved_edge = next(
+        edge
+        for edge in unresolved_graph.edges
+        if edge.target.startswith("target:unresolved-import:")
+    )
+    assert unresolved_edge.provenance.start_line is unresolved_edge.provenance.end_line is None
+    assert unresolved_edge.provenance.start_column is unresolved_edge.provenance.end_column is None
+
+
+def test_v1_graph_inputs_remain_supported_without_v2_columns(tmp_path: Path) -> None:
+    main = SourceFile(tmp_path / "main.py", "main.py", "main", "a" * 64, ())
+    graph = source_evidence_graph(SourceInventory(tmp_path, (main,), (), (), True, 10))
+    payload = graph.model_dump()
+    payload["schema_version"] = 1
+    provenance = payload["nodes"][0]["provenance"]
+    provenance.pop("start_column")
+    provenance.pop("end_column")
+    provenance["start_line"] = 2
+    provenance["end_line"] = 4
+    legacy = EvidenceGraph.model_validate(payload)
+    assert legacy.schema_version == 1
+    assert legacy.nodes[0].provenance.start_column is None
+    assert legacy.nodes[0].provenance.end_column is None
+    assert (legacy.nodes[0].provenance.start_line, legacy.nodes[0].provenance.end_line) == (2, 4)
+    provenance["start_column"] = 0
+    provenance["end_column"] = 8
+    with pytest.raises(ValueError, match="column spans require schema version 2"):
+        EvidenceGraph.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("coordinates", "message"),
+    (
+        ({"start_line": 1, "end_line": 1, "start_column": 4}, "columns must be paired"),
+        ({"start_line": 1, "end_line": 1, "end_column": 4}, "columns must be paired"),
+        ({"start_column": 0, "end_column": 4}, "require both line endpoints"),
+        ({"start_line": 1, "start_column": 0, "end_column": 4}, "require both line endpoints"),
+        ({"end_line": 1, "start_column": 0, "end_column": 4}, "require both line endpoints"),
+        (
+            {"start_line": 1, "end_line": 1, "start_column": 4, "end_column": 3},
+            "end must not precede its start",
+        ),
+        (
+            {"start_line": 2, "end_line": 1, "start_column": 0, "end_column": 4},
+            "end must not precede its start",
+        ),
+        (
+            {"start_line": 1, "end_line": 1, "start_column": -1, "end_column": 4},
+            "positions must be nonnegative",
+        ),
+        (
+            {"start_line": 0, "end_line": 1, "start_column": 0, "end_column": 4},
+            "positive lines",
+        ),
+    ),
+)
+def test_provenance_rejects_incomplete_or_invalid_column_spans(
+    coordinates: dict[str, int], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        EvidenceProvenance(
+            side="target",
+            source_path="main.py",
+            engine="python-ast",
+            engine_version="test",
+            strength="reference",
+            confidence="low",
+            **coordinates,
+        )
