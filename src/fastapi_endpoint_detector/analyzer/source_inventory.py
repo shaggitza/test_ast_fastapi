@@ -13,12 +13,36 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class ImportOccurrence:
+    """One normalized import and its physical AST statement coordinates."""
+
+    module: str
+    start_line: int | None = None
+    end_line: int | None = None
+    start_column: int | None = None
+    end_column: int | None = None
+
+
+@dataclass(frozen=True)
+class UnresolvedImportOccurrence:
+    """One unselected local import with its source statement coordinates."""
+
+    source_path: str
+    module: str
+    start_line: int | None = None
+    end_line: int | None = None
+    start_column: int | None = None
+    end_column: int | None = None
+
+
+@dataclass(frozen=True)
 class SourceFile:
     path: Path
     relative_path: str
     module: str
     sha256: str
     imports: tuple[str, ...]
+    import_occurrences: tuple[ImportOccurrence, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -42,6 +66,7 @@ class SourceInventory:
     max_depth: int
     limitations: tuple[str, ...] = ()
     module_collisions: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    unresolved_import_occurrences: tuple[UnresolvedImportOccurrence, ...] = ()
 
     @property
     def paths(self) -> tuple[Path, ...]:
@@ -62,6 +87,12 @@ def _module_name(relative: Path, package_prefix: str) -> str:
     if parts and parts[-1] == "__init__":
         parts.pop()
     return ".".join(([package_prefix] if package_prefix else []) + parts)
+
+
+def _import_occurrence(module: str, node: ast.Import | ast.ImportFrom) -> ImportOccurrence:
+    return ImportOccurrence(
+        module, node.lineno, node.end_lineno, node.col_offset, node.end_col_offset
+    )
 
 
 def build_source_inventory(  # noqa: PLR0912, PLR0915
@@ -169,8 +200,10 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     }
     excluded = {path for path in candidates if _matches(rel_by_path[path], exclude_patterns)}
     imports_by_path: dict[Path, tuple[str, ...]] = {}
+    import_occurrences_by_path: dict[Path, tuple[ImportOccurrence, ...]] = {}
     hashes_by_path: dict[Path, str] = {}
     unresolved: set[tuple[str, str]] = set()
+    unresolved_occurrences: set[UnresolvedImportOccurrence] = set()
     limitations: set[str] = set()
     for path in stub_candidates:
         stub_relative_name = path.relative_to(root).as_posix()
@@ -205,6 +238,7 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
             tree = ast.parse(source_text, filename=str(path))
         except (OSError, UnicodeError, SyntaxError, RecursionError) as exc:
             imports_by_path[path] = ()
+            import_occurrences_by_path[path] = ()
             if isinstance(exc, OSError):
                 reason = "could not be read"
                 hashes_by_path[path] = ""
@@ -219,10 +253,11 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         if parts[-1] == "__init__":
             parts.pop()
         current = ".".join(([package_prefix] if package_prefix else []) + parts)
-        found: set[str] = set()
+        found_occurrences: set[ImportOccurrence] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                found.update(alias.name for alias in node.names)
+                for alias in node.names:
+                    found_occurrences.add(_import_occurrence(alias.name, node))
             elif isinstance(node, ast.ImportFrom):
                 base = node.module or ""
                 if node.level:
@@ -232,9 +267,36 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
                     parent = parent[: max(0, len(parent) - node.level + 1)]
                     base = ".".join([*parent, base]).strip(".")
                 if base:
-                    found.add(base)
-                found.update(f"{base}.{alias.name}" for alias in node.names if alias.name != "*")
-        imports_by_path[path] = tuple(sorted(found))
+                    found_occurrences.add(_import_occurrence(base, node))
+                for alias in node.names:
+                    if alias.name != "*":
+                        found_occurrences.add(_import_occurrence(f"{base}.{alias.name}", node))
+        imports_by_path[path] = tuple(sorted({item.module for item in found_occurrences}))
+        import_occurrences_by_path[path] = tuple(
+            sorted(
+                found_occurrences,
+                key=lambda item: (
+                    item.module,
+                    item.start_line or 0,
+                    item.end_line or 0,
+                    item.start_column or 0,
+                    item.end_column or 0,
+                ),
+            )
+        )
+
+    def record_unresolved_import(source_path: str, occurrence: ImportOccurrence) -> None:
+        unresolved.add((source_path, occurrence.module))
+        unresolved_occurrences.add(
+            UnresolvedImportOccurrence(
+                source_path,
+                occurrence.module,
+                occurrence.start_line,
+                occurrence.end_line,
+                occurrence.start_column,
+                occurrence.end_column,
+            )
+        )
 
     # Seed from included sources, then optionally add local dependency modules by BFS.
     selected = set(included)
@@ -243,14 +305,15 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
     while queue:
         path = queue.pop(0)
         depth = distance[path]
-        for imported in imports_by_path.get(path, ()):
+        for occurrence in import_occurrences_by_path.get(path, ()):
+            imported = occurrence.module
             local = None
             ambiguous_import = None
             parts = imported.split(".")
             for stop in range(len(parts), 0, -1):
                 stub_module = ".".join(parts[:stop])
                 if stub_module in stub_modules:
-                    unresolved.add((rel_by_path[path], imported))
+                    record_unresolved_import(rel_by_path[path], occurrence)
                     limitations.add(
                         f"Local import {imported!r} from {rel_by_path[path]} may use in-root "
                         f"type stub {', '.join(stub_modules[stub_module])}; "
@@ -266,7 +329,7 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
                 if local is not None:
                     break
             if ambiguous_import is not None:
-                unresolved.add((rel_by_path[path], imported))
+                record_unresolved_import(rel_by_path[path], occurrence)
                 limitations.add(
                     f"Local import {imported!r} from {rel_by_path[path]} is ambiguous because "
                     f"module identity {ambiguous_import!r} has multiple source files"
@@ -282,7 +345,7 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
             )
             if local is None and symlink_match is not None:
                 symlink_module_name, symlink_relative = symlink_match
-                unresolved.add((rel_by_path[path], imported))
+                record_unresolved_import(rel_by_path[path], occurrence)
                 limitations.add(
                     f"Local import {imported!r} from {rel_by_path[path]} resolves through "
                     f"rejected symlink source {symlink_relative} (module {symlink_module_name!r})"
@@ -291,7 +354,7 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
             if local is None:
                 continue
             if local in excluded:
-                unresolved.add((rel_by_path[path], imported))
+                record_unresolved_import(rel_by_path[path], occurrence)
                 limitations.add(
                     f"Local import {imported!r} from {rel_by_path[path]} resolves to excluded "
                     f"source {rel_by_path[local]}"
@@ -300,14 +363,14 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
             if local in distance:
                 continue
             if not follow_imports:
-                unresolved.add((rel_by_path[path], imported))
+                record_unresolved_import(rel_by_path[path], occurrence)
                 limitations.add(
                     f"Local import {imported!r} from {rel_by_path[path]} was not followed "
                     "because follow_imports is disabled"
                 )
                 continue
             if depth >= max_depth:
-                unresolved.add((rel_by_path[path], imported))
+                record_unresolved_import(rel_by_path[path], occurrence)
                 limitations.add(
                     f"Local import {imported!r} from {rel_by_path[path]} was not followed "
                     f"because the maximum import depth {max_depth} was reached"
@@ -331,6 +394,7 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
                 module,
                 hashes_by_path.get(path, ""),
                 imports_by_path.get(path, ()),
+                import_occurrences_by_path.get(path, ()),
             )
         )
     return SourceInventory(
@@ -342,4 +406,17 @@ def build_source_inventory(  # noqa: PLR0912, PLR0915
         max_depth,
         tuple(sorted(limitations)),
         module_collisions,
+        tuple(
+            sorted(
+                unresolved_occurrences,
+                key=lambda item: (
+                    item.source_path,
+                    item.module,
+                    item.start_line or 0,
+                    item.end_line or 0,
+                    item.start_column or 0,
+                    item.end_column or 0,
+                ),
+            )
+        ),
     )
