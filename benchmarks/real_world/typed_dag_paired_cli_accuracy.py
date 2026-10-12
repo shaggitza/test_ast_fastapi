@@ -447,6 +447,17 @@ def _explicit_unsupported(report: dict[str, Any]) -> str | None:
     return None
 
 
+def _capability_operational(report: dict[str, Any]) -> bool:
+    """Return whether a probe report proves the analyzer can measure this case."""
+    return (
+        not report.get("errors")
+        and report.get("analysis_completeness") == "complete"
+        and report.get("inventory_status") == "established"
+        and report.get("summary", {}).get("total_endpoints") == len(ROOTS)
+        and not report.get("inventory_limitations")
+    )
+
+
 def _case_passes(record: dict[str, Any], declared: Case) -> bool:
     report = record.get("cli_evidence", {}).get("report")
     if not isinstance(report, dict):
@@ -741,12 +752,7 @@ def validate(  # noqa: PLR0912, PLR0915
         else:
             if not declared.capability_probe and row.get("supported") is not True:
                 raise ValueError(f"declared supported case was demoted: {declared.case_id}")
-            operational = (
-                not report.get("errors")
-                and report.get("inventory_status") == "established"
-                and report.get("summary", {}).get("total_endpoints") == len(ROOTS)
-                and not report.get("inventory_limitations")
-            )
+            operational = _capability_operational(report)
             if declared.capability_probe and row.get("supported") is not operational:
                 raise ValueError(f"capability support was guessed: {declared.case_id}")
             if row.get("supported") is True and row.get("status") != (
@@ -1313,9 +1319,7 @@ def main() -> int:
         runner_provenance.get("revision") if isinstance(runner_provenance, dict) else None
     )
     analyzer_revision = (
-        analyzer_provenance.get("revision")
-        if isinstance(analyzer_provenance, dict)
-        else None
+        analyzer_provenance.get("revision") if isinstance(analyzer_provenance, dict) else None
     )
     print(
         json.dumps(

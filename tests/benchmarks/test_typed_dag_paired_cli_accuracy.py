@@ -212,6 +212,17 @@ def test_partial_or_missing_analysis_completeness_cannot_pass_case(
         "cli_evidence": {"report": report},
     }
     assert not gate._case_passes(record, declared)
+    # The validator uses this same operational capability predicate. A
+    # partial probe remains measured as failed without being misclassified as
+    # supported, while an otherwise identical complete probe is operational.
+    assert not gate._capability_operational(report)
+    complete_report = {**report, "analysis_completeness": "complete"}
+    assert gate._capability_operational(complete_report)
+    complete_record = {
+        **record,
+        "cli_evidence": {"report": complete_report},
+    }
+    assert gate._case_passes(complete_record, declared)
 
 
 def test_oracle_keeps_connected_dead_controls_out_and_live_paths_in() -> None:
