@@ -465,11 +465,7 @@ def _case_passes(record: dict[str, Any], declared: Case) -> bool:
     return (
         record["precision"] == 1.0
         and record["recall"] == 1.0
-        and not report.get("errors")
-        and report.get("inventory_status") == "established"
-        and report.get("analysis_completeness") == "complete"
-        and report.get("summary", {}).get("total_endpoints") == len(ROOTS)
-        and not report.get("inventory_limitations")
+        and _capability_operational(report)
         and not (
             declared.control
             and any(row["confidence"] in {"high", "medium"} for row in record["actual"])
@@ -1011,11 +1007,7 @@ def _run_case(
         and not result.output_limit_exceeded
         and source_identity_valid
         and report is not None
-        and not errors
-        and report.get("analysis_completeness") == "complete"
-        and inventory_status == "established"
-        and total_endpoints == len(ROOTS)
-        and not inventory_limitations
+        and _capability_operational(report)
     )
     unsupported_reason = _explicit_unsupported(report) if report and case.capability_probe else None
     if (
