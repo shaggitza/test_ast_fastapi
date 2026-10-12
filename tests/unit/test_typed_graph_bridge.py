@@ -1,12 +1,15 @@
 """Production bridge checks against the analyzer's retained ordinary mypy build."""
 
+import ast
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from fastapi_endpoint_detector.analyzer import change_mapper as change_mapper_module
+from fastapi_endpoint_detector.analyzer import typed_graph_bridge as graph_bridge
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.source_inventory import (
@@ -422,3 +425,115 @@ def test_shadow_does_not_swallow_process_interrupts(
     monkeypatch.setattr(change_mapper_module, "build_shadow_graph", interrupted)
     with pytest.raises(KeyboardInterrupt):
         mapper.analyze_diff(diff)
+
+
+def test_dependency_candidates_keep_route_occurrences_and_call_spans(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from fastapi import FastAPI\n"
+        "from fastapi.params import Depends as Need, Security as Guard\n"
+        "app = FastAPI()\n"
+        "def first() -> int: return 1\n"
+        "def second() -> int: return 2\n"
+        "@app.get('/first')\n"
+        "@app.get('/second')\n"
+        "def handler(a: int = Need(dependency=first), "
+        "b: int = Guard(second, scopes=['x'])) -> int: return a + b\n",
+        encoding="utf-8",
+    )
+    inventory = build_source_inventory(tmp_path)
+    analyzer = MypyAnalyzer(app, module_root=tmp_path, source_inventory=inventory)
+    analyzer._ensure_mypy_built()
+    endpoints = [
+        Endpoint(
+            path=path,
+            methods=[EndpointMethod.GET],
+            handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=8),
+        )
+        for path in ("/first", "/second")
+    ]
+
+    graph = build_shadow_graph(analyzer, inventory, endpoints)
+
+    assert graph.source_dependency_bindings == ()
+    rows = graph.source_dependency_uncertainties
+    assert len(rows) == 4
+    assert {row.occurrence_id for row in rows} == {
+        binding.occurrence_id for binding in graph.endpoint_bindings
+    }
+    assert {row.reason_code for row in rows} == {"fastapi_selector_origin_unverified"}
+    assert {row.source_spelling for row in rows} == {"Need", "Guard"}
+    line = app.read_text(encoding="utf-8").splitlines()[7]
+    assert {(row.span.start_line, row.span.start_column) for row in rows} == {
+        (8, line.index("Need(")),
+        (8, line.index("Guard(")),
+    }
+    excerpts = {line[row.span.start_column : row.span.end_column] for row in rows}
+    assert "Need(dependency=first)" in excerpts
+    assert "Guard(second, scopes=['x'])" in excerpts
+    assert any("selector source ownership" in item for item in graph.limitations)
+
+
+def test_project_local_depends_spelling_is_reported_as_shadow(tmp_path: Path) -> None:
+    app = tmp_path / "app.py"
+    app.write_text(
+        "def Depends(value: object) -> object: return value\n"
+        "def provider() -> int: return 1\n"
+        "def handler(value: int = Depends(provider)) -> int: return value\n",
+        encoding="utf-8",
+    )
+    inventory = build_source_inventory(tmp_path)
+    analyzer = MypyAnalyzer(app, module_root=tmp_path, source_inventory=inventory)
+    analyzer._ensure_mypy_built()
+    endpoint = Endpoint(
+        path="/",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=3),
+    )
+
+    graph = build_shadow_graph(analyzer, inventory, [endpoint])
+
+    assert graph.source_dependency_bindings == ()
+    assert any(
+        row.reason_code == "dependency_selector_project_shadow"
+        for row in graph.source_dependency_uncertainties
+    )
+
+
+def test_dependency_calls_in_handler_body_are_outside_signature_scan(
+    tmp_path: Path,
+) -> None:
+    app = tmp_path / "app.py"
+    app.write_text(
+        "from fastapi import FastAPI\n"
+        "from fastapi.params import Depends\n"
+        "app = FastAPI()\n"
+        "def provider() -> int: return 1\n"
+        "@app.get('/')\n"
+        "def handler() -> object: return Depends(provider)\n",
+        encoding="utf-8",
+    )
+    inventory = build_source_inventory(tmp_path)
+    analyzer = MypyAnalyzer(app, module_root=tmp_path, source_inventory=inventory)
+    analyzer._ensure_mypy_built()
+    endpoint = Endpoint(
+        path="/",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="app", file_path=app, line_number=6),
+    )
+
+    graph = build_shadow_graph(analyzer, inventory, [endpoint])
+
+    assert graph.source_dependency_bindings == ()
+    assert graph.source_dependency_uncertainties == ()
+
+
+def test_signature_dependency_call_budget_is_enforced_before_return(monkeypatch: Any) -> None:
+    parsed = ast.parse("def handler(value = Depends(Depends(provider))): pass")
+    function = parsed.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    monkeypatch.setattr(graph_bridge, "_MAX_DEPENDENCY_CALLS_PER_HANDLER", 1)
+    with pytest.raises(TypedGraphBridgeError, match="call budget"):
+        graph_bridge._signature_dependency_calls(function, {})
