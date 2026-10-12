@@ -1,0 +1,42 @@
+{
+  "Dockerfile": {
+    "bytes": 678,
+    "sha256": "89229e58241e514451762836d71b8b0c36801788530be710c2d4b6ea8b20e763"
+  },
+  "image-derived-sbom.json": {
+    "bytes": 36310,
+    "sha256": "f25a3aabbd0460bd8dbad0059d080b067dceff10f29244f709111ba9a9f439ab"
+  },
+  "image-source-manifest.json": {
+    "bytes": 17457,
+    "sha256": "8fb178207c16108792d815c1fb5d630a7f5c7f02d9608b80440d8dfe233370f3"
+  },
+  "image-verification.json": {
+    "bytes": 2396,
+    "sha256": "8acc8063073deea9a6cab06f4802117b3ca44b467b2f13d11eba97e5f2a0ce18"
+  },
+  "observed-result.json": {
+    "bytes": 7732,
+    "sha256": "40323bb8ed36c5a02262b9b321cda6c99658af007e7926c2d40cf5a130e74581"
+  },
+  "owned-main.py": {
+    "bytes": 163,
+    "sha256": "4ad05b1104ae5bd641ca27b3a9c3cb797e02d7f7fc4c5c533dd25413bce12062"
+  },
+  "requirements.lock": {
+    "bytes": 9078,
+    "sha256": "a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5"
+  },
+  "snapshot-lock.json": {
+    "bytes": 198,
+    "sha256": "8ec12184c36bc4037efc1dcef6219b80ff143833ecadabd5407e5f9cecb58c20"
+  },
+  "source-pyproject.toml": {
+    "bytes": 5958,
+    "sha256": "78b51d135f431eb29abd0352912dcedaadc3278076dbbd6e18ac4556b259a2f2"
+  },
+  "worker-response.json": {
+    "bytes": 1806,
+    "sha256": "440563cbb20f14b37d0bceb8b84d918c5ad0667c219bb4dd00397a124be24967"
+  }
+}
