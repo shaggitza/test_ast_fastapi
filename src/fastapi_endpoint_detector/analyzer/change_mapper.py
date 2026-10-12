@@ -1478,7 +1478,7 @@ class ChangeMapper:
                 endpoint=endpoint,
                 confidence=confidence,
                 reason=(
-                    f"{'LOW finite points-to' if low_only_points_to else 'Type analysis'} "
+                    f"{'LOW conditional reachability' if low_only_points_to else 'Type analysis'} "
                     f"shows dependency on {diff_file.path} "
                     f"(lines {sorted(display_lines)[:5]}"
                     f"{'...' if len(display_lines) > 5 else ''}){effect_summary}"
@@ -2487,7 +2487,7 @@ class ChangeMapper:
             )
         for item in analysis_limitations:
             warnings.append(
-                f"Mypy bounded analysis at {item.file_path}:{item.call_line} exceeded "
+                f"Mypy analysis at {item.file_path}:{item.call_line} is limited by "
                 f"{item.cap} (targets={item.target_count}, limit={item.limit}); "
                 "analysis is partial."
             )
@@ -2555,11 +2555,9 @@ class ChangeMapper:
                 }.values()
             )
             if analysis_limitations:
-                warnings = [
-                    warning for warning in warnings if "Mypy bounded analysis at " not in warning
-                ]
+                warnings = [warning for warning in warnings if "Mypy analysis at " not in warning]
                 warnings.extend(
-                    f"Mypy bounded analysis at {item.file_path}:{item.call_line} exceeded "
+                    f"Mypy analysis at {item.file_path}:{item.call_line} is limited by "
                     f"{item.cap} (targets={item.target_count}, limit={item.limit}); "
                     "analysis is partial."
                     for item in analysis_limitations
