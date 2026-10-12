@@ -1,0 +1,24 @@
+{
+  "commit": "d4eec140bed84d3ff8cea8374f7f9e589b0e6def",
+  "files": {
+    "fastapi_endpoint_detector/__init__.py": "2fa65a87996c7f686dd8a3f906611b314f34905e6f37018f3526ad61a0ebabee",
+    "fastapi_endpoint_detector/analyzer/__init__.py": "057b9d84000e56264ececf9b58cd3f511336f14147ba0fe8fd860242a9cd2f05",
+    "fastapi_endpoint_detector/analyzer/client_observations.py": "341d1d1144d6ecd60f093c25143cc6e55375adc87f0ab950e975760e1da41c52",
+    "fastapi_endpoint_detector/analyzer/deployment_observations.py": "8ac7f49a1c16fb2bedf971bec1824b2082cc2506fb71c8204863aa4b2bb4305c",
+    "fastapi_endpoint_detector/analyzer/project_observations.py": "2c2b3731b5818c30946b682c7dccfa879b6d68a8541eb5f66c5461d1b98a9ed5",
+    "fastapi_endpoint_detector/analyzer/evidence_graph.py": "822ec5417dd67872135039e73175484832a3406d3ac55d0c8e5025876ceb5ba1",
+    "fastapi_endpoint_detector/analyzer/framework_phase_report.py": "b5fd00956f7d5bac8e58ed9c7e4e07535b83f12a08ab8c53bda79846da3e7ab7",
+    "fastapi_endpoint_detector/models/__init__.py": "995b74794c49f98fd310a31e02cecced67a0b9c7e7cb6a0cda92ec1c5b075c0a",
+    "fastapi_endpoint_detector/models/dependency.py": "6fbbfc030d70e7f0ec6fae071af70596597ffc9adfb2c63d6ab04f8e20b207de",
+    "fastapi_endpoint_detector/models/diff.py": "8bf51293a4f0044ef76de528d5f25f5f46d1ff46d25940b1093e8b22cf22af46",
+    "fastapi_endpoint_detector/models/effect_contract.py": "5b6076e521f2a9c8f0dc316b6a214764158cd3651fcb2884945708aebf6cb740",
+    "fastapi_endpoint_detector/models/effect_contract_audit.py": "4d4771903cb153350710e81e59e2c880a489ff4c1b40a387b8242c8132a0bcb8",
+    "fastapi_endpoint_detector/models/endpoint.py": "a797ca78d294c3570c7ff3a064dae9092aafbc7c35ab0ce77568611c49b7e302",
+    "fastapi_endpoint_detector/models/report.py": "8b90f2d421882b0ec2f172ee99f73d65d60a294de42b3b0664bc304baf3c6585",
+    "fastapi_endpoint_detector/models/resource_coupling.py": "901968e1da2b9f7f09f2bdd171b2e21f7a309f9f41d72ab474ba7cadb8ced1df",
+    "fastapi_endpoint_detector/models/sql_transaction.py": "bfe3b0357244c5e3b76676998c6354908ea8ce2d2c8cfe6787fa1809f0b6b931",
+    "fastapi_endpoint_detector/models/surface_contract.py": "1f9e2601649fbdf433dd715bd366e4e659625d2efd124cd05326963e97150197",
+    "fastapi_endpoint_detector/strict_data.py": "ba4b87f249f2e54a5ce4b507a3cbd4871d00ee03f6ea2fc44ca5e1a60236ea81"
+  },
+  "schema": "pinned-scanner-source-manifest-v1"
+}
