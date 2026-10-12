@@ -137,6 +137,10 @@ def test_same_trace_cannot_be_reused_from_another_context() -> None:
         assert reader._ACTIVE_TRACE.get() is trace
         assert reader._NODE_AUDIT_USERS == 1
     assert Node.__getattribute__ is reader._NODE_GETATTRIBUTE
+    with pytest.raises(RuntimeError, match="entered twice"):
+        trace.__enter__()
+    assert reader._ACTIVE_TRACE.get() is None
+    assert reader._NODE_AUDIT_USERS == 0
 
 
 def test_foreign_reader_before_enter_is_rejected_without_replacement(

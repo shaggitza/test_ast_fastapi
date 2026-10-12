@@ -166,7 +166,12 @@ def test_public_analyzer_and_phase_trace_uses_one_retained_typed_graph(tmp_path:
         source_bytes={path: item.data for path, item in snapshot.sources.items()},
     )
 
-    with collect_typed_consumer_trace(snapshot, typed_build, source_root=tmp_path) as trace:
+    with collect_typed_consumer_trace(
+        snapshot,
+        typed_build,
+        source_root=tmp_path,
+        registration_symbols=("fastapi.FastAPI.on_event",),
+    ) as trace:
         report = collect_framework_phase_evidence(inventory, contracts, analyzer, typed_build)
         result = trace.require_complete()
         assert TypeInfo in trace.node_types
@@ -407,7 +412,12 @@ def test_real_cached_on_event_declaration_is_source_pinned(tmp_path: Path) -> No
         ),
     )
 
-    with collect_typed_consumer_trace(snapshot, typed_build, source_root=tmp_path) as trace:
+    with collect_typed_consumer_trace(
+        snapshot,
+        typed_build,
+        source_root=tmp_path,
+        registration_symbols=("fastapi.FastAPI.on_event",),
+    ) as trace:
         analyzer.analyze_endpoint(endpoint)
     result = trace.result()
 

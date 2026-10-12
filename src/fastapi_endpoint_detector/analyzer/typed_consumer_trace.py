@@ -19,7 +19,15 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
-from mypy.nodes import Decorator, MypyFile, Node, OverloadedFuncDef, SymbolTableNode, TypeInfo
+from mypy.nodes import (
+    Decorator,
+    FuncDef,
+    MypyFile,
+    Node,
+    OverloadedFuncDef,
+    SymbolTableNode,
+    TypeInfo,
+)
 from mypy.types import Instance, Type, get_proper_type
 
 from fastapi_endpoint_detector.analyzer.typed_cache_admission import CacheRunPlan
@@ -32,6 +40,8 @@ if TYPE_CHECKING:
 MAX_TRACE_SOURCE_FILES = 20_000
 MAX_TRACE_SOURCE_FILE_BYTES = 4 * 1024 * 1024
 MAX_TRACE_SOURCE_BYTES = 128 * 1024 * 1024
+MAX_TRACE_REGISTRATIONS = 64
+MAX_TRACE_REGISTRATION_MRO = 64
 
 
 @dataclass(frozen=True)
@@ -163,6 +173,21 @@ class TypedConsumerTraceResult:
         )
 
 
+@dataclass(frozen=True)
+class _SelectedRegistration:
+    """One public selector bound to retained receiver and declaration objects."""
+
+    contract_symbol: str
+    receiver: TypeInfo
+    receiver_fullname: str
+    lookup_owners: tuple[TypeInfo, ...]
+    member: SymbolTableNode
+    wrapper: FuncDef | Decorator
+    declaration: FuncDef
+    declaration_fullname: str
+    defining_module: str
+
+
 class ConsumerTraceRejected(RuntimeError):
     """The realized semantic consumer path exceeds the pinned trace policy."""
 
@@ -285,7 +310,6 @@ class TypedConsumerTrace:
     bind every observed module to exact source bytes.
     """
 
-    CANONICAL_REGISTRATION = "fastapi.applications.FastAPI.on_event"
     _CANONICAL_ALLOWED_FIELDS = frozenset({"identity", "type"})
 
     def __init__(
@@ -295,6 +319,7 @@ class TypedConsumerTrace:
         *,
         source_root: Path,
         cache_plan: CacheRunPlan | None = None,
+        registration_symbols: tuple[str, ...] = (),
     ) -> None:
         self.snapshot = snapshot
         self.typed_build = typed_build
@@ -331,9 +356,143 @@ class TypedConsumerTrace:
         self._node_shapes: dict[int, NodeShape] = {}
         self._canonical_pins: set[tuple[str, str]] = set()
         self._framework_registration_observed = False
+        self._observed_registrations: set[str] = set()
         self._blockers: set[str] = set()
         self._token: contextvars.Token[TypedConsumerTrace | None] | None = None
+        self._ever_entered = False
         self._validate_snapshot()
+        self._registrations: dict[str, _SelectedRegistration] = {}
+        if (
+            not isinstance(registration_symbols, tuple)
+            or len(registration_symbols) > MAX_TRACE_REGISTRATIONS
+            or any(
+                not isinstance(symbol, str)
+                or len(symbol) > 512
+                or len(symbol.split(".")) < 3
+                or not all(part.isidentifier() for part in symbol.split("."))
+                for symbol in registration_symbols
+            )
+            or len(set(registration_symbols)) != len(registration_symbols)
+        ):
+            self._blockers.add("selected registration symbols are malformed or exceed bounds")
+        else:
+            for symbol in registration_symbols:
+                binding = self._resolve_selected_registration(symbol)
+                if binding is None:
+                    self._blockers.add(
+                        f"selected registration has no retained declaration: {symbol}"
+                    )
+                else:
+                    self._registrations[symbol] = binding
+
+    def _defining_type_module(self, info: TypeInfo) -> str | None:
+        """Find a defining export by full identity, never by a matching class leaf."""
+        module, _, name = info.fullname.rpartition(".")
+        state = self.typed_build.modules.get(module)
+        tree = getattr(state, "tree", None)
+        raw_path = getattr(state, "path", None)
+        symbol = tree.names.get(name) if isinstance(tree, MypyFile) else None
+        if (
+            module not in self.module_paths
+            or not isinstance(tree, MypyFile)
+            or str(Path(tree.path).resolve()) != self.module_paths[module]
+            or not isinstance(raw_path, str)
+            or str(Path(raw_path).resolve()) != self.module_paths[module]
+            or getattr(symbol, "node", None) is not info
+        ):
+            return None
+        return module
+
+    def _resolve_selected_registration(self, symbol: str) -> _SelectedRegistration | None:
+        """Resolve only the selected public class and its effective MRO member."""
+        public_module, class_name, member_name = symbol.rsplit(".", maxsplit=2)
+        state = self.typed_build.modules.get(public_module)
+        tree = getattr(state, "tree", None)
+        if not isinstance(tree, MypyFile):
+            return None
+        receiver = getattr(tree.names.get(class_name), "node", None)
+        if not isinstance(receiver, TypeInfo) or self._defining_type_module(receiver) is None:
+            return None
+        mro = receiver.mro
+        if (
+            not isinstance(mro, list)
+            or not mro
+            or len(mro) > MAX_TRACE_REGISTRATION_MRO
+            or mro[0] is not receiver
+            or any(not isinstance(owner, TypeInfo) for owner in mro)
+            or len({id(owner) for owner in mro}) != len(mro)
+        ):
+            return None
+        return self._effective_selected_registration(symbol, receiver, member_name)
+
+    def _effective_selected_registration(
+        self, symbol: str, receiver: TypeInfo, member_name: str
+    ) -> _SelectedRegistration | None:
+        owners: list[TypeInfo] = []
+        for owner in receiver.mro:
+            defining_module = self._defining_type_module(owner)
+            if defining_module is None:
+                return None
+            owners.append(owner)
+            member = owner.names.get(member_name)
+            if member is None:
+                continue
+            wrapper = member.node
+            declaration = wrapper.func if isinstance(wrapper, Decorator) else wrapper
+            if (
+                not isinstance(wrapper, (FuncDef, Decorator))
+                or not isinstance(declaration, FuncDef)
+                or declaration.fullname != f"{owner.fullname}.{member_name}"
+                or self.node_modules.get(id(declaration)) != defining_module
+            ):
+                return None
+            return _SelectedRegistration(
+                contract_symbol=symbol,
+                receiver=receiver,
+                receiver_fullname=receiver.fullname,
+                lookup_owners=tuple(owners),
+                member=member,
+                wrapper=wrapper,
+                declaration=declaration,
+                declaration_fullname=declaration.fullname,
+                defining_module=defining_module,
+            )
+        return None
+
+    def _selected_declaration(self, node: object) -> _SelectedRegistration | None:
+        return next(
+            (
+                binding
+                for binding in self._registrations.values()
+                if node is binding.declaration
+                or (node is binding.wrapper and isinstance(node, Decorator))
+            ),
+            None,
+        )
+
+    def _selected_type_lookup(self, node: Node, field: str) -> bool:
+        """Keep each receiver/member lookup paired with its exact MRO owners."""
+        lookup = _TYPEINFO_LOOKUP.get()
+        if lookup is None or field not in {"fullname", "mro", "names"}:
+            return False
+        return any(
+            lookup == (id(binding.receiver), binding.contract_symbol.rsplit(".", 1)[-1])
+            and any(node is owner for owner in binding.lookup_owners)
+            and self._resolve_selected_registration(binding.contract_symbol) == binding
+            for binding in self._registrations.values()
+        )
+
+    def _node_defining_module(self, node: Node, fallback: str) -> str:
+        module = getattr(node, "module_name", None)
+        if isinstance(module, str) and module in self.module_paths:
+            return module
+        fullname = getattr(node, "fullname", None)
+        candidates = [
+            name
+            for name in self.module_paths
+            if isinstance(fullname, str) and (fullname == name or fullname.startswith(name + "."))
+        ]
+        return max(candidates, key=len) if candidates else fallback
 
     def _index_typed_nodes(self) -> dict[int, str]:
         """Bind object identities to the exact retained Mypy module graph."""
@@ -368,6 +527,8 @@ class TypedConsumerTrace:
                 return
             seen.add(identity)
             self.node_types.add(type(node))
+            if isinstance(node, (TypeInfo, FuncDef, Decorator, OverloadedFuncDef)):
+                module = self._node_defining_module(node, module)
             owners[identity] = module
             for cls in type(node).__mro__:
                 for field_name in getattr(cls, "__mypyc_attrs__", ()):
@@ -390,24 +551,10 @@ class TypedConsumerTrace:
                 node = getattr(symbol, "node", None)
                 if isinstance(node, Node):
                     self.node_types.add(type(node))
-                    defining_module = getattr(node, "module_name", None)
-                    if (
-                        not isinstance(defining_module, str)
-                        or defining_module not in self.module_paths
-                    ):
-                        fullname = getattr(node, "fullname", None)
-                        if isinstance(fullname, str):
-                            candidates = [
-                                name
-                                for name in self.module_paths
-                                if fullname == name or fullname.startswith(name + ".")
-                            ]
-                            defining_module = max(candidates, key=len) if candidates else module
-                        else:
-                            defining_module = module
-                    owners.setdefault(id(node), defining_module)
+                    defining_module = self._node_defining_module(node, module)
+                    visit(node, defining_module)
                     if isinstance(node, TypeInfo):
-                        visit_symbols(node.names, module, seen_symbols)
+                        visit_symbols(node.names, defining_module, seen_symbols)
 
         for module, state in self.typed_build.modules.items():
             tree = getattr(state, "tree", None)
@@ -499,10 +646,10 @@ class TypedConsumerTrace:
                 self._blockers.add(f"cached typed module staged artifact digest mismatch: {module}")
 
     def __enter__(self) -> TypedConsumerTrace:
-        # The shared lock also serializes reuse of this instance across contexts.
+        # The shared lock also serializes context entry and audit-hook ownership.
         with _NODE_AUDIT_LOCK:
-            if self._token is not None:
-                raise RuntimeError("typed consumer trace cannot be entered twice")
+            if self._ever_entered or self._token is not None:
+                raise RuntimeError("typed consumer trace cannot be entered twice (one-shot)")
             active = _ACTIVE_TRACE.get()
             if active is not None:
                 active._blockers.add("nested typed consumer traces make reader closure ambiguous")
@@ -519,6 +666,7 @@ class TypedConsumerTrace:
             except BaseException:
                 _release_node_audit()
                 raise
+            self._ever_entered = True
             if any(
                 node_type.__getattribute__ is not _audited_node_getattribute
                 for node_type in self.node_types
@@ -605,27 +753,24 @@ class TypedConsumerTrace:
                 value_present=value_present,
             )
         )
-        if fullname == self.CANONICAL_REGISTRATION:
-            self._pin_canonical_declaration(node, module, cached=cached)
-        lookup = _TYPEINFO_LOOKUP.get()
+        selected = self._selected_declaration(node)
+        if selected is not None:
+            self._pin_canonical_declaration(selected.declaration, module, cached=cached)
         canonical_type_lookup = (
-            lookup == (id(node), "on_event")
-            and fullname == "fastapi.applications.FastAPI"
-            and module == "fastapi.applications"
-            and field in {"fullname", "mro", "names"}
+            self._selected_type_lookup(node, field)
             and self.cache_plan is not None
             and module in self.admitted_modules
         )
         if (
             cached
-            and fullname == self.CANONICAL_REGISTRATION
+            and selected is not None
             and (self.cache_plan is None or module not in self.admitted_modules)
         ):
             self._blockers.add(
                 "cached canonical registration has no matching admitted artifact binding"
             )
         elif cached and not (
-            (fullname == self.CANONICAL_REGISTRATION and field in self._CANONICAL_ALLOWED_FIELDS)
+            (selected is not None and field in self._CANONICAL_ALLOWED_FIELDS)
             or canonical_type_lookup
         ):
             self._blockers.add(
@@ -635,107 +780,117 @@ class TypedConsumerTrace:
 
     def observe_type_access(self, node: object, typed_value: Type | None) -> None:
         """Record the actual mypy type-map value read for a visited node."""
-        module = self.node_modules.get(id(node))
-        if module is None:
-            self._blockers.add(
-                "type-map consumer node does not belong to the transaction's typed build"
+        token = _AUDIT_REENTRY.set(True)
+        try:
+            module = self.node_modules.get(id(node))
+            if module is None:
+                self._blockers.add(
+                    "type-map consumer node does not belong to the transaction's typed build"
+                )
+                return
+            proper_type = get_proper_type(typed_value)
+            type_identity = (
+                proper_type.type.fullname
+                if isinstance(proper_type, Instance)
+                else type(proper_type).__name__
             )
-            return
-        proper_type = typed_value
-        proper_type = get_proper_type(typed_value)
-        type_identity = (
-            proper_type.type.fullname
-            if isinstance(proper_type, Instance)
-            else type(proper_type).__name__
-        )
-        fullname = getattr(node, "fullname", None)
-        if not isinstance(fullname, str):
-            fullname = None
-        state = self.typed_build.modules.get(module)
-        cached = state is not None and (
-            module in self.admitted_modules or module not in self.rechecked_modules
-        )
-        self._accesses.append(
-            NodeAccess(
-                consumer="MypyAnalyzer._get_type_from_node",
-                node_identity=id(node),
-                module=module,
-                node_type=type(node).__name__,
-                fullname=fullname,
-                type_identity=type_identity,
-                shape=_node_shape(node),
-                fields=("identity", "type"),
-                cached=cached,
+            fullname = getattr(node, "fullname", None)
+            if not isinstance(fullname, str):
+                fullname = None
+            state = self.typed_build.modules.get(module)
+            cached = state is not None and (
+                module in self.admitted_modules or module not in self.rechecked_modules
             )
-        )
-        if cached and fullname != self.CANONICAL_REGISTRATION:
-            self._blockers.add(
-                "type evidence consumed from a cached node outside canonical registration: "
-                f"{module}"
+            self._accesses.append(
+                NodeAccess(
+                    consumer="MypyAnalyzer._get_type_from_node",
+                    node_identity=id(node),
+                    module=module,
+                    node_type=type(node).__name__,
+                    fullname=fullname,
+                    type_identity=type_identity,
+                    shape=_node_shape(node),
+                    fields=("identity", "type"),
+                    cached=cached,
+                )
             )
-        elif cached and (self.cache_plan is None or module not in self.admitted_modules):
-            self._blockers.add(
-                "cached canonical registration has no matching admitted artifact binding"
-            )
+            if cached and self._selected_declaration(node) is None:
+                self._blockers.add(
+                    "type evidence consumed from a cached node outside canonical registration: "
+                    f"{module}"
+                )
+            elif cached and (self.cache_plan is None or module not in self.admitted_modules):
+                self._blockers.add(
+                    "cached canonical registration has no matching admitted artifact binding"
+                )
+        finally:
+            _AUDIT_REENTRY.reset(token)
 
-    def observe_framework_registration(self, site: object) -> None:
-        """Bind the actual FastAPI declaration and callsite to source bytes."""
-        symbol = getattr(site, "canonical_symbol", None)
-        if symbol != self.CANONICAL_REGISTRATION:
-            self._blockers.add("framework consumer resolved a noncanonical registration")
-            return
-        module = "fastapi.applications"
-        state = self.typed_build.modules.get(module)
-        if state is None:
-            self._blockers.add("canonical FastAPI module is absent from retained typed graph")
-            return
-        tree: MypyFile | None = getattr(state, "tree", None)
-        if tree is None:
-            self._blockers.add("canonical FastAPI declaration has no retained typed module")
-            return
-        fastapi_symbol = tree.names.get("FastAPI")
-        info = getattr(fastapi_symbol, "node", None)
-        methods = getattr(info, "names", None)
-        method_symbol = methods.get("on_event") if methods is not None else None
-        declaration = getattr(method_symbol, "node", None)
-        if declaration is None:
-            self._blockers.add("canonical FastAPI on_event declaration is absent")
-            return
-        if type(declaration).__name__ == "Decorator":
-            declaration = declaration.func
-        fullname = getattr(declaration, "fullname", None)
-        if fullname != self.CANONICAL_REGISTRATION:
-            self._blockers.add("typed FastAPI registration declaration identity differs")
-            return
-        pinned = self._pin_canonical_declaration(
-            declaration,
-            module,
-            cached=module in self.admitted_modules or module not in self.rechecked_modules,
-        )
-        self.observe_node(
-            declaration,
-            module,
-            "framework_phase_integration._typed_registration",
-            ("identity", "type"),
-        )
-        if pinned:
-            self._framework_registration_observed = True
+    def observe_framework_registration(self, site: object, contract_symbol: str) -> None:
+        """Pin the selected effective declaration after the phase trust gate."""
+        token = _AUDIT_REENTRY.set(True)
+        try:
+            selected = self._registrations.get(contract_symbol)
+            if selected is None:
+                self._blockers.add("framework consumer resolved an unselected registration")
+                return
+            current = self._resolve_selected_registration(contract_symbol)
+            receivers = getattr(site, "receiver_candidates", ())
+            if (
+                current != selected
+                or getattr(getattr(site, "status", None), "value", None) != "exact"
+                or getattr(getattr(site, "invocation", None), "value", None) != "instance_method"
+                or getattr(site, "canonical_symbol", None) != selected.declaration_fullname
+                or not isinstance(receivers, (tuple, list))
+                or tuple(receivers) != (selected.receiver_fullname,)
+            ):
+                self._blockers.add("typed selected registration declaration identity differs")
+                return
+            module = selected.defining_module
+            pinned = self._pin_canonical_declaration(
+                selected.declaration,
+                module,
+                cached=module in self.admitted_modules or module not in self.rechecked_modules,
+            )
+            self.observe_node(
+                selected.declaration,
+                module,
+                "framework_phase_integration._typed_registration",
+                ("identity", "type"),
+            )
+            if pinned:
+                self._observed_registrations.add(contract_symbol)
+                self._framework_registration_observed = True
+        finally:
+            _AUDIT_REENTRY.reset(token)
 
     def _pin_canonical_declaration(self, declaration: object, module: str, *, cached: bool) -> bool:
-        if module != "fastapi.applications":
+        selected = self._selected_declaration(declaration)
+        if selected is None or selected.defining_module != module:
             self._blockers.add("canonical registration identity came from an unexpected module")
+            return False
+        if (
+            self._resolve_selected_registration(selected.contract_symbol) != selected
+            or getattr(declaration, "fullname", None) != selected.declaration_fullname
+        ):
+            self._blockers.add("canonical declaration source identity differs")
             return False
         module_path = self.module_paths.get(module)
         source = self.snapshot.sources.get(module_path or "")
         if module_path is None or source is None:
-            self._blockers.add("canonical FastAPI declaration has no owner-pinned source bytes")
+            self._blockers.add(
+                "canonical registration declaration has no owner-pinned source bytes"
+            )
             return False
         if source.provenance != "admitted_external_source":
-            self._blockers.add("canonical FastAPI declaration lacks admitted source provenance")
+            self._blockers.add(
+                "canonical registration declaration lacks admitted source provenance"
+            )
             return False
-        if getattr(declaration, "fullname", None) != self.CANONICAL_REGISTRATION:
-            self._blockers.add("canonical declaration source identity differs")
-            return False
+        if cached and (self.cache_plan is None or module not in self.admitted_modules):
+            self._blockers.add(
+                "cached canonical registration has no matching admitted artifact binding"
+            )
         body = getattr(declaration, "body", None)
         if cached and body is not None:
             body_nodes = getattr(body, "body", None)
@@ -762,7 +917,15 @@ class TypedConsumerTrace:
             source_pins=source_pins,
             canonical_registration_pins=tuple(sorted(self._canonical_pins)),
             framework_registration_observed=self._framework_registration_observed,
-            blockers=tuple(sorted(self._blockers)),
+            blockers=tuple(
+                sorted(
+                    self._blockers
+                    | {
+                        f"selected registration was not observed: {symbol}"
+                        for symbol in self._registrations.keys() - self._observed_registrations
+                    }
+                )
+            ),
         )
 
     def require_complete(self) -> TypedConsumerTraceResult:
@@ -801,6 +964,7 @@ def collect_typed_consumer_trace(
     *,
     source_root: Path,
     cache_plan: CacheRunPlan | None = None,
+    registration_symbols: tuple[str, ...] = (),
 ) -> Iterator[TypedConsumerTrace]:
     """Opt in to one closed trace around endpoint and phase analysis."""
     trace = TypedConsumerTrace(
@@ -808,6 +972,7 @@ def collect_typed_consumer_trace(
         typed_build,
         source_root=source_root,
         cache_plan=cache_plan,
+        registration_symbols=registration_symbols,
     )
     with trace:
         yield trace
@@ -820,15 +985,11 @@ def observe_node_access(node: object, module: str, consumer: str, fields: tuple[
         trace.observe_node(node, module, consumer, fields)
 
 
-def observe_framework_registration(site: object) -> None:
+def observe_framework_registration(site: object, contract_symbol: str) -> None:
     """Record the canonical declaration used by the active phase consumer."""
     trace = _ACTIVE_TRACE.get()
     if trace is not None:
-        token = _AUDIT_REENTRY.set(True)
-        try:
-            trace.observe_framework_registration(site)
-        finally:
-            _AUDIT_REENTRY.reset(token)
+        trace.observe_framework_registration(site, contract_symbol)
 
 
 def observe_call_site(site: object, module: str) -> None:

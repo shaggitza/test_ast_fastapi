@@ -5,6 +5,9 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from fastapi_endpoint_detector.analyzer import framework_phase_integration as phase_module
 from fastapi_endpoint_detector.analyzer.framework_phase_graph import (
     adapt_framework_phases_to_graph,
 )
@@ -273,3 +276,36 @@ def test_local_module_shadow_with_framework_fullname_is_rejected_by_distribution
     assert report.records[0].status == "unavailable"
     assert report.records[0].registration is None
     assert report.records[0].framework_declaration_sha256 is None
+
+
+def test_rejected_framework_source_is_not_recorded_by_the_active_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "app.py"
+    source.write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n"
+        "@app.on_event('startup')\n"
+        "def start() -> None: pass\n",
+        encoding="utf-8",
+    )
+    inventory, contracts = _inventory(source)
+    typed_build = _typed_build(tmp_path)
+    observed: list[tuple[object, str]] = []
+    monkeypatch.setattr(phase_module, "_trusted_framework_source", lambda *_args: None)
+    monkeypatch.setattr(
+        phase_module,
+        "observe_framework_registration",
+        lambda site, symbol: observed.append((site, symbol)),
+    )
+    report = collect_framework_phase_evidence(
+        inventory, contracts, MypyAnalyzer(tmp_path), typed_build
+    )
+    assert report.records
+    assert observed == []
+    assert all(record.typed_framework_symbol is None for record in report.records)
+    assert all(record.registration_call_site is None for record in report.records)
+    assert all(
+        any("no unique exact mypy call site" in reason for reason in record.limitations)
+        for record in report.records
+    )

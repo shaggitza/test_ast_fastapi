@@ -256,10 +256,10 @@ def _typed_registration(
     if len(matched) != 1:
         return None
     site = matched[0]
-    observe_framework_registration(site)
     trusted_source = _trusted_framework_source(site, typed_build, source_root)
     if trusted_source is None:
         return None
+    observe_framework_registration(site, registration_contract.symbol)
     return site, trusted_source[1]
 
 
