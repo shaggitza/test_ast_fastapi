@@ -115,6 +115,8 @@ Selectors are deliberately bounded:
 - `receiver`
 - `argument` with a non-negative `index`
 - `keyword` with a Python identifier `name`
+- schema-v5 `argument_or_keyword` with both `index` and `name`; exactly one argument
+  must bind either form
 - an optional identifier-only `path`
 
 Package constraints are target-applicability metadata in schema v1. A package block
@@ -165,8 +167,8 @@ method names are intentionally absent.
 Each family has an independent identity and semantic hash. Filesystem receiver
 origins, exact HTTP verb tables, and composite typed-S3 `(Bucket, Key)` identities
 were version `2.0.0`; the reviewed additions advance filesystem and typed S3 to
-`3.0.0` and MongoDB to `1.3.0`. HTTP remains `2.0.0` pending approval of the
-module-mutation guard. Redis remains `1.0.0`.
+`3.0.0` and MongoDB to `1.3.0`. The HTTP preset is `2.1.0`, revision `3`, with schema v5 URL binding for fourteen
+source-pinned module helpers. Redis remains `1.0.0`.
 HTTP contracts preserve
 `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`, or `OPTIONS` as structured
 contract semantics while finite URLs remain hashed resource evidence. Typed S3
@@ -179,19 +181,24 @@ Multiple presets are not silently merged because the current provenance model ha
 one authoritative contract source per analysis.
 
 The reviewed follow-up adds four filesystem declarations, five Motor
-declarations, and five typed-S3 declarations. The seven candidate module-level
-HTTPX declarations have source AST and selector checks in the unit suite, but
-remain out of the bundled preset pending independent approval of the mutation
-guard.
+declarations, five typed-S3 declarations, and seven fixed verbs each from
+`httpx._api` and `requests.api`. The HTTP module-helper rows apply only to
+HTTPX `0.28.1` and Requests `2.32.3`, with exact implementation, re-export,
+and package-metadata source hashes. Their schema-v5
+`argument_or_keyword` selector identifies URL by positional index `0` or
+keyword `url`. Exactly one argument record must match; absent or conflicting
+bindings keep the resource identity unavailable. Schema v5 is required wherever
+this selector appears, including value selectors and composite components.
+Existing schema v1–v4 selectors retain their behavior.
+
 Motor and typed-S3 rows retain their resolver-derived package versions and source
 hash metadata. Their source evidence identifies the reviewed declaration owner,
-signature, and selector; it does not establish canonical runtime behavior or
-support outside those exact declarations. Static exact-symbol resolution does
-not detect runtime module rebinding or mutation. Requests module-level helpers
-remain unsupported pending resolver coverage for that behavior. Redis and typed
-SQS remain in the bundled presets. Issue #97 remains open for broader
-compatibility ranges, Requests module helpers, Kafka, framework movement, and
-real-world evaluation.
+signature, and selector; it does not establish runtime behavior or support
+outside those exact declarations. Visible imported-callable mutation and open
+dispatch fail closed; static source evidence does not establish runtime module
+behavior. Redis and typed SQS remain in the bundled presets. Issue #97 remains
+open for broader compatibility ranges, Kafka, framework movement, and real-world
+evaluation.
 
 ## Configuration
 

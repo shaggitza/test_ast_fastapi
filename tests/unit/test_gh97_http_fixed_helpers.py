@@ -160,20 +160,28 @@ def _audit(package: str, app: Path, endpoint: Endpoint, sites: list[Any], analyz
 
 
 @pytest.mark.parametrize("package", tuple(PACKAGES))
-def test_fixed_module_helpers_match_pinned_wheel_audit(package: str, tmp_path: Path) -> None:
-    """Seven fixed verbs bind URL argument zero and the exact pinned release."""
+@pytest.mark.parametrize("url_form", ["positional", "keyword"])
+def test_fixed_module_helpers_match_pinned_wheel_audit(
+    package: str, url_form: str, tmp_path: Path
+) -> None:
+    """Seven fixed verbs bind one positional or keyword URL in the pinned release."""
     spec = PACKAGES[package]
     if not spec["wheel"].is_file():
         pytest.skip(f"pinned {package} source wheel is unavailable")
     app = tmp_path / "app"
     app.mkdir()
+    calls_source = spec["calls"]
+    if url_form == "keyword":
+        calls_source = calls_source.replace(
+            "('https://example.invalid/", "(url='https://example.invalid/"
+        )
     source = (
         spec["imports"]
         + spec["generic_import"]
         + "from typing import Any\n"
         + "class Foreign:\n    def get(self, url: str) -> object: ...\n"
         + "def handler(url: str, foreign: Foreign, anything: Any) -> None:\n"
-        + spec["calls"]
+        + calls_source
         + "    foreign.get(url)\n"
         + "    anything.get(url)\n"
     )
@@ -218,7 +226,11 @@ def test_fixed_module_helpers_match_pinned_wheel_audit(package: str, tmp_path: P
         selected = [
             argument
             for argument in calls[occurrence.line].arguments
-            if argument.positional_index == 0
+            if (
+                argument.positional_index == 0
+                if url_form == "positional"
+                else argument.keyword == "url"
+            )
         ]
         assert len(selected) == 1
 

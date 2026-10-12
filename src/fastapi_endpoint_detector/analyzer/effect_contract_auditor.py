@@ -161,20 +161,33 @@ def _selector_identity(
             )
         return ResourceIdentityEvidence.model_validate(origin)
     selected = None
-    for argument in site_payload["arguments"]:
-        if (
-            selector.kind == SelectorKind.ARGUMENT
-            and argument["positional_index"] == selector.index
-        ):
-            selected = argument
-            break
-        if selector.kind == SelectorKind.KEYWORD and argument["keyword"] == selector.name:
-            selected = argument
-            break
+    absence_reason = "selected_argument_absent"
+    if selector.kind == SelectorKind.ARGUMENT_OR_KEYWORD:
+        matches = [
+            argument
+            for argument in site_payload["arguments"]
+            if argument["positional_index"] == selector.index
+            or argument["keyword"] == selector.name
+        ]
+        if len(matches) == 1:
+            selected = matches[0]
+        elif matches:
+            absence_reason = "selected_argument_ambiguous"
+    else:
+        for argument in site_payload["arguments"]:
+            if (
+                selector.kind == SelectorKind.ARGUMENT
+                and argument["positional_index"] == selector.index
+            ):
+                selected = argument
+                break
+            if selector.kind == SelectorKind.KEYWORD and argument["keyword"] == selector.name:
+                selected = argument
+                break
     if selected is None:
         return ResourceIdentityEvidence(
             status=FiniteValueStatus.UNAVAILABLE,
-            reason_code="selected_argument_absent",
+            reason_code=absence_reason,
         )
     return ResourceIdentityEvidence(
         status=FiniteValueStatus(selected["status"]),

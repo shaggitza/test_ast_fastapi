@@ -96,6 +96,7 @@ class SelectorKind(str, Enum):
     RECEIVER = "receiver"
     ARGUMENT = "argument"
     KEYWORD = "keyword"
+    ARGUMENT_OR_KEYWORD = "argument_or_keyword"
 
 
 class AsyncMode(str, Enum):
@@ -206,6 +207,9 @@ class EffectSelector(_StrictModel):
         elif self.kind == SelectorKind.KEYWORD:
             if self.name is None or self.index is not None:
                 raise ValueError("keyword selectors require only a keyword name")
+        elif self.kind == SelectorKind.ARGUMENT_OR_KEYWORD:
+            if self.index is None or self.name is None:
+                raise ValueError("argument_or_keyword selectors require an index and keyword name")
         elif self.index is not None or self.name is not None:
             raise ValueError("receiver/none selectors forbid index and name")
         if self.kind == SelectorKind.NONE and self.path:
@@ -343,7 +347,7 @@ class EffectContract(_StrictModel):
 class EffectContractDocument(_StrictModel):
     """Versioned root document for a deterministic contract set."""
 
-    schema_version: Literal[1, 2, 3, 4] = 1
+    schema_version: Literal[1, 2, 3, 4, 5] = 1
     preset: PresetMetadata
     contracts: tuple[EffectContract, ...] = Field(min_length=1)
 
@@ -351,7 +355,7 @@ class EffectContractDocument(_StrictModel):
     @classmethod
     def validate_schema_version_type(cls, value: object) -> object:
         if type(value) is not int:  # bool is intentionally excluded
-            raise ValueError("schema_version must be the integer 1, 2, 3, or 4")
+            raise ValueError("schema_version must be the integer 1, 2, 3, 4, or 5")
         return value
 
     @model_validator(mode="after")
@@ -373,6 +377,16 @@ class EffectContractDocument(_StrictModel):
         ids: set[str] = set()
         keys: dict[tuple[str, InvocationKind], EffectContract] = {}
         for contract in self.contracts:
+            resource_selectors = (
+                contract.resource.components
+                if isinstance(contract.resource, CompositeEffectSelector)
+                else (contract.resource,)
+            )
+            if self.schema_version < 5 and any(
+                selector is not None and selector.kind == SelectorKind.ARGUMENT_OR_KEYWORD
+                for selector in (*resource_selectors, contract.value)
+            ):
+                raise ValueError("argument_or_keyword selectors require schema_version 5")
             if contract.id in ids:
                 raise ValueError(f"duplicate contract id: {contract.id}")
             ids.add(contract.id)

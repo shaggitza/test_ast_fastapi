@@ -1,11 +1,11 @@
-schema_version: 3
+schema_version: 5
 preset:
   id: python-http-client-effects
-  version: 2.0.0
+  version: 2.1.0
   provenance:
     kind: preset
     source: fastapi-endpoint-detector/effects_http_clients_v1.yaml
-    revision: "2"
+    revision: "3"
 contracts:
   - id: requests-session-get
     symbol: requests.sessions.Session.get
@@ -256,7 +256,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: GET
     package:
       distribution: httpx
@@ -270,7 +270,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: POST
     package: &httpx_api_0281
       distribution: httpx
@@ -284,7 +284,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: PUT
     package: *httpx_api_0281
   - id: httpx-api-patch
@@ -292,7 +292,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: PATCH
     package: *httpx_api_0281
   - id: httpx-api-delete
@@ -300,7 +300,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: DELETE
     package: *httpx_api_0281
   - id: httpx-api-head
@@ -308,7 +308,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: HEAD
     package: *httpx_api_0281
   - id: httpx-api-options
@@ -316,7 +316,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: OPTIONS
     package: *httpx_api_0281
 
@@ -325,7 +325,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: GET
     package:
       distribution: requests
@@ -339,7 +339,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: POST
     package: &requests_api_2323
       distribution: requests
@@ -353,7 +353,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: PUT
     package: *requests_api_2323
   - id: requests-api-patch
@@ -361,7 +361,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: PATCH
     package: *requests_api_2323
   - id: requests-api-delete
@@ -369,7 +369,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: DELETE
     package: *requests_api_2323
   - id: requests-api-head
@@ -377,7 +377,7 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: HEAD
     package: *requests_api_2323
   - id: requests-api-options
@@ -385,6 +385,6 @@ contracts:
     invocation: function
     operation: request
     channel: outbound_http
-    resource: {kind: argument, index: 0}
+    resource: {kind: argument_or_keyword, index: 0, name: url}
     http_method: OPTIONS
     package: *requests_api_2323

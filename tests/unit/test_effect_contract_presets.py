@@ -22,7 +22,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
 _EXPECTED_PRESET_HASHES = {
     "message-bus-v1": "sha256:875790c0d08b0f6cb2e8681bf56a9066d67bee39225dd7160cb51a447d18ebc3",
     "filesystem-v1": "sha256:066c93f8a569d996bac3f01b3d244f0b7d43a5223050563ad327404e7bad049b",
-    "http-clients-v1": "sha256:4f845db159afb447380e5c5b734c927d01cb099d2d471b70de1db98cb3c1f552",
+    "http-clients-v1": "sha256:f4fe3cf1d02fdc3e95d433666a177f9c5df6049c5ff31fdb7a30f67c998c6092",
     "mongodb-v1": "sha256:87b8ef6b0ccd3ef4862fb78ffad20cc88ddf55fa1580e286d87ab5c17f0070c9",
     "object-storage-v1": "sha256:1d465f50407ef3d4a168d12646e894fb4d363dc97874e1a3fb140c9bcf7b5523",
     "redis-v1": "sha256:ce681490563300ce01dec68cd42af26c5fe8e06c7d5d45ae652dfce73c531ca2",
@@ -153,14 +153,14 @@ def test_bundled_effect_presets_are_strict_versioned_snapshots(name: str) -> Non
     expected_version = {
         "mongodb-v1": "1.3.0",
         "filesystem-v1": "3.0.0",
-        "http-clients-v1": "2.0.0",
+        "http-clients-v1": "2.1.0",
         "object-storage-v1": "3.0.0",
         "sqlalchemy-v1": "3.0.0",
     }.get(name, "1.0.0")
     expected_revision = {
         "mongodb-v1": "4",
         "filesystem-v1": "3",
-        "http-clients-v1": "2",
+        "http-clients-v1": "3",
         "object-storage-v1": "3",
         "sqlalchemy-v1": "3",
     }.get(name, "1")
@@ -482,7 +482,10 @@ def test_added_rows_have_source_signatures_in_supplied_official_wheels() -> None
             elif family in {"httpx", "requests"}:
                 selector = contract.resource
                 assert isinstance(index, int) and index == 0
+                assert isinstance(selector, EffectSelector)
                 assert selector.index == index
+                assert selector.kind.value == "argument_or_keyword"
+                assert selector.name == "url"
                 assert contract.invocation.value == "function"
                 assert contract.http_method == method.upper()
                 assert contract.package is not None
@@ -633,3 +636,37 @@ def test_config_selects_typed_sqs_preset() -> None:
         "typed-sqs-send-message",
         "typed-sqs-send-message-batch",
     }
+
+
+def test_http_fixed_helper_url_selectors_are_bounded_versioned_bindings() -> None:
+    loaded = load_effect_preset("http-clients-v1")
+    assert loaded.document.schema_version == 5
+    assert loaded.document.preset.version == "2.1.0"
+    assert loaded.document.preset.provenance.revision == "3"
+    helpers = [
+        contract
+        for contract in loaded.document.contracts
+        if contract.id.startswith(("httpx-api-", "requests-api-"))
+    ]
+    assert len(helpers) == 14
+    for contract in helpers:
+        assert isinstance(contract.resource, EffectSelector)
+        assert contract.resource.kind.value == "argument_or_keyword"
+        assert contract.resource.index == 0
+        assert contract.resource.name == "url"
+        assert not contract.resource.path
+        assert contract.package is not None
+        if contract.id.startswith("httpx-api-"):
+            assert contract.package.version == "==0.28.1"
+            assert set(contract.package.source_hashes) == {
+                "httpx/_api.py",
+                "httpx/__init__.py",
+                "httpx-0.28.1.dist-info/METADATA",
+            }
+        else:
+            assert contract.package.version == "==2.32.3"
+            assert set(contract.package.source_hashes) == {
+                "requests/api.py",
+                "requests/__init__.py",
+                "requests-2.32.3.dist-info/METADATA",
+            }

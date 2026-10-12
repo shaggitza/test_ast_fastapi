@@ -7,16 +7,25 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from fastapi_endpoint_detector.analyzer.effect_contract_auditor import audit_effect_contracts
+from fastapi_endpoint_detector.analyzer.effect_contract_auditor import (
+    _resource_identity,
+    _selector_identity,
+    audit_effect_contracts,
+)
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
+    EffectChannel,
+    EffectContract,
+    EffectOperation,
+    EffectSelector,
     FiniteValueStatus,
     InvocationKind,
     LoadedEffectContracts,
     ResolvedCallSite,
     ResourceIdentityEvidence,
+    SelectorKind,
     load_effect_contracts,
     load_effect_preset,
 )
@@ -1049,3 +1058,184 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
         assert occurrence.reason_code == "package_applicability_unverified"
         assert analyzer.verified_package_versions == {}
         assert analyzer.verified_package_source_hashes == {}
+
+
+def _url_contract() -> EffectContract:
+    return EffectContract(
+        id="httpx-api-get",
+        symbol="httpx._api.get",
+        invocation=InvocationKind.FUNCTION,
+        operation=EffectOperation.REQUEST,
+        channel=EffectChannel.OUTBOUND_HTTP,
+        resource=EffectSelector(kind=SelectorKind.ARGUMENT_OR_KEYWORD, index=0, name="url"),
+        http_method="GET",
+    )
+
+
+def _url_argument(
+    positional_index: int | None, keyword: str | None, digest: str
+) -> dict[str, object]:
+    return {
+        "positional_index": positional_index,
+        "keyword": keyword,
+        "status": "exact",
+        "value_hashes": [digest],
+    }
+
+
+@pytest.mark.parametrize("argument", [(0, None), (None, "url")])
+def test_argument_or_keyword_resource_selects_one_physical_argument(
+    argument: tuple[int | None, str | None],
+) -> None:
+    digest = "sha256:" + "a" * 64
+    evidence = _resource_identity(
+        _url_contract(),
+        {"arguments": [_url_argument(*argument, digest)], "receiver_origin": None},
+    )
+    assert evidence.status is FiniteValueStatus.EXACT
+    assert evidence.value_hashes == (digest,)
+
+
+@pytest.mark.parametrize("second_digest", ["a", "b"])
+def test_argument_or_keyword_resource_rejects_absent_and_ambiguous_inputs(
+    second_digest: str,
+) -> None:
+    contract = _url_contract()
+    absent = _resource_identity(contract, {"arguments": [], "receiver_origin": None})
+    assert absent.status is FiniteValueStatus.UNAVAILABLE
+    assert absent.reason_code == "selected_argument_absent"
+    digest = "sha256:" + "a" * 64
+    ambiguous = _resource_identity(
+        contract,
+        {
+            "arguments": [
+                _url_argument(0, None, digest),
+                _url_argument(None, "url", "sha256:" + second_digest * 64),
+            ],
+            "receiver_origin": None,
+        },
+    )
+    assert ambiguous.status is FiniteValueStatus.UNAVAILABLE
+    assert ambiguous.reason_code == "selected_argument_ambiguous"
+
+
+def test_argument_or_keyword_resource_ignores_unrelated_arguments() -> None:
+    digest = "sha256:" + "a" * 64
+    evidence = _resource_identity(
+        _url_contract(),
+        {
+            "arguments": [
+                _url_argument(1, None, "sha256:" + "b" * 64),
+                _url_argument(None, "timeout", "sha256:" + "c" * 64),
+                _url_argument(None, "url", digest),
+            ],
+            "receiver_origin": None,
+        },
+    )
+    assert evidence.status is FiniteValueStatus.EXACT
+    assert evidence.value_hashes == (digest,)
+
+
+def test_argument_or_keyword_resource_preserves_finite_and_unavailable_values() -> None:
+    selector = _url_contract().resource
+    assert isinstance(selector, EffectSelector)
+    hashes = ["sha256:" + "a" * 64, "sha256:" + "b" * 64]
+    finite = _selector_identity(
+        selector,
+        {
+            "arguments": [
+                {
+                    "positional_index": None,
+                    "keyword": "url",
+                    "status": "finite",
+                    "value_hashes": hashes,
+                }
+            ]
+        },
+    )
+    assert finite.status is FiniteValueStatus.FINITE
+    assert finite.value_hashes == tuple(hashes)
+    unavailable = _selector_identity(
+        selector,
+        {
+            "arguments": [
+                {
+                    "positional_index": 0,
+                    "keyword": None,
+                    "status": "unavailable",
+                    "value_hashes": [],
+                    "reason_code": "argument_value_dynamic",
+                }
+            ]
+        },
+    )
+    assert unavailable.status is FiniteValueStatus.UNAVAILABLE
+    assert unavailable.reason_code == "argument_value_dynamic"
+
+
+def test_argument_or_keyword_resource_path_remains_unavailable() -> None:
+    contract = _url_contract().model_copy(
+        update={
+            "resource": EffectSelector(
+                kind=SelectorKind.ARGUMENT_OR_KEYWORD, index=0, name="url", path=("host",)
+            )
+        }
+    )
+    evidence = _resource_identity(
+        contract,
+        {"arguments": [_url_argument(0, None, "sha256:" + "a" * 64)], "receiver_origin": None},
+    )
+    assert evidence.status is FiniteValueStatus.UNAVAILABLE
+    assert evidence.reason_code == "selector_path_unavailable"
+
+
+def test_argument_or_keyword_composite_rejects_ambiguous_component() -> None:
+    payload = _url_contract().model_dump()
+    payload["resource"] = {
+        "kind": "composite",
+        "components": [
+            {"kind": "argument_or_keyword", "index": 0, "name": "url"},
+            {"kind": "keyword", "name": "tenant"},
+        ],
+    }
+    contract = EffectContract.model_validate(payload)
+    digest = "sha256:" + "a" * 64
+    evidence = _resource_identity(
+        contract,
+        {
+            "arguments": [
+                _url_argument(0, None, digest),
+                _url_argument(None, "url", digest),
+                _url_argument(None, "tenant", digest),
+            ],
+            "receiver_origin": None,
+        },
+    )
+    assert evidence.status is FiniteValueStatus.UNAVAILABLE
+    assert evidence.reason_code == "composite_component_unavailable"
+
+
+@pytest.mark.parametrize(
+    "selector,argument",
+    [
+        ({"kind": "argument", "index": 0}, (0, None)),
+        ({"kind": "keyword", "name": "url"}, (None, "url")),
+    ],
+)
+def test_legacy_argument_selectors_retain_binding_behavior(
+    selector: dict[str, object], argument: tuple[int | None, str | None]
+) -> None:
+    digest = "sha256:" + "a" * 64
+    evidence = _selector_identity(
+        EffectSelector.model_validate(selector),
+        {"arguments": [_url_argument(*argument, digest)]},
+    )
+    assert evidence.status is FiniteValueStatus.EXACT
+    assert evidence.value_hashes == (digest,)
+
+
+def test_argument_or_keyword_resource_rejects_malformed_argument_model() -> None:
+    payload = _url_argument(0, "url", "sha256:" + "a" * 64)
+    payload["source_index"] = 0
+    with pytest.raises(ValidationError, match="one positional or keyword identity"):
+        CallArgumentEvidence.model_validate(payload)

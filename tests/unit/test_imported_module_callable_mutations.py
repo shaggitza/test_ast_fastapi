@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import CallResolutionStatus
 from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
@@ -676,3 +678,84 @@ def test_imported_module_passed_to_source_helper_abstains(tmp_path: Path) -> Non
     handler_call = next(site for site in sites if site.source_spelling == "client.get")
     assert handler_call.status == CallResolutionStatus.AMBIGUOUS
     assert handler_call.canonical_symbol is None
+
+
+@pytest.mark.parametrize(
+    "assignment", ["result = client.get(url)", "result: object = client.get(url)"]
+)
+def test_imported_call_result_is_not_a_module_alias(tmp_path: Path, assignment: str) -> None:
+    """Using an imported receiver does not make the return value a module."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def handler(url: str) -> None:\n"
+        f"    {assignment}\n"
+        "    client.get(url)\n",
+    )
+    helper_sites = [site for site in sites if site.source_spelling == "client.get"]
+    assert len(helper_sites) == 2
+    assert all(site.status == CallResolutionStatus.EXACT for site in helper_sites)
+    assert {site.canonical_symbol for site in helper_sites} == {"httpx._api.get"}
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "alias = client",
+        "alias = [client]",
+        "alias = {'module': client}",
+        "alias = client if True else None",
+        "alias = [client][0]",
+        "alias = (value := client)",
+        "alias = [client for item in [1]]",
+        "alias = lambda: client",
+        "alias = client.__dict__",
+    ],
+)
+def test_escaped_module_values_keep_import_ownership_uncertain(
+    tmp_path: Path, assignment: str
+) -> None:
+    """Explicit module containers and captures remain conservative escapes."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "def handler(url: str) -> None:\n"
+        f"    {assignment}\n"
+        "    client.get(url)\n",
+    )
+    helper = next(site for site in sites if site.source_spelling == "client.get")
+    assert helper.status == CallResolutionStatus.AMBIGUOUS
+    assert helper.canonical_symbol is None
+    assert helper.reason_code == "mutated_imported_callable"
+
+
+@pytest.mark.parametrize(
+    ("assignment", "mutation"),
+    [
+        ("alias = importlib.import_module('httpx._api').__dict__", "alias['get'] = object()"),
+        ("alias = importlib.import_module('httpx')._api", "alias.get = object()"),
+    ],
+)
+def test_dynamic_module_carrier_mutation_abstains(
+    tmp_path: Path, assignment: str, mutation: str
+) -> None:
+    """An attribute carrier cannot hide an explicitly acquired module."""
+    app = tmp_path / "app"
+    app.mkdir()
+    sites = _call_sites(
+        app,
+        "import httpx as client\n"
+        "import importlib\n"
+        "def handler(url: str) -> None:\n"
+        f"    {assignment}\n"
+        f"    {mutation}\n"
+        "    client.get(url)\n",
+    )
+    helper = next(site for site in sites if site.source_spelling == "client.get")
+    assert helper.status == CallResolutionStatus.AMBIGUOUS
+    assert helper.canonical_symbol is None
+    assert helper.reason_code == "mutated_imported_callable"
