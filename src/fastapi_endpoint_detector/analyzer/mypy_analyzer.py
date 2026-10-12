@@ -3743,15 +3743,71 @@ class MypyAnalyzer:
             return fullname.startswith(f"{path}.") or path == fullname
 
         def is_imported_module_expression(expression: ast.AST, aliases: dict[str, str]) -> bool:
-            for child in ast.walk(expression):
-                if not isinstance(child, ast.expr):
-                    continue
-                path = imported_path(child, aliases)
-                if path is None or path == "*" or path not in aliases.values():
-                    continue
-                resolved = self._resolve_fullname_to_file(path)
-                if resolved is not None and resolved[1] == path:
+            """Recognize escaped module values without confusing calls with their receivers."""
+            pending = [expression]
+            visited = 0
+            while pending:
+                candidate = pending.pop()
+                visited += 1
+                if visited > self.MAX_CALL_SPAN_SOURCE_NODES:
                     return True
+                if isinstance(candidate, (ast.Name, ast.Attribute)):
+                    path = imported_path(candidate, aliases)
+                    if path == "*":
+                        return True
+                    if path is None:
+                        if isinstance(candidate, ast.Attribute):
+                            if len(pending) >= self.MAX_CALL_SPAN_SOURCE_NODES - visited:
+                                return True
+                            pending.append(candidate.value)
+                        continue
+                    if path == "sys.modules":
+                        return True
+                    if isinstance(candidate, ast.Attribute) and candidate.attr == "__dict__":
+                        owner = imported_path(candidate.value, aliases)
+                        resolved_owner = self._resolve_fullname_to_file(owner) if owner else None
+                        if resolved_owner is not None and resolved_owner[1] == owner:
+                            return True
+                    resolved = self._resolve_fullname_to_file(path)
+                    if resolved is not None and resolved[1] == path:
+                        return True
+                    continue
+                if isinstance(candidate, ast.Call):
+                    callee = imported_path(candidate.func, aliases)
+                    if callee in {
+                        "importlib.import_module",
+                        "importlib.util.module_from_spec",
+                        "importlib.reload",
+                        "builtins.__import__",
+                    } or (
+                        isinstance(candidate.func, ast.Name) and candidate.func.id == "__import__"
+                    ):
+                        return True
+                    # An imported receiver nested in a call does not establish
+                    # that the call result is a module. Module arguments are
+                    # checked separately by the escape scan below.
+                    continue
+                children: list[ast.AST] = []
+                if isinstance(candidate, (ast.Tuple, ast.List, ast.Set)):
+                    children.extend(candidate.elts)
+                elif isinstance(candidate, ast.Dict):
+                    children.extend(key for key in candidate.keys if key is not None)
+                    children.extend(candidate.values)
+                elif isinstance(candidate, ast.IfExp):
+                    children.extend((candidate.body, candidate.orelse))
+                elif isinstance(candidate, ast.BoolOp):
+                    children.extend(candidate.values)
+                elif isinstance(candidate, (ast.Starred, ast.NamedExpr, ast.Subscript)):
+                    children.append(candidate.value)
+                elif isinstance(candidate, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                    children.append(candidate.elt)
+                elif isinstance(candidate, ast.DictComp):
+                    children.extend((candidate.key, candidate.value))
+                elif isinstance(candidate, ast.Lambda):
+                    children.append(candidate.body)
+                if len(children) + len(pending) > self.MAX_CALL_SPAN_SOURCE_NODES - visited:
+                    return True
+                pending.extend(children)
             return False
 
         found_mutation = False
