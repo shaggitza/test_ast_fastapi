@@ -19,12 +19,13 @@ if TYPE_CHECKING:
 
 class _ReaderFiles:
     def __init__(self) -> None:
-        self.root = Path("/synthetic/project")
+        self.anchor = Path(Path.cwd().anchor)
+        self.root = self.anchor / "synthetic" / "project"
         self.path = self.root / "source.py"
         self.contents = b"owned bytes"
         self.nodes = {
-            Path("/"): self._info(stat.S_IFDIR, 1),
-            Path("/synthetic"): self._info(stat.S_IFDIR, 2),
+            self.anchor: self._info(stat.S_IFDIR, 1),
+            self.root.parent: self._info(stat.S_IFDIR, 2),
             self.root: self._info(stat.S_IFDIR, 3),
             self.path: self._info(stat.S_IFREG, 4, len(self.contents)),
         }
@@ -131,8 +132,8 @@ def test_project_source_reader_accepts_bounded_canonical_snapshot(
         assert [path for path, _flags in files.opens] == [files.path]
     else:
         assert [path for path, _flags in files.opens] == [
-            Path("/"),
-            Path("/synthetic"),
+            files.anchor,
+            files.root.parent,
             files.root,
             files.path,
         ]
@@ -151,9 +152,7 @@ def test_project_source_reader_rejects_oversize_without_reading(
     assert len(files.closed) == len(files.opens)
 
 
-@pytest.mark.parametrize(
-    "component", ["/", "/synthetic", "/synthetic/project", "/synthetic/project/source.py"]
-)
+@pytest.mark.parametrize("component", ["anchor", "ancestor", "root", "leaf"])
 @pytest.mark.parametrize("link_kind", ["symlink", "junction", "reparse"])
 def test_project_source_reader_rejects_linked_components_before_open(
     component: str,
@@ -161,7 +160,12 @@ def test_project_source_reader_rejects_linked_components_before_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     files = _ReaderFiles()
-    path = Path(component)
+    path = {
+        "anchor": files.anchor,
+        "ancestor": files.root.parent,
+        "root": files.root,
+        "leaf": files.path,
+    }[component]
     if link_kind == "symlink":
         files.nodes[path].st_mode = stat.S_IFLNK
     elif link_kind == "junction":
@@ -236,15 +240,15 @@ def test_project_source_reader_rejects_noncanonical_or_unconfined_paths(
     analyzer = files.install(monkeypatch, mode="no_dir_fd")
     path = files.path
     if invalid == "outside":
-        path = Path("/outside/source.py")
+        path = files.anchor / "outside" / "source.py"
     elif invalid == "relative":
         analyzer.source_root = Path("relative")
     elif invalid == "parent":
         path = files.root / ".." / "source.py"
     elif invalid == "noncanonical_root":
-        files.resolutions[files.root] = Path("/outside")
+        files.resolutions[files.root] = files.anchor / "outside"
     else:
-        files.resolutions[files.path] = Path("/outside/source.py")
+        files.resolutions[files.path] = files.anchor / "outside" / "source.py"
 
     assert analyzer._read_project_source(path, 64) is None
     assert files.opens == []
