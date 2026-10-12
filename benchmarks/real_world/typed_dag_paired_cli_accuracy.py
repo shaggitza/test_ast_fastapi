@@ -224,6 +224,21 @@ def expected_for(case: Case) -> tuple[str, ...]:
 def validate_generated_fixture(case: Case, material: dict[str, str]) -> None:  # noqa: PLR0912
     if material != case_inputs(case):
         raise ValueError(f"source/diff/config do not match generator: {case.case_id}")
+    for side in ("baseline", "target"):
+        sources = json.loads(material[side])
+        if not isinstance(sources, dict) or not sources:
+            raise ValueError(f"{side} fixture must contain Python source files: {case.case_id}")
+        for path, source in sources.items():
+            if not isinstance(path, str) or not isinstance(source, str):
+                raise ValueError(
+                    f"{side} fixture paths and sources must be strings: {case.case_id}"
+                )
+            try:
+                ast.parse(source, filename=path)
+            except SyntaxError as exc:
+                raise ValueError(
+                    f"invalid {side} Python fixture {case.case_id}:{path}: {exc}"
+                ) from exc
     if not case.capability_probe:
         original = v1.case_inputs(_BASE_CASES[case.case_id])
         original["config"] = json.dumps(json.loads(original["config"]), sort_keys=True)
@@ -441,6 +456,7 @@ def _case_passes(record: dict[str, Any], declared: Case) -> bool:
         and record["recall"] == 1.0
         and not report.get("errors")
         and report.get("inventory_status") == "established"
+        and report.get("analysis_completeness") == "complete"
         and report.get("summary", {}).get("total_endpoints") == len(ROOTS)
         and not report.get("inventory_limitations")
         and not (
@@ -990,6 +1006,7 @@ def _run_case(
         and source_identity_valid
         and report is not None
         and not errors
+        and report.get("analysis_completeness") == "complete"
         and inventory_status == "established"
         and total_endpoints == len(ROOTS)
         and not inventory_limitations
