@@ -64,6 +64,11 @@ def _wall_deadline(deadline: float) -> Iterator[None]:  # noqa: PLR0912, PLR0915
     outermost = _deadline_depth == 0
     previous_handler: Any = None
     if outermost:
+        current_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        if signal.SIGALRM in signal.sigpending():
+            raise CollectionFailure("deadline", "collector cannot run with caller-pending SIGALRM")
+        if signal.SIGALRM in current_mask:
+            raise CollectionFailure("deadline", "collector cannot run with caller-blocked SIGALRM")
         previous_handler = signal.getsignal(signal.SIGALRM)
         previous_timer = signal.getitimer(signal.ITIMER_REAL)
         if previous_timer[0] > 0:

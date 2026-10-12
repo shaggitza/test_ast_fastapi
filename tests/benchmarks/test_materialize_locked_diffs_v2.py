@@ -191,6 +191,65 @@ def test_active_caller_alarm_is_refused_without_changing_it() -> None:
         signal.signal(signal.SIGALRM, previous_handler)
 
 
+def test_caller_blocked_alarm_is_refused_without_changing_guard_state() -> None:
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    before_depth = collector._deadline_depth
+    before_deadline = collector._deadline_at
+    entered = False
+    try:
+        with (
+            pytest.raises(collector.CollectionFailure, match="caller-blocked SIGALRM"),
+            collector._wall_deadline(time.monotonic() + 5),
+        ):
+            entered = True
+        assert not entered
+        assert signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.SIGALRM not in signal.sigpending()
+        assert signal.getsignal(signal.SIGALRM) is previous_handler
+        assert signal.getitimer(signal.ITIMER_REAL) == previous_timer
+        assert collector._deadline_depth == before_depth
+        assert collector._deadline_at == before_deadline
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+    with collector._wall_deadline(time.monotonic() + 5):
+        pass
+
+
+def test_caller_pending_alarm_is_refused_and_preserved_until_cleanup() -> None:
+    original_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    before_depth = collector._deadline_depth
+    before_deadline = collector._deadline_at
+    entered = False
+    try:
+        assert signal.SIGALRM not in signal.sigpending()
+        os.kill(os.getpid(), signal.SIGALRM)
+        assert signal.SIGALRM in signal.sigpending()
+        with (
+            pytest.raises(collector.CollectionFailure, match="caller-pending SIGALRM"),
+            collector._wall_deadline(time.monotonic() + 5),
+        ):
+            entered = True
+        assert not entered
+        assert signal.SIGALRM in signal.sigpending()
+        assert signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, set())
+        assert signal.getsignal(signal.SIGALRM) is previous_handler
+        assert signal.getitimer(signal.ITIMER_REAL) == previous_timer
+        assert collector._deadline_depth == before_depth
+        assert collector._deadline_at == before_deadline
+    finally:
+        # Consume the deliberately pending signal while blocked, then restore
+        # the caller's original mask so a default handler cannot terminate pytest.
+        if signal.SIGALRM in signal.sigpending():
+            signal.sigwait({signal.SIGALRM})
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
+    with collector._wall_deadline(time.monotonic() + 5):
+        pass
+
+
 def test_nested_deadline_does_not_extend_outer_deadline() -> None:
     started = time.monotonic()
     with (
@@ -223,7 +282,7 @@ def test_pending_owned_alarm_during_teardown_restores_guard_and_propagates(
     def block_then_deliver(how: int, mask: set[signal.Signals]) -> set[signal.Signals]:
         nonlocal injected
         previous = original_mask(how, mask)
-        if how == signal.SIG_BLOCK and not injected:
+        if how == signal.SIG_BLOCK and signal.SIGALRM in mask and not injected:
             injected = True
             os.kill(os.getpid(), signal.SIGALRM)
         return previous
