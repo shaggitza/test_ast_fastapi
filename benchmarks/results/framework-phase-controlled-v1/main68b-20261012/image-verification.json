@@ -1,0 +1,45 @@
+{
+  "base_image_ref": "test-ast-runtime-phase-15508bc@sha256:8c2d95773208aab2a4391316ba4bd6446ac6d896ba581420545053822d9f24e4",
+  "base_image_rootfs_layers_inherited_unchanged": 10,
+  "base_machine_sbom_sha256_reference": "150519b5360cc6e47acf198191e514bcc879fb4b6c71272b075cec4181d61961",
+  "candidate_rootfs_layer_count": 15,
+  "container_started": false,
+  "dependency_lock_sha256": "a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5",
+  "derived_sbom_path": "provenance/derived-sbom.json",
+  "derived_sbom_sha256": "f25a3aabbd0460bd8dbad0059d080b067dceff10f29244f709111ba9a9f439ab",
+  "dockerfile_sha256": "89229e58241e514451762836d71b8b0c36801788530be710c2d4b6ea8b20e763",
+  "framework_contract_hash_method": "data-only YAML plus canonical JSON using declared serialized defaults; no product imports",
+  "framework_fastapi_on_event_contract_sha256": "sha256:4f0571c2e88052140fce50f61106591bb7a7dac3d5653f534e059efbb4c7179",
+  "framework_preset_raw_sha256": "806c527790edbc251df635a417cbc7c7368112aea78b5c941dcb1bf00b4a1295",
+  "gvisor_execution": "not performed",
+  "image_id": "sha256:6cd983b64b21c18cb2a72afcc9b68cdaf9acdcd9bf35813f42641562f89ff4b0",
+  "image_ref": "test-ast-runtime-phase-main68b-cont87@sha256:6cd983b64b21c18cb2a72afcc9b68cdaf9acdcd9bf35813f42641562f89ff4b0",
+  "installed_package_files_verified_exact": 81,
+  "pyproject_verified_exact": true,
+  "registry_push": false,
+  "repo_digest_resolves_by_docker_inspect": true,
+  "runtime_config": {
+    "cmd": [
+      "python",
+      "-m",
+      "fastapi_endpoint_detector.parser.runtime_worker"
+    ],
+    "entrypoint": null,
+    "env": [
+      "PATH=/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "LANG=C.UTF-8",
+      "GPG_KEY=A035C8C19219BA821ECEA86B64E628F8D684696D",
+      "PYTHON_VERSION=3.11.17",
+      "PYTHON_SHA256=bfb74ad39efae27cda510f134ab408e00f9992c56851cfc0b1cdb5646da11599",
+      "PYTHONDONTWRITEBYTECODE=1",
+      "PYTHONNOUSERSITE=1"
+    ],
+    "user": "65532:65532",
+    "volumes": null
+  },
+  "runtime_worker_sha256": "2f900a2ebe61ec57b9287f7b94938ae4239719cd5c06d15d2764e1d62e7c899f",
+  "schema": "gh104-local-image-readonly-verification-v1",
+  "source_commit": "68b174f17952eaadcd089be426438683d5bba6e3",
+  "source_overlay_manifest_count": 82,
+  "source_overlay_manifest_sha256": "8fb178207c16108792d815c1fb5d630a7f5c7f02d9608b80440d8dfe233370f3"
+}

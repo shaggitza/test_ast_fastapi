@@ -1,0 +1,185 @@
+{
+  "duration_seconds": 50.29016039194539,
+  "helper_sha256": "684c293e823c77c15b32c45fe5cf0f0c23e727a7e1a7abf6af8cc2660c9ac793",
+  "policy": {
+    "dependency_lock_hash": "sha256:a9b9ba4e4dd4507e4ddd1e64bfbaa3c4680caddcb056aa81fc396e007f02d3d5",
+    "environment": {
+      "HOME": "/tmp/home",
+      "LANG": "C.UTF-8",
+      "LC_ALL": "C.UTF-8",
+      "PATH": "/usr/local/bin:/usr/bin:/bin",
+      "PYTHONDONTWRITEBYTECODE": "1",
+      "PYTHONHASHSEED": "0",
+      "PYTHONNOUSERSITE": "1",
+      "TMPDIR": "/tmp"
+    },
+    "image": "test-ast-runtime-phase-main68b-cont87@sha256:6cd983b64b21c18cb2a72afcc9b68cdaf9acdcd9bf35813f42641562f89ff4b0",
+    "policy": {
+      "cpu_period": 100000,
+      "cpu_quota": 50000,
+      "fsize_limit_kib": 16384,
+      "memory_limit": "512m",
+      "memory_swap": "512m",
+      "nofile_limit": 256,
+      "nproc_limit": 128,
+      "output_limit_bytes": 4194304,
+      "pids_limit": 128,
+      "runtime": "runsc",
+      "tmpfs_size": "64m",
+      "user": "65532:65532",
+      "version": 1
+    },
+    "policy_sha256": "sha256:96280826c3dc7b732f07cb9018ac833dff90eea350fa54c3ebef0e8488c15bbd",
+    "sbom_hash": "sha256:f25a3aabbd0460bd8dbad0059d080b067dceff10f29244f709111ba9a9f439ab",
+    "seccomp_sha256": "sha256:96dbac26aac6041de88eaf99f653d606933469dd104157b877190d998ab68d4a",
+    "snapshot_lock_hash": "sha256:8ec12184c36bc4037efc1dcef6219b80ff143833ecadabd5407e5f9cecb58c20"
+  },
+  "result": {
+    "comparison": {
+      "execution_status": "completed",
+      "manifest_sha256": "sha256:cf9d8c927cacbd76184a0ce35187bcc791c5e53de448cdf97d786007c73c2b0e",
+      "observation_role": "positive_observation_only",
+      "protocol": "framework-phase-comparison-v1",
+      "rows": [
+        {
+          "callback": {
+            "column": 0,
+            "end_column": 8,
+            "end_line": 11,
+            "file": "/workspace/app/main.py",
+            "line": 10,
+            "module": "main",
+            "source_sha256": "sha256:9d50557d21b03af3046a2de8f450ab10e3c4d9585118e030203203dbfecd928d",
+            "symbol": "shutdown"
+          },
+          "execution_conditions": [
+            "framework executes shutdown callback only when that phase is dispatched"
+          ],
+          "phase": "shutdown",
+          "registration": {
+            "column": 1,
+            "end_column": 13,
+            "end_line": 9,
+            "file": "/workspace/app/main.py",
+            "line": 9,
+            "module": "main",
+            "source_sha256": "sha256:5d2ecf5d2d61ac0aefdf0e608cb204cf9fb956c292ccd86a10a313b916630b1e",
+            "symbol": "fastapi.FastAPI.on_event"
+          },
+          "status": "observed_positive",
+          "unavailable_reasons": []
+        },
+        {
+          "callback": {
+            "column": 0,
+            "end_column": 8,
+            "end_line": 7,
+            "file": "/workspace/app/main.py",
+            "line": 6,
+            "module": "main",
+            "source_sha256": "sha256:8d6a7884b38593760066aaa2fa757179f2c1ddae9368e08e6f059f7541d4523c",
+            "symbol": "startup"
+          },
+          "execution_conditions": [
+            "framework executes startup callback only when that phase is dispatched"
+          ],
+          "phase": "startup",
+          "registration": {
+            "column": 1,
+            "end_column": 13,
+            "end_line": 5,
+            "file": "/workspace/app/main.py",
+            "line": 5,
+            "module": "main",
+            "source_sha256": "sha256:9ad1bf4cba67f1d0e9531a4982eb9651efcf8ad8eb858cf2a6af449db84917ea",
+            "symbol": "fastapi.FastAPI.on_event"
+          },
+          "status": "observed_positive",
+          "unavailable_reasons": []
+        }
+      ],
+      "schema_version": 1
+    },
+    "container_manifest": {
+      "entries": [
+        {
+          "callback": {
+            "column": 0,
+            "end_column": 8,
+            "end_line": 11,
+            "file": "/workspace/app/main.py",
+            "line": 10,
+            "module": "main",
+            "source_sha256": "sha256:9d50557d21b03af3046a2de8f450ab10e3c4d9585118e030203203dbfecd928d",
+            "symbol": "shutdown"
+          },
+          "callback_file_sha256": "4ad05b1104ae5bd641ca27b3a9c3cb797e02d7f7fc4c5c533dd25413bce12062",
+          "config_sha256": "sha256:0ab662bd51f39e8cea37676ab8bd651a1d13dfa02b21b22b387e429d2a5b936c",
+          "contract_id": "fastapi-on-event",
+          "contract_sha256": "sha256:4f0571c2e88052140fce50f61106591cb7a7dac3d5653f534e059febbb4c7179",
+          "engine_sha256": "sha256:08547a638906fd67529e5a6016fb4058414e254bd7dc90486ff901231e0b6bf6",
+          "execution_conditions": [
+            "framework executes shutdown callback only when that phase is dispatched"
+          ],
+          "inventory_sha256": "sha256:5d28d150ecf4d150e0a99394b56396b90b12a0937b3e712fefd6f90d7cfea9f9",
+          "phase": "shutdown",
+          "registration": {
+            "column": 1,
+            "end_column": 13,
+            "end_line": 9,
+            "file": "/workspace/app/main.py",
+            "line": 9,
+            "module": "main",
+            "source_sha256": "sha256:5d2ecf5d2d61ac0aefdf0e608cb204cf9fb956c292ccd86a10a313b916630b1e",
+            "symbol": "fastapi.FastAPI.on_event"
+          },
+          "registration_file_sha256": "4ad05b1104ae5bd641ca27b3a9c3cb797e02d7f7fc4c5c533dd25413bce12062",
+          "source_sha256": "sha256:25b33724ce9648337e6b85754e2e0885cf0c3960be2dee960a3934b447db5bc6"
+        },
+        {
+          "callback": {
+            "column": 0,
+            "end_column": 8,
+            "end_line": 7,
+            "file": "/workspace/app/main.py",
+            "line": 6,
+            "module": "main",
+            "source_sha256": "sha256:8d6a7884b38593760066aaa2fa757179f2c1ddae9368e08e6f059f7541d4523c",
+            "symbol": "startup"
+          },
+          "callback_file_sha256": "4ad05b1104ae5bd641ca27b3a9c3cb797e02d7f7fc4c5c533dd25413bce12062",
+          "config_sha256": "sha256:0ab662bd51f39e8cea37676ab8bd651a1d13dfa02b21b22b387e429d2a5b936c",
+          "contract_id": "fastapi-on-event",
+          "contract_sha256": "sha256:4f0571c2e88052140fce50f61106591cb7a7dac3d5653f534e059febbb4c7179",
+          "engine_sha256": "sha256:08547a638906fd67529e5a6016fb4058414e254bd7dc90486ff901231e0b6bf6",
+          "execution_conditions": [
+            "framework executes startup callback only when that phase is dispatched"
+          ],
+          "inventory_sha256": "sha256:5d28d150ecf4d150e0a99394b56396b90b12a0937b3e712fefd6f90d7cfea9f9",
+          "phase": "startup",
+          "registration": {
+            "column": 1,
+            "end_column": 13,
+            "end_line": 5,
+            "file": "/workspace/app/main.py",
+            "line": 5,
+            "module": "main",
+            "source_sha256": "sha256:9ad1bf4cba67f1d0e9531a4982eb9651efcf8ad8eb858cf2a6af449db84917ea",
+            "symbol": "fastapi.FastAPI.on_event"
+          },
+          "registration_file_sha256": "4ad05b1104ae5bd641ca27b3a9c3cb797e02d7f7fc4c5c533dd25413bce12062",
+          "source_sha256": "sha256:25b33724ce9648337e6b85754e2e0885cf0c3960be2dee960a3934b447db5bc6"
+        }
+      ],
+      "protocol": "framework-phase-manifest-v1",
+      "schema_version": 1
+    },
+    "container_manifest_sha256": "sha256:cf9d8c927cacbd76184a0ce35187bcc791c5e53de448cdf97d786007c73c2b0e",
+    "execution_claim": "raw fixture observation only; not trusted runtime evidence",
+    "host_manifest_sha256": "sha256:e2d98f07733fa2df0f6f215aa36e6b28cb8411850e8950a1f4eac2e4c742fdb0",
+    "role": "controlled_synthetic"
+  },
+  "role": "controlled_synthetic",
+  "runsc_binary_sha256": "210b437a9cfae51e8f8c9074ed19b8b5e59477178e2e391a18117d8d6b924f7a",
+  "status": "observed"
+}
