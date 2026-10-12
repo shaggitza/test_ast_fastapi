@@ -585,7 +585,7 @@ class VMExecutor:
         return ["--mount", self._mount(request_path, target)], ["--request-file", target]
 
     @staticmethod
-    def _container_phase_manifest(
+    def _container_phase_manifest(  # noqa: PLR0912
         manifest: dict[str, Any],
         app_root: Path,
         app_target: str,
@@ -595,6 +595,13 @@ class VMExecutor:
         """Translate exact host snapshot paths to their read-only container mount paths."""
         if set(manifest) != {"schema_version", "protocol", "entries"}:
             raise VMExecutorError("runtime phase manifest has an unknown or incomplete schema")
+        try:
+            validated = PhaseManifest.model_validate_json(json.dumps(manifest), strict=True)
+        except (TypeError, ValueError) as error:
+            raise VMExecutorError("runtime phase manifest failed validation") from error
+        # Work from the validated model so constructor evidence is bound to the
+        # same callback identity that is projected below.
+        manifest = validated.model_dump(mode="json")
         entries = manifest.get("entries")
         if not isinstance(entries, list):
             raise VMExecutorError("runtime phase manifest entries must be an array")
@@ -623,6 +630,17 @@ class VMExecutor:
                     raise VMExecutorError(
                         f"runtime phase manifest source is outside the mounted snapshot: {error}"
                     ) from error
+            constructor = copied.get("constructor_lifespan")
+            if constructor is not None:
+                evidence_callback = constructor.get("callback")
+                if not isinstance(evidence_callback, dict):
+                    raise VMExecutorError(
+                        "runtime phase manifest constructor evidence lacks its callback"
+                    )
+                # Validation above establishes equality with the top-level
+                # callback. Reuse its projected file while preserving every
+                # other identity field and all source digests.
+                evidence_callback["file"] = copied["callback"]["file"]
             translated.append(copied)
         return {**manifest, "entries": translated}
 

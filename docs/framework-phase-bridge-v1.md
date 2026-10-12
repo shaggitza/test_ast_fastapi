@@ -27,11 +27,15 @@ phase. Middleware records are request-dispatch conditional.
 
 ## Reported unavailable cases
 
-Constructor lifespan registrations, imperative `add_event_handler`, and
-other registration sites outside a selected callback's typed slice lack a
-caller-scope query in the existing public mypy analyzer API. Their callback
-bodies can still be analyzed, but exact registration identity remains
-unavailable. BackgroundTasks use mypy's existing exact summaries; exporting
+Constructor lifespan registrations are accepted only when the retained
+provider graph contains the unique canonical FastAPI declaration and a bounded
+immutable capture verifies its bytes against the completed graph source hash.
+The capture identity is included in constructor metadata and phase fingerprints;
+capture failure leaves that evidence unavailable. Imperative
+`add_event_handler` and other registration sites outside a selected callback's
+typed slice lack a caller-scope query in the existing public mypy analyzer API.
+Their callback bodies can still be analyzed, but exact registration identity
+remains unavailable. BackgroundTasks use mypy's existing exact summaries; exporting
 their callback target identity and phase witness needs a small typed analyzer
 API hook. SCIP currently has no supported exact callback registration query,
 so it cannot establish phase evidence. The mapper exposes
