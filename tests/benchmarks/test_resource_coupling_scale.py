@@ -17,3 +17,17 @@ def test_scale_fixture_preserves_closed_directions_and_determinism() -> None:
 def test_scale_fixture_rejects_partial_role_sets() -> None:
     with pytest.raises(ValueError, match="divisible by four"):
         build_fixture(10)
+
+
+def test_scale_fixture_occurrences_match_current_audit_schema() -> None:
+    _coupling, _effects, audit = build_fixture(8)
+
+    assert len(audit.occurrences) == 8
+    for occurrence in audit.occurrences:
+        validated = type(occurrence).model_validate(occurrence.model_dump())
+        assert [context.endpoint_id for context in validated.invocation_contexts] == [
+            endpoint.id for endpoint in validated.endpoints
+        ]
+        assert all(
+            context.resource_identity is not None for context in validated.invocation_contexts
+        )

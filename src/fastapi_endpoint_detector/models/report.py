@@ -4,8 +4,6 @@ Report data models.
 Models representing analysis reports and results.
 """
 
-import hashlib
-import json
 import re
 from datetime import datetime
 from enum import Enum
@@ -22,6 +20,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
     EffectContract,
     FiniteValueStatus,
     ResourceIdentityEvidence,
+    effect_contract_hash,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import EffectContractAudit
 from fastapi_endpoint_detector.models.endpoint import (
@@ -42,25 +41,6 @@ from fastapi_endpoint_detector.models.sql_transaction import (
 def _source_project_root(app_path: str) -> Path:
     path = Path(app_path).resolve()
     return path.parent if path.is_file() else path
-
-
-def _contract_hash(contract: EffectContract) -> str:
-    payload = contract.model_dump(mode="json", exclude_none=True)
-    package = payload.get("package")
-    if isinstance(package, dict) and not package.get("source_hashes"):
-        package.pop("source_hashes", None)
-    behavior = payload.get("behavior")
-    if isinstance(behavior, dict):
-        for field in ("stage_receiver_from_yield", "transaction_target_from_receiver"):
-            if behavior.get(field) is False:
-                behavior.pop(field)
-    canonical_bytes = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(canonical_bytes).hexdigest()}"
 
 
 class ConfidenceLevel(str, Enum):
@@ -771,11 +751,29 @@ class AnalysisReport(BaseModel):
             )
             if not producer_linked or not consumer_linked:
                 raise ValueError("resource coupling edge endpoint is absent from audit occurrence")
+            producer_context = next(
+                (
+                    item
+                    for item in producer.invocation_contexts
+                    if item.endpoint_id == edge.producer_endpoint_id
+                ),
+                None,
+            )
+            consumer_context = next(
+                (
+                    item
+                    for item in consumer.invocation_contexts
+                    if item.endpoint_id == edge.consumer_endpoint_id
+                ),
+                None,
+            )
             if (
-                producer.resource_identity is None
-                or consumer.resource_identity is None
-                or edge.resource_value_hash not in producer.resource_identity.value_hashes
-                or edge.resource_value_hash not in consumer.resource_identity.value_hashes
+                producer_context is None
+                or consumer_context is None
+                or producer_context.resource_identity is None
+                or consumer_context.resource_identity is None
+                or edge.resource_value_hash not in producer_context.resource_identity.value_hashes
+                or edge.resource_value_hash not in consumer_context.resource_identity.value_hashes
             ):
                 raise ValueError("resource coupling edge has no exact finite resource overlap")
         evidence_keys: set[tuple[str, str]] = set()
@@ -850,7 +848,7 @@ class AnalysisReport(BaseModel):
                 or evidence.contract_hash != coverage.contract_hash
                 or evidence.contract.symbol != coverage.symbol
                 or evidence.contract.invocation != coverage.invocation
-                or _contract_hash(evidence.contract) != evidence.contract_hash
+                or effect_contract_hash(evidence.contract) != evidence.contract_hash
             ):
                 raise ValueError("contract evidence is inconsistent with audit coverage")
             endpoint_record = next(

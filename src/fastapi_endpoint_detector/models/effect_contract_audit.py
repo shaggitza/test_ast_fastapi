@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fastapi_endpoint_detector.models.effect_contract import (
+    CallArgumentEvidence,
     CallResolutionStatus,
     InvocationKind,
     ResourceIdentityEvidence,
@@ -41,6 +42,14 @@ class AuditCallStatus(str, Enum):
     UNMATCHED = "unmatched"
     AMBIGUOUS = "ambiguous"
     UNRESOLVED = "unresolved"
+
+
+class AuditInvocationContext(_StrictAuditModel):
+    """Finite argument and resource evidence for one endpoint's invocation path."""
+
+    endpoint_id: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    arguments: tuple[CallArgumentEvidence, ...] = Field(default=(), max_length=64)
+    resource_identity: ResourceIdentityEvidence | None = None
 
 
 class AuditLimitation(_StrictAuditModel):
@@ -105,6 +114,7 @@ class EffectContractAuditOccurrence(_StrictAuditModel):
     reason_code: str | None = None
     receiver_origin: ResourceIdentityEvidence | None = None
     resource_identity: ResourceIdentityEvidence | None = None
+    invocation_contexts: tuple[AuditInvocationContext, ...] = Field(min_length=1)
     contract_id: str | None = None
     contract_hash: str | None = None
     endpoints: tuple[AuditEndpoint, ...] = Field(min_length=1)
@@ -127,6 +137,9 @@ class EffectContractAuditOccurrence(_StrictAuditModel):
         endpoint_ids = [item.id for item in self.endpoints]
         if endpoint_ids != sorted(set(endpoint_ids)):
             raise ValueError("occurrence endpoints must have sorted unique identities")
+        context_ids = [item.endpoint_id for item in self.invocation_contexts]
+        if context_ids != endpoint_ids:
+            raise ValueError("invocation contexts must exactly cover occurrence endpoints")
         if self.receiver_candidates != tuple(sorted(set(self.receiver_candidates))):
             raise ValueError("receiver candidates must be sorted and unique")
         paired = (self.contract_id is None) == (self.contract_hash is None)
@@ -251,8 +264,8 @@ class EffectContractAuditScope(_StrictAuditModel):
 class EffectContractAuditProvenance(_StrictAuditModel):
     """Contract and resolver provenance for a reproducible audit."""
 
-    matcher_schema_version: Literal[1] = 1
-    matcher: Literal["exact_symbol_invocation_v1"] = "exact_symbol_invocation_v1"
+    matcher_schema_version: Literal[2] = 2
+    matcher: Literal["exact_symbol_invocation_v2"] = "exact_symbol_invocation_v2"
     contract_source_path: str = Field(min_length=1)
     raw_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     config_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
@@ -267,7 +280,7 @@ class EffectContractAuditProvenance(_StrictAuditModel):
 class EffectContractAudit(_StrictAuditModel):
     """Complete dry-run report, isolated from impact candidates and confidence."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     matching_status: Literal["complete"] = "complete"
     scope: EffectContractAuditScope
     provenance: EffectContractAuditProvenance
@@ -375,6 +388,20 @@ class EffectContractAudit(_StrictAuditModel):
                     ),
                     "id": item.id,
                     "endpoint_ids": [endpoint.id for endpoint in item.endpoints],
+                    "invocation_contexts": [
+                        {
+                            "endpoint_id": context.endpoint_id,
+                            "arguments": [
+                                argument.model_dump(mode="json") for argument in context.arguments
+                            ],
+                            "resource_identity": (
+                                context.resource_identity.model_dump(mode="json")
+                                if context.resource_identity is not None
+                                else None
+                            ),
+                        }
+                        for context in item.invocation_contexts
+                    ],
                 }
                 for item in self.occurrences
             ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -12,11 +13,13 @@ from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
+    EffectSelector,
     FiniteValueStatus,
     InvocationKind,
     LoadedEffectContracts,
     ResolvedCallSite,
     ResourceIdentityEvidence,
+    SelectorKind,
     load_effect_contracts,
     load_effect_preset,
 )
@@ -649,6 +652,94 @@ def test_conflicting_resolution_for_one_physical_call_fails_closed(tmp_path: Pat
         _audit(tmp_path, [(first, [exact]), (second, [conflicting])])
 
 
+def test_conflicting_arguments_for_one_endpoint_context_fail_closed(tmp_path: Path) -> None:
+    endpoint = _endpoint(tmp_path, "handler")
+    site = _site(tmp_path, column=2)
+    first = CallArgumentEvidence(
+        source_index=0,
+        positional_index=0,
+        status=FiniteValueStatus.EXACT,
+        value_hashes=(f"sha256:{'1' * 64}",),
+    )
+    second = first.model_copy(update={"value_hashes": (f"sha256:{'2' * 64}",)})
+
+    with pytest.raises(
+        EffectContractAuditError, match="conflicting resolver records for physical call context"
+    ):
+        _audit(
+            tmp_path,
+            [
+                (
+                    endpoint,
+                    [
+                        site.model_copy(update={"arguments": (first,)}),
+                        site.model_copy(update={"arguments": (second,)}),
+                    ],
+                )
+            ],
+        )
+
+
+def test_shared_call_preserves_all_129_endpoint_invocation_contexts(tmp_path: Path) -> None:
+    endpoints = [
+        _endpoint(tmp_path, f"handler_{index}", route=f"/route-{index}") for index in range(129)
+    ]
+    loaded = _loaded(tmp_path / "effects.yaml")
+    emit = loaded.document.contracts[0].model_copy(
+        update={
+            "package": None,
+            "resource": EffectSelector(kind=SelectorKind.ARGUMENT, index=0),
+        }
+    )
+    document = loaded.document.model_copy(
+        update={"contracts": (emit, *loaded.document.contracts[1:])}
+    )
+    loaded = loaded.model_copy(
+        update={
+            "document": document,
+            "contract_hashes": document.contract_hashes,
+            "config_hash": document.config_hash,
+        }
+    )
+    rows = []
+    expected_hashes: dict[str, str] = {}
+    for index, endpoint in enumerate(endpoints):
+        value_hash = f"sha256:{index + 1:064x}"
+        expected_hashes[endpoint.path] = value_hash
+        argument = CallArgumentEvidence(
+            source_index=0,
+            positional_index=0,
+            status=FiniteValueStatus.EXACT,
+            value_hashes=(value_hash,),
+        )
+        rows.append(
+            (
+                endpoint,
+                [_site(tmp_path, column=2).model_copy(update={"arguments": (argument,)})],
+            )
+        )
+
+    audit = _audit(tmp_path, rows, loaded=loaded)
+
+    assert audit.summary.physical_occurrences == 1
+    occurrence = audit.occurrences[0]
+    assert len(occurrence.endpoints) == 129
+    assert len(occurrence.invocation_contexts) == 129
+    endpoint_paths = {endpoint.id: endpoint.path for endpoint in audit.scope.endpoint_inventory}
+    contexts_by_path = {
+        endpoint_paths[context.endpoint_id]: context for context in occurrence.invocation_contexts
+    }
+    assert set(contexts_by_path) == set(expected_hashes)
+    assert {
+        path: context.arguments[0].value_hashes[0] for path, context in contexts_by_path.items()
+    } == expected_hashes
+    assert {
+        path: context.resource_identity.value_hashes[0]
+        for path, context in contexts_by_path.items()
+        if context.resource_identity is not None
+    } == expected_hashes
+
+
 def test_incomplete_endpoint_corpus_and_escaping_paths_fail_closed(tmp_path: Path) -> None:
     endpoint = _endpoint(tmp_path, "handler")
     loaded = _loaded(tmp_path / "effects.yaml")
@@ -898,6 +989,7 @@ def test_package_applicability_is_reported_but_not_used_for_matching(tmp_path: P
         "source_changed",
         "source_removed",
         "source_unreadable",
+        "source_replaced",
     ],
 )
 def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold evidence fixture
@@ -954,64 +1046,87 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
         ),
         encoding="utf-8",
     )
-    original_read = Path.read_bytes
-    reads = 0
+    capture_reads = 0
+    digest_reads = 0
+    final_fingerprint_started = False
+    source_replaced_during_read = False
+    original_capture = MypyAnalyzer._read_regular_source
+    original_digest = MypyAnalyzer._source_file_digests
+    original_read = os.read
 
-    def raced_read(path: Path) -> bytes:
-        nonlocal reads
-        if path != metadata:
-            return original_read(path)
-        reads += 1
-        if mutation == "unreadable" and reads > 1:
-            raise PermissionError("synthetic final metadata read denial")
-        raw = original_read(path)
-        if reads == 1:
+    def count_capture(self: MypyAnalyzer, path: Path, max_bytes: int) -> bytes | None:
+        nonlocal capture_reads
+        if path == metadata:
+            capture_reads += 1
+        return original_capture(self, path, max_bytes)
+
+    def count_digest(self: MypyAnalyzer, path: Path) -> tuple[str, str] | None:
+        nonlocal digest_reads
+        if path == metadata:
+            digest_reads += 1
+        return original_digest(self, path)
+
+    def deny_final_digest_read(descriptor: int, requested: int) -> bytes:
+        nonlocal source_replaced_during_read
+        try:
+            opened_path = Path(f"/proc/self/fd/{descriptor}").readlink()
+        except OSError:
+            opened_path = Path()
+        if final_fingerprint_started and mutation in {"unreadable", "source_unreadable"}:
+            denied_path = stub if mutation == "source_unreadable" else metadata
+            if opened_path == denied_path:
+                raise PermissionError("synthetic final digest read denial")
+        if (
+            final_fingerprint_started
+            and mutation == "source_replaced"
+            and opened_path == stub
+            and not source_replaced_during_read
+        ):
+            replacement = stub.with_suffix(".replacement")
+            replacement.write_text("def emit(value: int) -> None: ...\n", encoding="utf-8")
+            replacement.replace(stub)
+            source_replaced_during_read = True
+        return original_read(descriptor, requested)
+
+    monkeypatch.setattr(MypyAnalyzer, "_read_regular_source", count_capture)
+    monkeypatch.setattr(MypyAnalyzer, "_source_file_digests", count_digest)
+    monkeypatch.setattr(os, "read", deny_final_digest_read)
+
+    original_fingerprint = MypyAnalyzer._fingerprint_typed_environment
+
+    def mutate_before_final_digest(
+        self: MypyAnalyzer,
+        *,
+        authenticated_metadata_hashes: dict[str, str] | None = None,
+        authenticated_metadata_roots: set[Path] | None = None,
+    ) -> str:
+        nonlocal final_fingerprint_started
+        if authenticated_metadata_hashes is not None:
+            final_fingerprint_started = True
             if mutation == "changed":
-                path.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
+                metadata.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
             elif mutation == "removed":
-                path.unlink()
-        return raw
-
-    monkeypatch.setattr(Path, "read_bytes", raced_read)
-    if mutation == "added" or mutation.startswith("source_"):
-        original_fingerprint = MypyAnalyzer._fingerprint_typed_environment
-
-        def add_before_final_snapshot(
-            self: MypyAnalyzer,
-            *,
-            authenticated_metadata_hashes: dict[str, str] | None = None,
-            authenticated_metadata_roots: set[Path] | None = None,
-        ) -> str:
-            if authenticated_metadata_hashes is not None and mutation.startswith("source_"):
+                metadata.unlink()
+            if mutation.startswith("source_"):
                 assert self.verified_mypy_source_hashes
                 if mutation == "source_changed":
                     stub.write_text("def emit(value: int) -> None: ...\n", encoding="utf-8")
                 elif mutation == "source_removed":
                     stub.unlink()
-                else:
-
-                    def deny_source_read(path: Path) -> bytes:
-                        if path == stub:
-                            raise PermissionError("synthetic final source read denial")
-                        return raced_read(path)
-
-                    monkeypatch.setattr(Path, "read_bytes", deny_source_read)
-            if authenticated_metadata_hashes is not None and mutation == "added":
+            if mutation == "added":
                 assert str(metadata.resolve()) in authenticated_metadata_hashes
                 added = dist.parent / "race-pkg-2.0.dist-info"
                 added.mkdir()
                 added_metadata = added / "METADATA"
                 assert str(added_metadata.resolve()) not in authenticated_metadata_hashes
                 added_metadata.write_text("Name: race-pkg\nVersion: 2.0\n", encoding="utf-8")
-            return original_fingerprint(
-                self,
-                authenticated_metadata_hashes=authenticated_metadata_hashes,
-                authenticated_metadata_roots=authenticated_metadata_roots,
-            )
-
-        monkeypatch.setattr(
-            MypyAnalyzer, "_fingerprint_typed_environment", add_before_final_snapshot
+        return original_fingerprint(
+            self,
+            authenticated_metadata_hashes=authenticated_metadata_hashes,
+            authenticated_metadata_roots=authenticated_metadata_roots,
         )
+
+    monkeypatch.setattr(MypyAnalyzer, "_fingerprint_typed_environment", mutate_before_final_digest)
     analyzer = MypyAnalyzer(tmp_path)
     dependencies = analyzer.analyze_endpoint(endpoint)
     sites = [site for site in dependencies.resolved_call_sites if site.line == 3]
@@ -1032,7 +1147,8 @@ def test_cold_audit_uses_final_metadata_snapshot(  # noqa: PLR0915 - one cold ev
     )
     occurrence = audit.occurrences[0]
     if mutation == "stable":
-        assert reads == 2
+        assert capture_reads == 1
+        assert digest_reads == 1
         assert occurrence.audit_status == AuditCallStatus.MATCHED
         assert analyzer.verified_package_versions["race-pkg"] == "1.0"
     else:

@@ -33,6 +33,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
     AuditEndpoint,
+    AuditInvocationContext,
     AuditLimitation,
     EffectContractAudit,
     EffectContractAuditError,
@@ -209,6 +210,7 @@ __all__ = [  # noqa: RUF022 - grouped by public model domain
     # Effect contract audit models
     "AuditCallStatus",
     "AuditEndpoint",
+    "AuditInvocationContext",
     "AuditLimitation",
     "EffectContractAudit",
     "EffectContractAuditError",

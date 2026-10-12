@@ -597,6 +597,9 @@ class MypyAnalyzer:
     MAX_CALL_SPAN_MYPY_DEPTH = 256
     MAX_LAMBDA_SOURCE_FILE_BYTES = 1_048_576
     MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES = 16_777_216
+    MAX_PACKAGE_METADATA_BYTES = 1_048_576
+    MAX_PACKAGE_TOP_LEVEL_BYTES = 65_536
+    SOURCE_DIGEST_READ_BYTES = 65_536
     MAX_LAMBDA_SOURCE_AST_NODES = 100_000
     MAX_POINTS_TO_TARGETS = 8
     MAX_FACTORY_RETURNS = 64
@@ -798,39 +801,9 @@ class MypyAnalyzer:
             parts.pop()
         return ".".join(parts)
 
-    def _read_discovered_source(self, path: Path) -> bytes | None:
-        """Read one in-root regular source file without following a symlink."""
-        try:
-            relative = path.relative_to(self.source_root)
-        except ValueError:
-            return None
-        if not relative.parts:
-            return None
-        current = self.source_root
-        try:
-            for part in relative.parts:
-                current = current / part
-                if current.is_symlink():
-                    return None
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(self.source_root)
-            descriptor = os.open(
-                path,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-            )
-        except (OSError, ValueError):
-            return None
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                return None
-            with os.fdopen(descriptor, "rb") as source:
-                descriptor = -1
-                return source.read()
-        except OSError:
-            return None
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+    def _read_discovered_source(self, path: Path, max_bytes: int) -> bytes | None:
+        """Read one bounded in-root regular source file without following symlinks."""
+        return self._read_project_source(path, max_bytes)
 
     def _source_records(self) -> list[tuple[Path, str, str]]:
         """Return canonical (path, module, digest) inputs from inventory or disk."""
@@ -843,22 +816,30 @@ class MypyAnalyzer:
                 inventory.files,
                 key=lambda item: (item.relative_path, item.module, str(item.path)),
             ):
-                path = Path(record.path).resolve()
+                source_path = Path(record.path)
+                path = source_path.resolve()
                 expected = (Path(inventory.root) / record.relative_path).resolve()
                 if path != expected:
                     raise MypyAnalyzerError(
                         f"source inventory path mismatch for {record.relative_path}"
                     )
-                try:
-                    source_bytes = path.read_bytes()
-                    actual_digest = hashlib.sha256(source_bytes).hexdigest()
-                except OSError as exc:
+                snapshot = self._read_project_source(
+                    source_path,
+                    self._source_snapshot_read_limit(),
+                )
+                digests = (
+                    (hashlib.sha1(snapshot).hexdigest(), hashlib.sha256(snapshot).hexdigest())
+                    if snapshot is not None
+                    else self._source_file_digests(source_path)
+                )
+                if digests is None:
                     raise MypyAnalyzerError(
                         f"source inventory file is unavailable: {record.relative_path}"
-                    ) from exc
+                    )
+                _actual_sha1, actual_digest = digests
                 if actual_digest != record.sha256:
                     raise MypyAnalyzerError(f"source inventory is stale for {record.relative_path}")
-                self._retain_source_record_snapshot(path, source_bytes)
+                self._retain_source_record_snapshot(path, snapshot)
                 records.append((path, record.module, record.sha256))
             self._last_source_records = sorted(
                 records, key=lambda record: (str(record[0]), record[1])
@@ -868,15 +849,26 @@ class MypyAnalyzer:
         for path in sorted(self.source_root.rglob("*.py"), key=str):
             if any(part.startswith((".", "__pycache__")) for part in path.parts):
                 continue
-            discovered_bytes = self._read_discovered_source(path)
-            if discovered_bytes is None:
+            discovered_bytes = self._read_discovered_source(
+                path,
+                self._source_snapshot_read_limit(),
+            )
+            digests = (
+                (
+                    hashlib.sha1(discovered_bytes).hexdigest(),
+                    hashlib.sha256(discovered_bytes).hexdigest(),
+                )
+                if discovered_bytes is not None
+                else self._source_file_digests(path)
+            )
+            if digests is None:
                 continue
             try:
                 try:
                     module = self._module_name_from_path(path, self.module_root)
                 except ValueError:
                     module = self._module_name_from_path(path, self.source_root)
-                digest = hashlib.sha256(discovered_bytes).hexdigest()
+                digest = digests[1]
             except (OSError, ValueError):
                 continue
             self._retain_source_record_snapshot(path, discovered_bytes)
@@ -884,12 +876,26 @@ class MypyAnalyzer:
         self._last_source_records = sorted(records, key=lambda record: (str(record[0]), record[1]))
         return self._last_source_records
 
-    def _retain_source_record_snapshot(self, path: Path, source_bytes: bytes) -> None:
-        """Keep a bounded pre-build source snapshot for later verified reuse."""
+    def _source_snapshot_read_limit(self) -> int:
+        """Return the remaining per-file and aggregate allowance for one snapshot."""
+        return max(
+            0,
+            min(
+                self.MAX_LAMBDA_SOURCE_FILE_BYTES,
+                self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES - self._source_record_snapshot_bytes,
+            ),
+        )
+
+    def _retain_source_record_snapshot(self, path: Path, source_bytes: bytes | None) -> None:
+        """Keep only bytes already captured within the pre-build source caps."""
         canonical = str(path.resolve())
-        if len(source_bytes) > self.MAX_LAMBDA_SOURCE_FILE_BYTES or (
-            self._source_record_snapshot_bytes + len(source_bytes)
-            > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+        if (
+            source_bytes is None
+            or len(source_bytes) > self.MAX_LAMBDA_SOURCE_FILE_BYTES
+            or (
+                self._source_record_snapshot_bytes + len(source_bytes)
+                > self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+            )
         ):
             self._source_record_snapshots[canonical] = None
             return
@@ -1256,35 +1262,49 @@ class MypyAnalyzer:
             for module_name, state in self._build_result.graph.items():
                 state_path: str | None = None
                 if state.path:
-                    state_path = str(Path(state.path).resolve())
+                    source_path = Path(state.path)
+                    state_path = str(source_path.resolve())
                     source_hash = getattr(state, "source_hash", None)
                     if isinstance(source_hash, str):
                         analyzed_source_hashes[state_path] = source_hash
                         source_file = Path(state_path)
                         try:
-                            if source_file.is_file() and source_file.suffix in {".py", ".pyi"}:
-                                vendor_bytes: bytes | None = source_file.read_bytes()
+                            if source_file.suffix in {".py", ".pyi"}:
+                                try:
+                                    source_file.relative_to(self.source_root)
+                                except ValueError:
+                                    vendor_bytes = self._read_regular_source(
+                                        source_path,
+                                        self.MAX_LAMBDA_SOURCE_FILE_BYTES,
+                                    )
+                                else:
+                                    typed_source_snapshots[state_path] = None
+                                    remaining = max(
+                                        0,
+                                        self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
+                                        - typed_source_snapshot_bytes,
+                                    )
+                                    source_limit = min(
+                                        self.MAX_LAMBDA_SOURCE_FILE_BYTES,
+                                        remaining,
+                                    )
+                                    vendor_bytes = self._read_project_source(
+                                        source_path,
+                                        source_limit,
+                                    )
                             else:
                                 vendor_bytes = None
                         except OSError:
                             # The module remains useful for type resolution, but
                             # unreadable bytes cannot authenticate package evidence.
                             vendor_bytes = None
-                        try:
-                            source_file.relative_to(self.source_root)
-                        except ValueError:
-                            pass
-                        else:
-                            typed_source_snapshots[state_path] = None
-                            if (
-                                vendor_bytes is not None
-                                and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
-                                and len(vendor_bytes) <= self.MAX_LAMBDA_SOURCE_FILE_BYTES
-                                and typed_source_snapshot_bytes + len(vendor_bytes)
-                                <= self.MAX_LAMBDA_SOURCE_SNAPSHOT_BYTES
-                            ):
-                                typed_source_snapshots[state_path] = vendor_bytes
-                                typed_source_snapshot_bytes += len(vendor_bytes)
+                        if (
+                            source_file.is_relative_to(self.source_root)
+                            and vendor_bytes is not None
+                            and hashlib.sha1(vendor_bytes).hexdigest() == source_hash
+                        ):
+                            typed_source_snapshots[state_path] = vendor_bytes
+                            typed_source_snapshot_bytes += len(vendor_bytes)
                         if vendor_bytes is not None:
                             parts = module_name.split(".")
                             package_root = source_file.parent
@@ -1313,12 +1333,13 @@ class MypyAnalyzer:
                                     package_root.glob("*.dist-info/METADATA")
                                 )
                                 for metadata_path in metadata_candidates:
-                                    try:
-                                        metadata_bytes = metadata_path.read_bytes()
-                                    except OSError:
-                                        # Missing evidence is deliberately absent
-                                        # from the verified maps, so package pins
-                                        # fail closed in the contract auditor.
+                                    metadata_bytes = self._read_regular_source(
+                                        metadata_path,
+                                        self.MAX_PACKAGE_METADATA_BYTES,
+                                    )
+                                    if metadata_bytes is None:
+                                        # Missing or over-limit evidence is deliberately
+                                        # absent, so package pins fail closed.
                                         continue
                                     authenticated_metadata_hashes[str(metadata_path.resolve())] = (
                                         hashlib.sha256(metadata_bytes).hexdigest()
@@ -1337,22 +1358,28 @@ class MypyAnalyzer:
                                     # names that differ from the distribution
                                     # name (for example bs4/beautifulsoup4).
                                     top_level_path = metadata_path.parent / "top_level.txt"
-                                    try:
-                                        top_level_bytes = top_level_path.read_bytes()
+                                    top_level_bytes = self._read_regular_source(
+                                        top_level_path,
+                                        self.MAX_PACKAGE_TOP_LEVEL_BYTES,
+                                    )
+                                    if top_level_bytes is None:
+                                        declared_top_levels = set()
+                                    else:
                                         authenticated_metadata_hashes[
                                             str(top_level_path.resolve())
                                         ] = hashlib.sha256(top_level_bytes).hexdigest()
-                                        declared_top_levels = {
-                                            line.strip().partition(".")[0]
-                                            for line in top_level_bytes.decode("utf-8").splitlines()
-                                            if line.strip()
-                                        }
-                                    except UnicodeDecodeError:
-                                        # Malformed alias metadata is not trusted;
-                                        # do not guess aliases from its bytes.
-                                        declared_top_levels = set()
-                                    except OSError:
-                                        declared_top_levels = set()
+                                        try:
+                                            declared_top_levels = {
+                                                line.strip().partition(".")[0]
+                                                for line in top_level_bytes.decode(
+                                                    "utf-8"
+                                                ).splitlines()
+                                                if line.strip()
+                                            }
+                                        except UnicodeDecodeError:
+                                            # Malformed alias metadata is not trusted;
+                                            # do not guess aliases from its bytes.
+                                            declared_top_levels = set()
                                     belongs_to_parsed_root = bool(
                                         parsed_top_levels
                                         & (
@@ -1551,64 +1578,97 @@ class MypyAnalyzer:
         """Return effective mypy options captured when the retained build completed."""
         return self._retained_build_options
 
-    def framework_phase_source_bytes(self, path: Path, *, max_bytes: int) -> bytes | None:
-        """Read one bounded, in-root source file without following symlinks."""
-        directory_flag = getattr(os, "O_DIRECTORY", 0)
-        nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
-        if (
-            max_bytes < 0
-            or not directory_flag
-            or not nofollow_flag
-            or os.open not in os.supports_dir_fd
-            or not self.source_root.is_absolute()
-        ):
+    @staticmethod
+    def _source_stat_identity(item: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            item.st_dev,
+            item.st_ino,
+            item.st_size,
+            item.st_mtime_ns,
+            item.st_ctime_ns,
+        )
+
+    def _project_source_stat(self, path: Path) -> os.stat_result | None:
+        """Validate canonical confinement and reject linked path components."""
+        root = self.source_root
+        if not root.is_absolute() or not path.is_absolute():
             return None
         try:
-            relative = path.relative_to(self.source_root)
-        except ValueError:
+            relative = path.relative_to(root)
+            if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+                return None
+            if root.resolve(strict=True) != root or path.resolve(strict=True) != path:
+                return None
+            path.resolve(strict=True).relative_to(root)
+            current = Path(path.anchor)
+            components = (
+                current,
+                *(
+                    current.joinpath(*path.parts[1:index])
+                    for index in range(2, len(path.parts) + 1)
+                ),
+            )
+            for component in components:
+                info = component.lstat()
+                is_junction = getattr(component, "is_junction", None)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or (callable(is_junction) and is_junction())
+                    or getattr(info, "st_file_attributes", 0)
+                    & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+                ):
+                    return None
+                if component != path and not stat.S_ISDIR(info.st_mode):
+                    return None
+            leaf = path.lstat()
+            return leaf if stat.S_ISREG(leaf.st_mode) else None
+        except (OSError, ValueError, RuntimeError):
             return None
-        if not relative.parts or any(part in {".", ".."} for part in relative.parts):
+
+    def _open_project_source(self, path: Path) -> int | None:
+        """Open a confined source snapshot using the available platform primitives."""
+        expected = self._project_source_stat(path)
+        if expected is None:
             return None
-        current = self.source_root
+        nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+        binary_flag = getattr(os, "O_BINARY", 0)
+        leaf_flags = os.O_RDONLY | binary_flag | getattr(os, "O_NONBLOCK", 0)
         leaf_descriptor = -1
         directory_descriptor = -1
         try:
-            for part in relative.parts:
-                current = current / part
-                if current.is_symlink():
+            if nofollow_flag and os.open in os.supports_dir_fd:
+                relative = path.relative_to(self.source_root)
+                directory_flags = (
+                    os.O_RDONLY | binary_flag | nofollow_flag | getattr(os, "O_DIRECTORY", 0)
+                )
+                directory_descriptor = os.open(self.source_root.anchor, directory_flags)
+                if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
                     return None
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(self.source_root)
-            directory_flags = os.O_RDONLY | directory_flag | nofollow_flag
-            directory_descriptor = os.open(os.path.sep, directory_flags)
-            for part in self.source_root.parts[1:]:
-                next_descriptor = os.open(
-                    part,
-                    directory_flags,
+                for part in (*self.source_root.parts[1:], *relative.parts[:-1]):
+                    next_descriptor = os.open(part, directory_flags, dir_fd=directory_descriptor)
+                    os.close(directory_descriptor)
+                    directory_descriptor = next_descriptor
+                    if not stat.S_ISDIR(os.fstat(directory_descriptor).st_mode):
+                        return None
+                leaf_descriptor = os.open(
+                    relative.parts[-1],
+                    leaf_flags | nofollow_flag,
                     dir_fd=directory_descriptor,
                 )
-                os.close(directory_descriptor)
-                directory_descriptor = next_descriptor
-            for part in relative.parts[:-1]:
-                next_descriptor = os.open(
-                    part,
-                    directory_flags,
-                    dir_fd=directory_descriptor,
-                )
-                os.close(directory_descriptor)
-                directory_descriptor = next_descriptor
-            leaf_descriptor = os.open(
-                relative.parts[-1],
-                os.O_RDONLY | nofollow_flag | getattr(os, "O_NONBLOCK", 0),
-                dir_fd=directory_descriptor,
-            )
+            else:
+                leaf_descriptor = os.open(path, leaf_flags)
             opened = os.fstat(leaf_descriptor)
-            if not stat.S_ISREG(opened.st_mode):
+            current = self._project_source_stat(path)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or current is None
+                or self._source_stat_identity(expected) != self._source_stat_identity(opened)
+                or self._source_stat_identity(opened) != self._source_stat_identity(current)
+            ):
                 return None
-            if opened.st_size > max_bytes:
-                return None
-            data = os.read(leaf_descriptor, max_bytes + 1)
-            return data if len(data) <= max_bytes else None
+            result = leaf_descriptor
+            leaf_descriptor = -1
+            return result
         except (OSError, ValueError):
             return None
         finally:
@@ -1616,6 +1676,162 @@ class MypyAnalyzer:
                 os.close(leaf_descriptor)
             if directory_descriptor >= 0:
                 os.close(directory_descriptor)
+
+    @staticmethod
+    def _read_bounded_descriptor(descriptor: int, max_bytes: int) -> bytes | None:
+        """Read no more than max_bytes plus one sentinel byte from an open file."""
+        if max_bytes < 0:
+            return None
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            requested = min(
+                MypyAnalyzer.SOURCE_DIGEST_READ_BYTES,
+                max_bytes + 1 - total,
+            )
+            try:
+                chunk = os.read(descriptor, requested)
+            except OSError:
+                return None
+            if len(chunk) > requested:
+                return None
+            if not chunk:
+                return b"".join(chunks)
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+        return None
+
+    @staticmethod
+    def _open_regular_source(path: Path) -> int | None:
+        """Open a regular dependency or metadata file without reading it all at once."""
+        descriptor = -1
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0),
+            )
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                os.close(descriptor)
+                return None
+            return descriptor
+        except OSError:
+            if descriptor >= 0:
+                os.close(descriptor)
+            return None
+
+    def _read_project_source(self, path: Path, max_bytes: int) -> bytes | None:
+        """Capture an in-root file with the existing regular-file/symlink policy."""
+        descriptor = self._open_project_source(path)
+        if descriptor is None:
+            return None
+        try:
+            before = os.fstat(descriptor)
+            if before.st_size > max_bytes:
+                return None
+            contents = self._read_bounded_descriptor(descriptor, max_bytes)
+            if (
+                contents is None
+                or not self._source_descriptor_stable(
+                    path, descriptor, before, follow_symlinks=False
+                )
+                or self._project_source_stat(path) is None
+            ):
+                return None
+            return contents
+        finally:
+            os.close(descriptor)
+
+    def _read_regular_source(self, path: Path, max_bytes: int) -> bytes | None:
+        """Capture one regular file within a per-file allowance and sentinel."""
+        descriptor = self._open_regular_source(path)
+        if descriptor is None:
+            return None
+        try:
+            before = os.fstat(descriptor)
+            if before.st_size > max_bytes:
+                return None
+            contents = self._read_bounded_descriptor(descriptor, max_bytes)
+            if contents is None or not self._source_descriptor_stable(
+                path, descriptor, before, follow_symlinks=True
+            ):
+                return None
+            return contents
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    def _source_descriptor_stable(
+        path: Path,
+        descriptor: int,
+        before: os.stat_result,
+        *,
+        follow_symlinks: bool,
+    ) -> bool:
+        """Reject content mutation or path replacement during an open-file read."""
+        try:
+            after = os.fstat(descriptor)
+            current_path = path.stat(follow_symlinks=follow_symlinks)
+        except OSError:
+            return False
+
+        return (
+            stat.S_ISREG(current_path.st_mode)
+            and MypyAnalyzer._source_stat_identity(before)
+            == MypyAnalyzer._source_stat_identity(after)
+            and MypyAnalyzer._source_stat_identity(after)
+            == MypyAnalyzer._source_stat_identity(current_path)
+        )
+
+    def _source_file_digests(self, path: Path) -> tuple[str, str] | None:
+        """Stream exact SHA-1/SHA-256 digests without retaining complete file contents."""
+        try:
+            path.relative_to(self.source_root)
+        except ValueError:
+            descriptor = self._open_regular_source(path)
+        else:
+            descriptor = self._open_project_source(path)
+        if descriptor is None:
+            return None
+        sha1 = hashlib.sha1()
+        sha256 = hashlib.sha256()
+        try:
+            before = os.fstat(descriptor)
+            while True:
+                try:
+                    chunk = os.read(descriptor, self.SOURCE_DIGEST_READ_BYTES)
+                except OSError:
+                    return None
+                if not chunk:
+                    if not self._source_descriptor_stable(
+                        path,
+                        descriptor,
+                        before,
+                        follow_symlinks=not self._is_project_source_path(path),
+                    ):
+                        return None
+                    if (
+                        self._is_project_source_path(path)
+                        and self._project_source_stat(path) is None
+                    ):
+                        return None
+                    return sha1.hexdigest(), sha256.hexdigest()
+                sha1.update(chunk)
+                sha256.update(chunk)
+        finally:
+            os.close(descriptor)
+
+    def _is_project_source_path(self, path: Path) -> bool:
+        try:
+            path.relative_to(self.source_root)
+        except ValueError:
+            return False
+        return True
+
+    def framework_phase_source_bytes(self, path: Path, *, max_bytes: int) -> bytes | None:
+        """Read one bounded, in-root source file without following symlinks."""
+        return self._read_project_source(path, max_bytes)
 
     def _effective_follow_imports(self) -> str:
         """Translate inventory policy to mypy's string option vocabulary."""
@@ -8413,13 +8629,12 @@ class MypyAnalyzer:
             path = Path(state_path)
             try:
                 if path.suffix in {".py", ".pyi"}:
-                    content = path.read_bytes()
-                    current_digest = hashlib.sha256(content).hexdigest()
+                    digests = self._source_file_digests(path)
+                    if digests is None:
+                        raise OSError("source file is unavailable for typed fingerprinting")
+                    parsed_sha1, current_digest = digests
                     parsed_digest = getattr(state, "source_hash", None)
-                    if (
-                        isinstance(parsed_digest, str)
-                        and hashlib.sha1(content).hexdigest() != parsed_digest
-                    ):
+                    if isinstance(parsed_digest, str) and parsed_sha1 != parsed_digest:
                         source_snapshot_changed = True
                     inputs[str(path.resolve())] = (
                         f"{current_digest}:{parsed_digest}"
@@ -8449,13 +8664,21 @@ class MypyAnalyzer:
             try:
                 for metadata_path in root.glob("*.dist-info/METADATA"):
                     metadata_key = str(metadata_path.resolve())
-                    metadata_digest = hashlib.sha256(metadata_path.read_bytes()).hexdigest()
+                    digests = self._source_file_digests(metadata_path)
+                    if digests is None:
+                        raise OSError("metadata file is unavailable for typed fingerprinting")
+                    metadata_digest = digests[1]
                     inputs[metadata_key] = metadata_digest
                     metadata_snapshot_hashes[metadata_key] = metadata_digest
                     top_level_path = metadata_path.parent / "top_level.txt"
                     if top_level_path.exists():
                         top_level_key = str(top_level_path.resolve())
-                        top_level_digest = hashlib.sha256(top_level_path.read_bytes()).hexdigest()
+                        top_level_digests = self._source_file_digests(top_level_path)
+                        if top_level_digests is None:
+                            raise OSError(
+                                "top-level metadata is unavailable for typed fingerprinting"
+                            )
+                        top_level_digest = top_level_digests[1]
                         inputs[top_level_key] = top_level_digest
                         metadata_snapshot_hashes[top_level_key] = top_level_digest
             except OSError as exc:

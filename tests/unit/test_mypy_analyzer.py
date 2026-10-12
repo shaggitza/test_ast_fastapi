@@ -52,21 +52,34 @@ class TestMypyAnalyzerBasic:
             methods=[EndpointMethod.GET],
             handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
         )
-        original_read_bytes = Path.read_bytes
         metadata_reads = 0
+        original_read_regular_source = MypyAnalyzer._read_regular_source
+        original_source_file_digests = MypyAnalyzer._source_file_digests
 
-        def counted_read_bytes(path: Path) -> bytes:
+        def counted_read_regular_source(
+            analyzer: MypyAnalyzer, path: Path, max_bytes: int
+        ) -> bytes | None:
             nonlocal metadata_reads
             if path.name == "METADATA" and path.parent == dist_info:
                 metadata_reads += 1
-            return original_read_bytes(path)
+            return original_read_regular_source(analyzer, path, max_bytes)
 
-        monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+        def counted_source_file_digests(
+            analyzer: MypyAnalyzer, path: Path
+        ) -> tuple[str, str] | None:
+            nonlocal metadata_reads
+            if path.name == "METADATA" and path.parent == dist_info:
+                metadata_reads += 1
+            return original_source_file_digests(analyzer, path)
+
+        monkeypatch.setattr(MypyAnalyzer, "_read_regular_source", counted_read_regular_source)
+        monkeypatch.setattr(MypyAnalyzer, "_source_file_digests", counted_source_file_digests)
         analyzer = MypyAnalyzer(tmp_path)
         analyzer.analyze_endpoints([endpoint], use_cache=False)
 
-        # One read authenticates the package during the build and one fingerprints
-        # the typed environment; per-module rescans would multiply this count.
+        # One bounded read authenticates the package during the build and one
+        # streaming digest fingerprints the typed environment; per-module
+        # rescans would multiply this count.
         assert metadata_reads == 2
         assert analyzer.verified_package_versions["multi-pkg"] == "1.0"
 
@@ -257,14 +270,14 @@ class TestMypyAnalyzerBasic:
             methods=[EndpointMethod.GET],
             handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=2),
         )
-        original_read_bytes = Path.read_bytes
+        original_open_project_source = MypyAnalyzer._open_project_source
 
-        def denied(path: Path) -> bytes:
+        def denied(analyzer: MypyAnalyzer, path: Path) -> int | None:
             if path == typed_source:
-                raise PermissionError("synthetic read denial")
-            return original_read_bytes(path)
+                return None
+            return original_open_project_source(analyzer, path)
 
-        monkeypatch.setattr(Path, "read_bytes", denied)
+        monkeypatch.setattr(MypyAnalyzer, "_open_project_source", denied)
         analyzer = MypyAnalyzer(tmp_path)
         analyzer.analyze_endpoints([endpoint], use_cache=False)
 

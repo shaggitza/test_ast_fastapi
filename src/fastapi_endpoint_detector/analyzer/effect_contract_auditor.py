@@ -14,6 +14,7 @@ from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
 from fastapi_endpoint_detector.models.effect_contract import (
+    CallArgumentEvidence,
     CallResolutionStatus,
     CompositeEffectSelector,
     EffectContract,
@@ -27,6 +28,7 @@ from fastapi_endpoint_detector.models.effect_contract import (
 from fastapi_endpoint_detector.models.effect_contract_audit import (
     AuditCallStatus,
     AuditEndpoint,
+    AuditInvocationContext,
     AuditLimitation,
     EffectContractAudit,
     EffectContractAuditError,
@@ -300,7 +302,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
     endpoint_rows = list(endpoint_call_sites)
     physical: dict[
         tuple[str, int, int, int | None, int | None],
-        tuple[dict[str, Any], dict[str, AuditEndpoint]],
+        tuple[dict[str, Any], dict[str, AuditEndpoint], dict[str, dict[str, Any]]],
     ] = {}
 
     inventory_endpoint_keys = {
@@ -344,14 +346,25 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             relative = _relative_path(site.file_path, root)
             key = (relative, site.line, site.column, site.end_line, site.end_column)
             payload = _call_payload(site, relative)
+            shared_payload = {key: value for key, value in payload.items() if key != "arguments"}
             existing = physical.get(key)
             if existing is None:
-                physical[key] = (payload, {endpoint_record.id: endpoint_record})
+                physical[key] = (
+                    shared_payload,
+                    {endpoint_record.id: endpoint_record},
+                    {endpoint_record.id: payload},
+                )
                 continue
-            existing_payload, endpoints = existing
-            if existing_payload != payload:
+            existing_payload, endpoints, contexts = existing
+            if existing_payload != shared_payload:
                 raise EffectContractAuditError(
                     "conflicting resolver records for physical call at "
+                    f"{relative}:{site.line}:{site.column}"
+                )
+            previous_context = contexts.get(endpoint_record.id)
+            if previous_context is not None and previous_context != payload:
+                raise EffectContractAuditError(
+                    "conflicting resolver records for physical call context at "
                     f"{relative}:{site.line}:{site.column}"
                 )
             previous_endpoint = endpoints.get(endpoint_record.id)
@@ -361,6 +374,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                     f"{endpoint_record.id}"
                 )
             endpoints[endpoint_record.id] = endpoint_record
+            contexts[endpoint_record.id] = payload
 
     occurrences: list[EffectContractAuditOccurrence] = []
     corpus_payload: list[dict[str, Any]] = []
@@ -368,8 +382,15 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         physical,
         key=lambda item: tuple(-1 if part is None else part for part in item),
     ):
-        payload, endpoint_records = physical[key]
+        payload, endpoint_records, context_payloads = physical[key]
         endpoint_tuple = tuple(endpoint_records[item] for item in sorted(endpoint_records))
+        context_arguments = {
+            endpoint_id: tuple(
+                CallArgumentEvidence.model_validate(argument)
+                for argument in context_payloads[endpoint_id]["arguments"]
+            )
+            for endpoint_id in sorted(context_payloads)
+        }
         call_id = _semantic_hash(
             {
                 "file_path": payload["file_path"],
@@ -423,6 +444,35 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
             audit_status = AuditCallStatus.AMBIGUOUS
         else:
             audit_status = AuditCallStatus.UNRESOLVED
+        context_resources = {
+            endpoint_id: (
+                _resource_identity(contract, context_payloads[endpoint_id])
+                if contract is not None
+                else None
+            )
+            for endpoint_id in sorted(context_payloads)
+        }
+        resource_values = [item for item in context_resources.values() if item is not None]
+        shared_resource = (
+            resource_values[0]
+            if resource_values and all(item == resource_values[0] for item in resource_values)
+            else (
+                ResourceIdentityEvidence(
+                    status=FiniteValueStatus.UNAVAILABLE,
+                    reason_code="endpoint_context_specific",
+                )
+                if resource_values
+                else None
+            )
+        )
+        invocation_contexts = tuple(
+            AuditInvocationContext(
+                endpoint_id=endpoint_id,
+                arguments=context_arguments[endpoint_id],
+                resource_identity=context_resources[endpoint_id],
+            )
+            for endpoint_id in sorted(context_payloads)
+        )
         occurrence = EffectContractAuditOccurrence(
             id=call_id,
             file_path=payload["file_path"],
@@ -448,9 +498,8 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                 if payload["receiver_origin"] is not None
                 else None
             ),
-            resource_identity=(
-                _resource_identity(contract, payload) if contract is not None else None
-            ),
+            resource_identity=shared_resource,
+            invocation_contexts=invocation_contexts,
             contract_id=contract.id if contract is not None else None,
             contract_hash=(loaded.contract_hashes[contract.id] if contract is not None else None),
             endpoints=endpoint_tuple,
@@ -466,6 +515,9 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                 ),
                 "id": call_id,
                 "endpoint_ids": [endpoint.id for endpoint in endpoint_tuple],
+                "invocation_contexts": [
+                    context.model_dump(mode="json") for context in invocation_contexts
+                ],
             }
         )
 
@@ -561,7 +613,7 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         contract_source_path = f"content://sha256/{loaded.raw_hash.removeprefix('sha256:')}"
     audit_hash = _semantic_hash(
         {
-            "matcher_schema_version": 1,
+            "matcher_schema_version": 2,
             "contract_source_path": contract_source_path,
             "raw_hash": loaded.raw_hash,
             "config_hash": loaded.config_hash,
@@ -599,6 +651,8 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
         }
     )
     provenance = EffectContractAuditProvenance(
+        matcher_schema_version=2,
+        matcher="exact_symbol_invocation_v2",
         contract_source_path=contract_source_path,
         raw_hash=loaded.raw_hash,
         config_hash=loaded.config_hash,

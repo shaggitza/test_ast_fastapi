@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         LoadedEffectContracts,
     )
     from fastapi_endpoint_detector.models.effect_contract_audit import (
+        AuditInvocationContext,
         EffectContractAudit,
         EffectContractAuditOccurrence,
     )
@@ -71,15 +72,18 @@ def _group_evidence(
 
 def _eligible_occurrences(
     audit: EffectContractAudit,
-) -> dict[str, list[EffectContractAuditOccurrence]]:
-    result: dict[str, list[EffectContractAuditOccurrence]] = defaultdict(list)
+) -> dict[str, list[tuple[EffectContractAuditOccurrence, AuditInvocationContext]]]:
+    result: dict[str, list[tuple[EffectContractAuditOccurrence, AuditInvocationContext]]] = (
+        defaultdict(list)
+    )
     for occurrence in audit.occurrences:
-        identity = occurrence.resource_identity
-        if occurrence.contract_id is None or identity is None:
+        if occurrence.contract_id is None:
             continue
-        if identity.status == FiniteValueStatus.UNAVAILABLE:
-            continue
-        result[occurrence.contract_id].append(occurrence)
+        for context in occurrence.invocation_contexts:
+            identity = context.resource_identity
+            if identity is None or identity.status == FiniteValueStatus.UNAVAILABLE:
+                continue
+            result[occurrence.contract_id].append((occurrence, context))
     return result
 
 
@@ -96,8 +100,12 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
     diagnostics: list[ResourceCouplingDiagnostic] = []
 
     for configured_group in loaded.document.groups:
-        producers: list[tuple[EffectContract, EffectContractAuditOccurrence]] = []
-        consumers: list[tuple[EffectContract, EffectContractAuditOccurrence]] = []
+        producers: list[
+            tuple[EffectContract, EffectContractAuditOccurrence, AuditInvocationContext]
+        ] = []
+        consumers: list[
+            tuple[EffectContract, EffectContractAuditOccurrence, AuditInvocationContext]
+        ] = []
         producer_operations: set[EffectOperation] = set()
         consumer_operations: set[EffectOperation] = set()
         channels = set()
@@ -123,7 +131,10 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
                 )
             channels.add(contract.channel)
             producer_operations.add(contract.operation)
-            producers.extend((contract, item) for item in occurrences.get(contract_id, ()))
+            producers.extend(
+                (contract, occurrence, context)
+                for occurrence, context in occurrences.get(contract_id, ())
+            )
         for contract_id in configured_group.consumer_contract_ids:
             contract = contract_by_id.get(contract_id)
             if contract is None:
@@ -146,7 +157,10 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
                 )
             channels.add(contract.channel)
             consumer_operations.add(contract.operation)
-            consumers.extend((contract, item) for item in occurrences.get(contract_id, ()))
+            consumers.extend(
+                (contract, occurrence, context)
+                for occurrence, context in occurrences.get(contract_id, ())
+            )
         if len(channels) != 1:
             raise ResourceCouplingError(
                 f"coupling group {configured_group.id!r} must use exactly one channel"
@@ -166,26 +180,26 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
         by_resource: dict[
             str,
             tuple[
-                list[tuple[EffectContract, EffectContractAuditOccurrence]],
-                list[tuple[EffectContract, EffectContractAuditOccurrence]],
+                list[tuple[EffectContract, EffectContractAuditOccurrence, AuditInvocationContext]],
+                list[tuple[EffectContract, EffectContractAuditOccurrence, AuditInvocationContext]],
             ],
         ] = defaultdict(lambda: ([], []))
-        for contract, occurrence in producers:
-            assert occurrence.resource_identity is not None
-            for value_hash in occurrence.resource_identity.value_hashes:
-                by_resource[value_hash][0].append((contract, occurrence))
-        for contract, occurrence in consumers:
-            assert occurrence.resource_identity is not None
-            for value_hash in occurrence.resource_identity.value_hashes:
-                by_resource[value_hash][1].append((contract, occurrence))
+        for contract, occurrence, context in producers:
+            assert context.resource_identity is not None
+            for value_hash in context.resource_identity.value_hashes:
+                by_resource[value_hash][0].append((contract, occurrence, context))
+        for contract, occurrence, context in consumers:
+            assert context.resource_identity is not None
+            for value_hash in context.resource_identity.value_hashes:
+                by_resource[value_hash][1].append((contract, occurrence, context))
 
         for value_hash in sorted(by_resource):
             resource_producers, resource_consumers = by_resource[value_hash]
             prospective_count = 0
-            for _producer_contract, producer in resource_producers:
-                producer_endpoint_ids = {item.id for item in producer.endpoints}
-                for _consumer_contract, consumer in resource_consumers:
-                    consumer_endpoint_ids = {item.id for item in consumer.endpoints}
+            for _producer_contract, _producer, producer_context in resource_producers:
+                producer_endpoint_ids = {producer_context.endpoint_id}
+                for _consumer_contract, _consumer, consumer_context in resource_consumers:
+                    consumer_endpoint_ids = {consumer_context.endpoint_id}
                     prospective_count += len(producer_endpoint_ids) * len(
                         consumer_endpoint_ids
                     ) - len(producer_endpoint_ids & consumer_endpoint_ids)
@@ -206,56 +220,64 @@ def build_resource_coupling_graph(  # noqa: PLR0912, PLR0915
                 continue
 
             prospective = []
-            for producer_contract, producer in resource_producers:
-                for consumer_contract, consumer in resource_consumers:
-                    for producer_endpoint in producer.endpoints:
-                        for consumer_endpoint in consumer.endpoints:
-                            if producer_endpoint.id == consumer_endpoint.id:
-                                continue
-                            strength = (
-                                CouplingStrength.EXACT
-                                if producer.resource_identity is not None
-                                and consumer.resource_identity is not None
-                                and producer.resource_identity.status == FiniteValueStatus.EXACT
-                                and consumer.resource_identity.status == FiniteValueStatus.EXACT
-                                else CouplingStrength.FINITE_OVERLAP
-                            )
-                            unvalidated = ResourceCouplingEdge.model_construct(
-                                id=f"sha256:{'0' * 64}",
-                                group_id=group.id,
-                                group_hash=group.group_hash,
-                                resource_space_hash=group.resource_space_hash,
-                                resource_value_hash=value_hash,
-                                strength=strength,
-                                channel=channel,
-                                producer_operation=producer_contract.operation,
-                                consumer_operation=consumer_contract.operation,
-                                producer_contract_id=producer_contract.id,
-                                consumer_contract_id=consumer_contract.id,
-                                producer_occurrence_id=producer.id,
-                                consumer_occurrence_id=consumer.id,
-                                producer_endpoint_id=producer_endpoint.id,
-                                consumer_endpoint_id=consumer_endpoint.id,
-                            )
-                            prospective.append(
-                                ResourceCouplingEdge(
-                                    id=semantic_hash(unvalidated.identity_payload()),
-                                    group_id=group.id,
-                                    group_hash=group.group_hash,
-                                    resource_space_hash=group.resource_space_hash,
-                                    resource_value_hash=value_hash,
-                                    strength=strength,
-                                    channel=channel,
-                                    producer_operation=producer_contract.operation,
-                                    consumer_operation=consumer_contract.operation,
-                                    producer_contract_id=producer_contract.id,
-                                    consumer_contract_id=consumer_contract.id,
-                                    producer_occurrence_id=producer.id,
-                                    consumer_occurrence_id=consumer.id,
-                                    producer_endpoint_id=producer_endpoint.id,
-                                    consumer_endpoint_id=consumer_endpoint.id,
-                                )
-                            )
+            for producer_contract, producer, producer_context in resource_producers:
+                for consumer_contract, consumer, consumer_context in resource_consumers:
+                    producer_endpoint = next(
+                        item
+                        for item in producer.endpoints
+                        if item.id == producer_context.endpoint_id
+                    )
+                    consumer_endpoint = next(
+                        item
+                        for item in consumer.endpoints
+                        if item.id == consumer_context.endpoint_id
+                    )
+                    if producer_endpoint.id == consumer_endpoint.id:
+                        continue
+                    assert producer_context.resource_identity is not None
+                    assert consumer_context.resource_identity is not None
+                    strength = (
+                        CouplingStrength.EXACT
+                        if producer_context.resource_identity.status == FiniteValueStatus.EXACT
+                        and consumer_context.resource_identity.status == FiniteValueStatus.EXACT
+                        else CouplingStrength.FINITE_OVERLAP
+                    )
+                    unvalidated = ResourceCouplingEdge.model_construct(
+                        id=f"sha256:{'0' * 64}",
+                        group_id=group.id,
+                        group_hash=group.group_hash,
+                        resource_space_hash=group.resource_space_hash,
+                        resource_value_hash=value_hash,
+                        strength=strength,
+                        channel=channel,
+                        producer_operation=producer_contract.operation,
+                        consumer_operation=consumer_contract.operation,
+                        producer_contract_id=producer_contract.id,
+                        consumer_contract_id=consumer_contract.id,
+                        producer_occurrence_id=producer.id,
+                        consumer_occurrence_id=consumer.id,
+                        producer_endpoint_id=producer_endpoint.id,
+                        consumer_endpoint_id=consumer_endpoint.id,
+                    )
+                    prospective.append(
+                        ResourceCouplingEdge(
+                            id=semantic_hash(unvalidated.identity_payload()),
+                            group_id=group.id,
+                            group_hash=group.group_hash,
+                            resource_space_hash=group.resource_space_hash,
+                            resource_value_hash=value_hash,
+                            strength=strength,
+                            channel=channel,
+                            producer_operation=producer_contract.operation,
+                            consumer_operation=consumer_contract.operation,
+                            producer_contract_id=producer_contract.id,
+                            consumer_contract_id=consumer_contract.id,
+                            producer_occurrence_id=producer.id,
+                            consumer_occurrence_id=consumer.id,
+                            producer_endpoint_id=producer_endpoint.id,
+                            consumer_endpoint_id=consumer_endpoint.id,
+                        )
+                    )
             unique = {edge.id: edge for edge in prospective}
             edges.extend(unique[item] for item in sorted(unique))
 
