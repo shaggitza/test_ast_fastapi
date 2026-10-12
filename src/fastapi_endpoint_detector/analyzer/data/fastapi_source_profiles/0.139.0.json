@@ -1,0 +1,36 @@
+{
+  "distribution": "fastapi",
+  "profile_id": "fastapi-auth-prerequisite",
+  "schema_version": 1,
+  "source_files": {
+    "fastapi/__init__.py": {
+      "role": "package_public_surface",
+      "sha256": "355dadc1d09da2db164be007769e1b07949ccce764c31bf0f4027a545485236c"
+    },
+    "fastapi/dependencies/models.py": {
+      "role": "dependency_graph_record_model",
+      "sha256": "5cf22411aba41da4da173f4ba1e23d7ff4fede8b4e015928382d75dd3a456d62"
+    },
+    "fastapi/dependencies/utils.py": {
+      "role": "dependency_graph_construction_and_solver",
+      "sha256": "5c8a5130beedb71e44866721816cfa47908cb01b9ea71eca1dd9a2dfc17f7bfb"
+    },
+    "fastapi/param_functions.py": {
+      "role": "dependency_marker_wrappers",
+      "sha256": "e1f4c2565bc40db010afb82f59890e5fc864b5d97623093e92fe05693cfb3fcc"
+    },
+    "fastapi/params.py": {
+      "role": "dependency_marker_records",
+      "sha256": "d5f34d48ae49ecf339170f85e7ff6e3b2b00d8d802fbad666f72e5ac15a9a893"
+    },
+    "fastapi/routing.py": {
+      "role": "request_routing_solver_entrypoint",
+      "sha256": "4fdf951bbf9ca943a5fc26f63ed83e8c424ff5d1debe10e8d1b73732bc8f2c7b"
+    }
+  },
+  "version": "0.139.0",
+  "wheel_filename": "fastapi-0.139.0-py3-none-any.whl",
+  "wheel_sha256": "cf15e1e9e667ddb0ad63811e60bd11390d1aac838ca4a7a23f421807b2308189",
+  "wheel_size": 130339,
+  "wheel_url": "https://files.pythonhosted.org/packages/9e/7c/8e3c6ad324ea5cb36604fc3f968554887891c316d9dfde57761611d907ad/fastapi-0.139.0-py3-none-any.whl"
+}
