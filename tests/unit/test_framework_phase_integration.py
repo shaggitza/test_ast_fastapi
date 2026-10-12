@@ -309,3 +309,40 @@ def test_rejected_framework_source_is_not_recorded_by_the_active_trace(
         any("no unique exact mypy call site" in reason for reason in record.limitations)
         for record in report.records
     )
+
+
+@pytest.mark.parametrize(("suffix", "accepted"), ((".py", True), (".pyi", False)))
+def test_only_executable_framework_sources_attest_runtime_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    suffix: str,
+    accepted: bool,
+) -> None:
+    source_root = tmp_path / "project"
+    module_path = tmp_path / "site-packages" / "fastapi" / f"applications{suffix}"
+    module_path.parent.mkdir(parents=True)
+    module_path.write_text("class FastAPI: pass\n", encoding="utf-8")
+    distribution = SimpleNamespace(
+        files=(Path(module_path.name),),
+        locate_file=lambda _item: module_path,
+    )
+    monkeypatch.setattr(phase_module.importlib.metadata, "distribution", lambda _name: distribution)
+    typed_build = SimpleNamespace(
+        modules={
+            "fastapi.applications": SimpleNamespace(tree=SimpleNamespace(path=str(module_path)))
+        }
+    )
+    site = SimpleNamespace(
+        canonical_symbol="fastapi.applications.FastAPI.on_event",
+        receiver_candidates=("fastapi.applications.FastAPI",),
+    )
+
+    actual = phase_module._trusted_framework_source(site, typed_build, source_root)
+
+    if accepted:
+        assert actual == (
+            module_path.resolve(),
+            "sha256:" + hashlib.sha256(module_path.read_bytes()).hexdigest(),
+        )
+    else:
+        assert actual is None

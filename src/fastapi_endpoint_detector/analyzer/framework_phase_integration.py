@@ -295,6 +295,9 @@ def _trusted_framework_source(  # noqa: PLR0911
     module_path = _typed_module_path(module_name, typed_build) if module_name else None
     if module_path is None or module_path.is_relative_to(source_root.resolve()):
         return None
+    # A declaration stub proves type identity, not runtime lifecycle behavior.
+    if module_path.suffix != ".py":
+        return None
     distributions = {"fastapi": "fastapi", "starlette": "starlette"}
     try:
         distribution = importlib.metadata.distribution(distributions[package])
