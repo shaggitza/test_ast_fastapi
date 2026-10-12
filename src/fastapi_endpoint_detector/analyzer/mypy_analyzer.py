@@ -614,6 +614,168 @@ class _ExecutorSummary:
     control_keywords: frozenset[str] = frozenset()
 
 
+def _context_binding_census(body: Any, *, node_limit: int, item_limit: int) -> set[str] | None:
+    """Bound lexical binders without resolving or executing application calls."""
+    from types import GetSetDescriptorType, MemberDescriptorType
+
+    from mypy.nodes import (
+        Argument,
+        AssertStmt,
+        AssignmentExpr,
+        AssignmentStmt,
+        Block,
+        BreakStmt,
+        ClassDef,
+        ContinueStmt,
+        Decorator,
+        DelStmt,
+        ExpressionStmt,
+        ForStmt,
+        FuncDef,
+        GlobalDecl,
+        IfStmt,
+        Import,
+        ImportFrom,
+        ListExpr,
+        NameExpr,
+        Node,
+        NonlocalDecl,
+        OperatorAssignmentStmt,
+        PassStmt,
+        RaiseStmt,
+        ReturnStmt,
+        StarExpr,
+        Statement,
+        TryStmt,
+        TupleExpr,
+        WhileStmt,
+        WithStmt,
+    )
+
+    names: set[str] = set()
+    pending = [body]
+    seen: set[int] = set()
+    items = 0
+
+    def bind(target: Any) -> bool:
+        nonlocal items
+        targets = [target]
+        while targets:
+            current = targets.pop()
+            items += 1
+            if items > item_limit:
+                return False
+            if current is None:
+                continue
+            if isinstance(current, NameExpr):
+                names.add(current.name)
+            elif isinstance(current, (ListExpr, TupleExpr)):
+                if len(current.items) > item_limit - items:
+                    return False
+                targets.extend(current.items)
+            elif isinstance(current, StarExpr):
+                targets.append(current.expr)
+            else:
+                return False
+        return True
+
+    while pending:
+        item = pending.pop()
+        items += 1
+        if items > item_limit:
+            return None
+        if isinstance(item, (list, tuple)):
+            if len(item) > item_limit - items:
+                return None
+            pending.extend(item)
+            continue
+        if not isinstance(item, Node) or id(item) in seen:
+            continue
+        seen.add(id(item))
+        if len(seen) > node_limit:
+            return None
+        if isinstance(item, AssignmentStmt):
+            if not all(bind(target) for target in item.lvalues):
+                return None
+        elif isinstance(item, AssignmentExpr):
+            if not bind(item.target):
+                return None
+        elif isinstance(item, OperatorAssignmentStmt):
+            if not bind(item.lvalue):
+                return None
+        elif isinstance(item, DelStmt):
+            if not bind(item.expr):
+                return None
+        elif isinstance(item, ForStmt):
+            if not bind(item.index):
+                return None
+        elif isinstance(item, WithStmt):
+            if not all(bind(target) for target in item.target):
+                return None
+        elif isinstance(item, TryStmt):
+            if not all(bind(target) for target in item.vars):
+                return None
+        elif isinstance(item, (GlobalDecl, NonlocalDecl)):
+            if len(item.names) > item_limit - items:
+                return None
+            items += len(item.names)
+            names.update(item.names)
+        elif isinstance(item, (FuncDef, Decorator, ClassDef)):
+            names.add(item.name)
+        elif isinstance(item, Argument):
+            names.add(item.variable.name)
+        elif isinstance(item, Import):
+            if len(item.ids) > item_limit - items:
+                return None
+            items += len(item.ids)
+            names.update(alias or module.split(".")[0] for module, alias in item.ids)
+        elif isinstance(item, ImportFrom):
+            if len(item.names) > item_limit - items:
+                return None
+            items += len(item.names)
+            names.update(alias or name for name, alias in item.names)
+        elif isinstance(item, Statement) and not isinstance(
+            item,
+            (
+                AssertStmt,
+                Block,
+                BreakStmt,
+                ContinueStmt,
+                ExpressionStmt,
+                IfStmt,
+                PassStmt,
+                RaiseStmt,
+                ReturnStmt,
+                WhileStmt,
+            ),
+        ):
+            # Match patterns, import-star and unknown future binder forms abstain.
+            return None
+        fields = set(getattr(item, "__dict__", {}))
+        for cls in type(item).__mro__:
+            fields.update(
+                attribute
+                for attribute, descriptor in cls.__dict__.items()
+                if isinstance(descriptor, (GetSetDescriptorType, MemberDescriptorType))
+            )
+        for attribute in fields:
+            if attribute.startswith("__") or attribute in {
+                "node",
+                "info",
+                "type",
+                "unanalyzed_type",
+                "analyzed",
+                "original_def",
+                "expanded",
+                "original_decorators",
+            }:
+                continue
+            child = getattr(item, attribute, None)
+            if isinstance(child, (Node, list, tuple)):
+                pending.append(child)
+    return names
+
+
 class MypyAnalyzer:
     """
     Analyze endpoint dependencies using mypy's type system.
@@ -625,9 +787,7 @@ class MypyAnalyzer:
     # Schema 27 distinguishes typed execution evidence and creation-time partial
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
-    EXECUTION_STATE_POLICY = (
-        "conditional-finally-partial-capture-v12-conditional-block-continuations"
-    )
+    EXECUTION_STATE_POLICY = "conditional-finally-partial-capture-v13-context-exit-aliases"
     MAX_CONTROL_EXIT_STATES = 32
     MAX_LOOP_FLOW_PASSES = 4
     MAX_LOOP_BODY_EVALUATIONS = 32
@@ -646,7 +806,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 11
+    EXECUTION_SUMMARY_VERSION = 12
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -7269,6 +7429,7 @@ class MypyAnalyzer:
 
         loop_body_evaluations = [0]
         finally_body_evaluations = [0]
+        context_parameter_bindings: list[set[str] | None] = []
 
         def _trace_snapshot() -> _TraceEnvironment:
             return _TraceEnvironment(
@@ -8235,6 +8396,29 @@ class MypyAnalyzer:
                     clear_alias_target(context_target)
                 context_entry = _trace_snapshot()
                 written_names = context_bound_names(n.body)
+                if not context_parameter_bindings:
+                    context_parameter_bindings.append(
+                        _context_binding_census(
+                            function_node.body,
+                            node_limit=self.MAX_CALL_SPAN_MYPY_NODES,
+                            item_limit=self.MAX_CALL_SPAN_MYPY_ITEMS,
+                        )
+                    )
+                manager_bindings = context_parameter_bindings[0]
+                parameter_variables = {
+                    id(argument.variable) for argument in function_node.arguments
+                }
+                pristine_parameter_managers = manager_bindings is not None and all(
+                    isinstance(expression, NameExpr)
+                    and id(expression.node) in parameter_variables
+                    and expression.name not in manager_bindings
+                    and expression.name not in context_entry.callables
+                    and expression.name not in context_entry.partials
+                    and expression.name not in context_entry.lambdas
+                    for expression in n.expr
+                )
+                if manager_bindings is None:
+                    _trace_cap(n, "UNKNOWN_CONTEXT_PARAMETER_BINDING")
                 body_flow = _normal_flow(walk_node(n.body))
                 context_normals = [_trace_snapshot()] if body_flow.normal else []
                 context_exits: list[_TraceExit] = []
@@ -8260,17 +8444,39 @@ class MypyAnalyzer:
                         for context_target in n.target:
                             clear_alias_target(context_target)
                     after = _trace_snapshot()
-                    if after.callables or after.partials or after.lambdas:
-                        # The suite's writes do not account for the manager's
-                        # implicit __exit__, which may mutate captured locals.
-                        # No manager-exit effect summary is established here.
-                        _trace_cap(n, "UNKNOWN_CONTEXT_MANAGER_EXIT")
-                        _restore_trace_snapshot(_widen_loop_state(after))
+                    # A direct pristine parameter cannot itself close over this
+                    # invocation's locals. Preserve only untouched entry aliases;
+                    # values dropped by body/exposure handling are never restored.
+                    # Other managers retain the existing callable-only LOW widening.
+                    _trace_cap(n, "UNKNOWN_CONTEXT_MANAGER_EXIT")
+                    widened = _widen_loop_state(after)
+                    if pristine_parameter_managers:
+                        _restore_trace_snapshot(
+                            _TraceEnvironment(
+                                {},
+                                {},
+                                {},
+                                widened.callables,
+                                {
+                                    name: value
+                                    for name, value in context_entry.partials.items()
+                                    if after.partials.get(name) == value
+                                },
+                                {
+                                    name: value
+                                    for name, value in context_entry.lambdas.items()
+                                    if after.lambdas.get(name) is value
+                                },
+                            )
+                        )
+                    else:
+                        _restore_trace_snapshot(widened)
                     return _trace_snapshot()
 
                 for context_exit in body_flow.exits:
                     sanitized = sanitize_context_state(context_exit.environment)
                     context_exits.append(_TraceExit(context_exit.kind, sanitized))
+                    context_exits.append(_TraceExit("raise", sanitized))
                     if context_exit.kind == "raise":
                         # Keep both possible exception outcomes in the call
                         # inventory. Suppression stays conditional; retaining
@@ -8282,6 +8488,10 @@ class MypyAnalyzer:
                             )
                         )
                 context_normals = [sanitize_context_state(state) for state in context_normals]
+                # An unmodeled __exit__ may raise even when the body completed
+                # normally. Add the alternative once after sanitation, so it
+                # reaches enclosing handlers/loops without replaying this manager.
+                context_exits.extend(_TraceExit("raise", state) for state in context_normals)
                 if context_normals:
                     _restore_trace_snapshot(_join_trace_snapshots(context_normals, n))
                 return _coalesce_trace_exits(bool(context_normals), context_exits)
@@ -8530,6 +8740,8 @@ class MypyAnalyzer:
                     def sanitize_final_state(
                         candidate: _TraceEnvironment,
                         incoming: _TraceEnvironment,
+                        *,
+                        keep_normal_writes: bool = False,
                     ) -> _TraceEnvironment:
                         if written_names is None:
                             _trace_cap(n, "UNKNOWN_FINALLY_EXIT_BINDING")
@@ -8549,6 +8761,25 @@ class MypyAnalyzer:
                             for name, value in incoming.lambdas.items()
                             if name not in written_names and candidate.lambdas.get(name) is value
                         }
+                        if keep_normal_writes:
+                            # Use only the joined normal-finalizer snapshot. A
+                            # conditional write keeps its LOW union or abstention;
+                            # immutable partial captures and lambda identity survive.
+                            callables.update(
+                                (name, value)
+                                for name, value in candidate.callables.items()
+                                if name in written_names
+                            )
+                            partials.update(
+                                (name, value)
+                                for name, value in candidate.partials.items()
+                                if name in written_names
+                            )
+                            lambdas.update(
+                                (name, value)
+                                for name, value in candidate.lambdas.items()
+                                if name in written_names
+                            )
                         dropped = (
                             ((set(incoming.callables) | set(candidate.callables)) - set(callables))
                             | ((set(incoming.partials) | set(candidate.partials)) - set(partials))
@@ -8589,7 +8820,9 @@ class MypyAnalyzer:
                             if conditional_finally:
                                 possible_execution_depth[0] -= 1
                         if final_flow.normal:
-                            final_state = sanitize_final_state(_trace_snapshot(), incoming)
+                            final_state = sanitize_final_state(
+                                _trace_snapshot(), incoming, keep_normal_writes=True
+                            )
                             if pending_kind == "normal":
                                 final_normals.append(final_state)
                             else:
