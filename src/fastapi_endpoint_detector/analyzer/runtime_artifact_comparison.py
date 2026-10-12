@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 from fastapi_endpoint_detector.analyzer.framework_phase_runtime import (
     PhaseManifest,
     PhaseObservation,
+    compare_phase_observation,
 )
 from fastapi_endpoint_detector.analyzer.runtime_custody import (
     RuntimeCustodyError,
@@ -414,6 +415,47 @@ def _validate_pair_equivalence(secure: dict[str, Any], runtime: dict[str, Any]) 
         raise ComparisonError("paired phase manifests differ between secure and runtime records")
 
 
+def _compare_runtime_phases(phase_value: dict[str, Any]) -> dict[str, Any]:
+    """Expose exact phase rows while keeping application claims nonpositive."""
+    phase_comparisons: dict[str, Any] = {}
+    try:
+        manifest = PhaseManifest.model_validate(phase_value["manifest"])
+        for name, observation_value in phase_value["observations"].items():
+            observation = PhaseObservation.model_validate(observation_value)
+            # Artifact custody does not attest to independent callback execution.
+            compared = compare_phase_observation(
+                manifest,
+                observation.model_copy(update={"role": "self_reported_nonpositive"}),
+            )
+            rows = [row.model_dump(mode="json") for row in compared.rows]
+            counts = {
+                status: sum(row["status"] == status for row in rows)
+                for status in (
+                    "observed_positive",
+                    "self_reported_observation",
+                    "callback_unavailable",
+                    "not_observed_positive_only",
+                )
+            }
+            phase_comparisons[name] = {
+                "execution_status": compared.execution_status,
+                "declared_observation_role": observation.role,
+                "observation_role": compared.observation_role,
+                "occurrence_status_counts": counts,
+                "occurrences": rows,
+                "observed_count": counts["observed_positive"],
+                "unavailable_count": counts["callback_unavailable"],
+            }
+    except (TypeError, ValueError, KeyError) as error:
+        raise ComparisonError(f"runtime phase comparison rejected: {error}") from error
+    return {
+        "role": "self_reported_nonpositive",
+        "manifest_sha256": manifest.digest,
+        "observations": phase_comparisons,
+        "absence_is_not_evidence": True,
+    }
+
+
 def _compare_loaded(
     secure: dict[str, Any],
     runtime: dict[str, Any],
@@ -425,7 +467,7 @@ def _compare_loaded(
     paired_success = secure["status"] == runtime["status"] == "success"
     quality_eligible = paired_success and _paired_attestations_measured(secure, runtime)
     result: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "runtime_role": _RUNTIME_ROLE,
         "snapshot": secure["snapshot"],
         "paired_success": paired_success,
@@ -451,20 +493,7 @@ def _compare_loaded(
     }
     phase_value = runtime.get("framework_phase")
     if isinstance(phase_value, dict):
-        observations = phase_value["observations"]
-        result["framework_phase_comparison"] = {
-            "role": "self_reported_nonpositive",
-            "manifest_sha256": PhaseManifest.model_validate(phase_value["manifest"]).digest,
-            "observations": {
-                name: {
-                    "execution_status": observation["execution_status"],
-                    "observed_count": 0,
-                    "unavailable_count": len(phase_value["manifest"]["entries"]),
-                }
-                for name, observation in observations.items()
-            },
-            "absence_is_not_evidence": True,
-        }
+        result["framework_phase_comparison"] = _compare_runtime_phases(phase_value)
     if not quality_eligible:
         result["inventory"] = None
         result["impact_exact"] = None
@@ -625,8 +654,8 @@ def compare_target_baseline(
         for snapshot in eligible_snapshots
     }
     return {
-        "schema_version": 1,
-        "protocol": "secure-runtime-target-baseline-v1",
+        "schema_version": 2,
+        "protocol": "secure-runtime-target-baseline-v2",
         "runtime_role": _RUNTIME_ROLE,
         "configuration": {
             "entry": entry_configuration,
