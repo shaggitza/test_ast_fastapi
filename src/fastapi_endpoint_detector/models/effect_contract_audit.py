@@ -114,7 +114,7 @@ class EffectContractAuditOccurrence(_StrictAuditModel):
     reason_code: str | None = None
     receiver_origin: ResourceIdentityEvidence | None = None
     resource_identity: ResourceIdentityEvidence | None = None
-    invocation_contexts: tuple[AuditInvocationContext, ...] = Field(min_length=1, max_length=128)
+    invocation_contexts: tuple[AuditInvocationContext, ...] = Field(min_length=1)
     contract_id: str | None = None
     contract_hash: str | None = None
     endpoints: tuple[AuditEndpoint, ...] = Field(min_length=1)

@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi_endpoint_detector.analyzer.resource_coupling import build_resource_coupling_graph
 from fastapi_endpoint_detector.models.effect_contract import (
+    CallResolutionStatus,
     ContractProvenance,
     EffectChannel,
     EffectContract,
@@ -28,7 +29,9 @@ from fastapi_endpoint_detector.models.effect_contract import (
     SelectorKind,
 )
 from fastapi_endpoint_detector.models.effect_contract_audit import (
+    AuditCallStatus,
     AuditEndpoint,
+    AuditInvocationContext,
     EffectContractAudit,
     EffectContractAuditOccurrence,
 )
@@ -62,7 +65,27 @@ def _contract(
 
 
 def _endpoint(label: str) -> AuditEndpoint:
-    return AuditEndpoint.model_construct(id=semantic_hash({"endpoint": label}))
+    identity = {
+        "methods": ("GET",),
+        "path": f"/benchmark/{label}",
+        "handler_module": "benchmark.handlers",
+        "handler_name": label.replace("-", "_"),
+        "handler_file": "benchmark/handlers.py",
+        "handler_line": 1,
+        "discovery_status": "established",
+        "conditions": [],
+    }
+    return AuditEndpoint(
+        id=semantic_hash(identity),
+        methods=("GET",),
+        path=f"/benchmark/{label}",
+        handler_module="benchmark.handlers",
+        handler_name=label.replace("-", "_"),
+        handler_file="benchmark/handlers.py",
+        handler_line=1,
+        discovery_status="established",
+        conditions=(),
+    )
 
 
 def _occurrence(
@@ -70,13 +93,46 @@ def _occurrence(
     contract_id: str,
     endpoint: AuditEndpoint,
     resource_index: int,
+    contract_hash: str,
 ) -> EffectContractAuditOccurrence:
-    return EffectContractAuditOccurrence.model_construct(
-        id=semantic_hash({"occurrence": index, "contract": contract_id}),
+    file_path = "benchmark/effects.py"
+    line = index + 1
+    return EffectContractAuditOccurrence(
+        id=semantic_hash(
+            {
+                "file_path": file_path,
+                "line": line,
+                "column": 0,
+                "end_line": line,
+                "end_column": 1,
+            }
+        ),
+        file_path=file_path,
+        line=line,
+        column=0,
+        end_line=line,
+        end_column=1,
+        source_spelling=contract_id,
+        resolver_status=CallResolutionStatus.EXACT,
+        audit_status=AuditCallStatus.MATCHED,
+        canonical_symbol=f"benchmark.effects.{contract_id.replace('-', '_')}",
+        invocation=InvocationKind.FUNCTION,
+        resolver="synthetic-benchmark",
+        resolver_version="1",
         contract_id=contract_id,
+        contract_hash=contract_hash,
         resource_identity=ResourceIdentityEvidence(
             status=FiniteValueStatus.EXACT,
             value_hashes=(semantic_hash({"resource": resource_index}),),
+        ),
+        invocation_contexts=(
+            AuditInvocationContext(
+                endpoint_id=endpoint.id,
+                resource_identity=ResourceIdentityEvidence(
+                    status=FiniteValueStatus.EXACT,
+                    value_hashes=(semantic_hash({"resource": resource_index}),),
+                ),
+            ),
         ),
         endpoints=(endpoint,),
     )
@@ -130,6 +186,7 @@ def build_fixture(
                     contract.id,
                     endpoint_by_role[contract.id],
                     resource_index,
+                    document.contract_hashes[contract.id],
                 )
             )
             occurrence_index += 1

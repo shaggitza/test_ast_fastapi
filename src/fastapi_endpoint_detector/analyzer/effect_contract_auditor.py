@@ -48,8 +48,6 @@ from fastapi_endpoint_detector.models.endpoint import (
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-_MAX_INVOCATION_CONTEXTS_PER_OCCURRENCE = 128
-
 
 def _semantic_hash(payload: object) -> str:
     encoded = json.dumps(
@@ -370,14 +368,6 @@ def audit_effect_contracts(  # noqa: PLR0912, PLR0915
                     f"{relative}:{site.line}:{site.column}"
                 )
             previous_endpoint = endpoints.get(endpoint_record.id)
-            if (
-                previous_endpoint is None
-                and len(contexts) >= _MAX_INVOCATION_CONTEXTS_PER_OCCURRENCE
-            ):
-                raise EffectContractAuditError(
-                    "endpoint invocation context limit exceeded for physical call at "
-                    f"{relative}:{site.line}:{site.column}"
-                )
             if previous_endpoint is not None and previous_endpoint != endpoint_record:
                 raise EffectContractAuditError(
                     "conflicting endpoint provenance for stable endpoint identity "

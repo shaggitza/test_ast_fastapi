@@ -13,11 +13,13 @@ from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.models.effect_contract import (
     CallArgumentEvidence,
     CallResolutionStatus,
+    EffectSelector,
     FiniteValueStatus,
     InvocationKind,
     LoadedEffectContracts,
     ResolvedCallSite,
     ResourceIdentityEvidence,
+    SelectorKind,
     load_effect_contracts,
     load_effect_preset,
 )
@@ -676,6 +678,68 @@ def test_conflicting_arguments_for_one_endpoint_context_fail_closed(tmp_path: Pa
                 )
             ],
         )
+
+
+def test_shared_call_preserves_all_129_endpoint_invocation_contexts(tmp_path: Path) -> None:
+    endpoints = [
+        _endpoint(tmp_path, f"handler_{index}", route=f"/route-{index}")
+        for index in range(129)
+    ]
+    loaded = _loaded(tmp_path / "effects.yaml")
+    emit = loaded.document.contracts[0].model_copy(
+        update={
+            "package": None,
+            "resource": EffectSelector(kind=SelectorKind.ARGUMENT, index=0),
+        }
+    )
+    document = loaded.document.model_copy(
+        update={"contracts": (emit, *loaded.document.contracts[1:])}
+    )
+    loaded = loaded.model_copy(
+        update={
+            "document": document,
+            "contract_hashes": document.contract_hashes,
+            "config_hash": document.config_hash,
+        }
+    )
+    rows = []
+    expected_hashes: dict[str, str] = {}
+    for index, endpoint in enumerate(endpoints):
+        value_hash = f"sha256:{index + 1:064x}"
+        expected_hashes[endpoint.path] = value_hash
+        argument = CallArgumentEvidence(
+            source_index=0,
+            positional_index=0,
+            status=FiniteValueStatus.EXACT,
+            value_hashes=(value_hash,),
+        )
+        rows.append(
+            (
+                endpoint,
+                [_site(tmp_path, column=2).model_copy(update={"arguments": (argument,)})],
+            )
+        )
+
+    audit = _audit(tmp_path, rows, loaded=loaded)
+
+    assert audit.summary.physical_occurrences == 1
+    occurrence = audit.occurrences[0]
+    assert len(occurrence.endpoints) == 129
+    assert len(occurrence.invocation_contexts) == 129
+    endpoint_paths = {endpoint.id: endpoint.path for endpoint in audit.scope.endpoint_inventory}
+    contexts_by_path = {
+        endpoint_paths[context.endpoint_id]: context for context in occurrence.invocation_contexts
+    }
+    assert set(contexts_by_path) == set(expected_hashes)
+    assert {
+        path: context.arguments[0].value_hashes[0]
+        for path, context in contexts_by_path.items()
+    } == expected_hashes
+    assert {
+        path: context.resource_identity.value_hashes[0]
+        for path, context in contexts_by_path.items()
+        if context.resource_identity is not None
+    } == expected_hashes
 
 
 def test_incomplete_endpoint_corpus_and_escaping_paths_fail_closed(tmp_path: Path) -> None:
