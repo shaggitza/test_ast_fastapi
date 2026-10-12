@@ -354,6 +354,74 @@ def test_runtime_comparator_never_promotes_legacy_positive_phase_claims(tmp_path
     phase = result["framework_phase_comparison"]
     assert phase["role"] == "self_reported_nonpositive"
     assert phase["observations"]["list"]["observed_count"] == 0
+    observed = phase["observations"]["list"]
+    assert observed["declared_observation_role"] == "positive_observation_only"
+    assert observed["observation_role"] == "self_reported_nonpositive"
+    assert observed["occurrence_status_counts"]["observed_positive"] == 0
+    assert observed["occurrence_status_counts"]["self_reported_observation"] == 1
+    assert observed["occurrences"][0]["status"] == "self_reported_observation"
+
+
+def test_phase_comparison_distinguishes_unavailable_and_unobserved_callbacks(
+    tmp_path: Path,
+) -> None:
+    secure_record = _record("secure")
+    record = _record("runtime")
+    original = PhaseManifest.model_validate(secure_record["framework_phase_manifest"])
+    first = original.entries[0]
+    second = first.model_copy(
+        update={
+            "callback": first.callback.model_copy(
+                update={"symbol": "unobserved_startup", "line": 2}
+            ),
+            "registration": first.registration.model_copy(
+                update={"symbol": "register_other_startup", "line": 3}
+            ),
+        }
+    )
+    manifest = PhaseManifest(entries=(first, second))
+    manifest_value = manifest.model_dump(mode="json")
+    secure_record["framework_phase_manifest"] = manifest_value
+    record["framework_phase_manifest"] = manifest_value
+    record["framework_phase"]["manifest"] = manifest_value
+    for observation in record["framework_phase"]["observations"].values():
+        observation.update(
+            manifest_sha256=manifest.digest,
+            observed=[],
+            unavailable=[
+                {
+                    "callback": first.callback.model_dump(mode="json"),
+                    "reason": "controlled callback unavailable",
+                }
+            ],
+            role="self_reported_nonpositive",
+        )
+    secure = tmp_path / "secure.json"
+    runtime = tmp_path / "runtime.json"
+    _write(secure, secure_record)
+    _write(runtime, record)
+
+    result = compare(secure, runtime)
+
+    assert result["schema_version"] == 2
+    phase = result["framework_phase_comparison"]
+    assert phase["role"] == "self_reported_nonpositive"
+    assert phase["absence_is_not_evidence"] is True
+    assert phase["manifest_sha256"] == manifest.digest
+    for phase_name in ("list", "impact"):
+        comparison = phase["observations"][phase_name]
+        assert comparison["occurrence_status_counts"] == {
+            "observed_positive": 0,
+            "self_reported_observation": 0,
+            "callback_unavailable": 1,
+            "not_observed_positive_only": 1,
+        }
+        assert comparison["observed_count"] == 0
+        assert comparison["unavailable_count"] == 1
+        rows = {row["callback"]["symbol"]: row for row in comparison["occurrences"]}
+        assert rows["startup"]["status"] == "callback_unavailable"
+        assert rows["startup"]["unavailable_reasons"] == ["controlled callback unavailable"]
+        assert rows["unobserved_startup"]["status"] == "not_observed_positive_only"
 
 
 def test_phase_manifest_accepts_distinct_snapshot_and_segment_hashes(tmp_path: Path) -> None:

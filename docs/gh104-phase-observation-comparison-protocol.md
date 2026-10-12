@@ -28,3 +28,17 @@ production sources with cache disabled, independent exact-blob review, and 40 co
 actual production models/comparator with manually supplied data. No app, worker, or physical runtime
 fixture was executed. Hosted unit regressions cover identity and digest matching, role separation,
 callback-level unavailability, copied-model negatives, duplicates, failed executions, and bounds.
+
+The installed artifact comparator now consumes this API in its schema-v2 comparison output
+(`secure-runtime-target-baseline-v2` for the four-artifact form). Input artifacts remain schema v1.
+For each list/impact phase it emits exact callback and registration rows, execution conditions,
+unavailability reasons, and counts derived from row statuses. An unobserved callback remains distinct
+from an explicitly unavailable callback.
+
+Artifact comparison retains the application-observation quarantine: every admitted phase observation
+is compared as self_reported_nonpositive, including legacy positive-role claims. The original role is
+reported as declared_observation_role; comparison observation_role remains nonpositive and
+observed_count is zero. Producer quarantine, record validation and custody verification are unchanged.
+Hosted controls retain the legacy-positive nonpromotion check and compare a signed two-callback
+record with one unavailable callback and one unobserved callback. No isolated callback execution or
+real-world paired measurement is established by this report shape.
