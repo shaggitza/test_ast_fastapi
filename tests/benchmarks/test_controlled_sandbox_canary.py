@@ -77,8 +77,9 @@ def test_timeout_requires_executor_timeout_and_unique_cid_cleanup(tmp_path: Path
     assert command[command.index("--name") + 1] == name
     assert name.startswith("gh101-canary-")
     assert cidfile.parent.parent == tmp_path
-    assert result["timeout_observed"] is True
+    assert result["host_execution_deadline_observed"] is True
     assert result["cleanup_verified"] is True
+    assert "loop_execution_observed" not in result
     assert result["mode"] == "controlled_synthetic"
     assert list(tmp_path.iterdir()) == []
 
@@ -122,4 +123,23 @@ def test_timeout_cleanup_failure_cannot_be_reported_as_observed(tmp_path: Path) 
         pytest.raises(VMExecutorError, match="cleanup failed"),
     ):
         assay._run_case(tmp_path, "timeout", 2, inspect_only=False)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("error", "timeout"),
+    [
+        (VMExecutorError("sandbox cleanup failed: docker container ls timed out after 10s"), 2),
+        (RuntimeError("Container execution timed out after 2 seconds"), 2),
+        (VMExecutorError("Container execution timed out after 3 seconds"), 2),
+    ],
+)
+def test_timeout_rejects_cleanup_timeout_wrong_type_and_mismatched_deadline(
+    tmp_path: Path, error: Exception, timeout: int
+) -> None:
+    with (
+        patch.object(VMExecutor, "_execute_bounded", side_effect=error),
+        pytest.raises(type(error), match=r"timed out|cleanup failed"),
+    ):
+        assay._run_case(tmp_path, "timeout", timeout, inspect_only=False)
     assert list(tmp_path.iterdir()) == []

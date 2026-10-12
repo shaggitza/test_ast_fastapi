@@ -12,7 +12,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from fastapi_endpoint_detector.executor.vm_executor import VMExecutor
+from fastapi_endpoint_detector.executor.vm_executor import VMExecutor, VMExecutorError
 
 IMAGE = (
     "test-ast-runtime-phase-15508bc@sha256:"
@@ -128,12 +128,13 @@ def _run_case(parent: Path, mode: str, timeout: int, *, inspect_only: bool) -> d
         if mode == "timeout":
             try:
                 executor._execute_bounded(command, cidfile, name)
-            except Exception as exc:
-                if "timed out" not in str(exc).lower():
+            except VMExecutorError as exc:
+                expected = f"Container execution timed out after {executor.timeout} seconds"
+                if str(exc) != expected:
                     raise
                 return {
                     "mode": "controlled_synthetic",
-                    "timeout_observed": True,
+                    "host_execution_deadline_observed": True,
                     "cleanup_verified": True,
                     "pins": pins,
                 }
