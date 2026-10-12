@@ -19,8 +19,14 @@ Each verified blob is stored once under `blobs/<sha256>`. `receipts.json`
 contains one status for each locked row and records URL, expected and observed
 hash/size, final URL, and blob path. Its `bytes` summary counts every byte
 read, including bytes from failed validation rows, and reads stop at the remaining
-aggregate budget. The wall deadline interrupts blocked network operations as well
-as bounding the whole collection. Failures include a structured
+aggregate budget. One wall deadline covers captured-input setup, network work,
+cache verification/publication, and receipt publication; nested operations share
+the same deadline and cannot extend it. Expiration during cache I/O leaves the
+row missing with its fetched bytes still charged. Expiration during final receipt
+publication may prevent a receipt from being written. Collection requires the
+POSIX main thread and refuses to start while the caller has an active
+`ITIMER_REAL`/`SIGALRM` timer, preserving that caller handler and timer unchanged.
+Failures include a structured
 `failure_class`; HTTP failures also include numeric `http_status` without
 recording response headers. Bytes returned by a successful fetch are charged
 before cache storage, so local write failures cannot restore aggregate budget.

@@ -7,6 +7,7 @@ import http.client
 import io
 import json
 import os
+import signal
 import time
 import urllib.error
 import urllib.request
@@ -164,6 +165,86 @@ def test_fetch_wall_deadline_interrupts_blocking_read_and_preserves_transport_er
     assert "DNS lookup refused" in str(caught.value)
 
 
+def test_active_caller_alarm_is_refused_without_changing_it() -> None:
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    def handler(_signum: int, _frame: Any) -> None:
+        return None
+
+    signal.signal(signal.SIGALRM, handler)
+    signal.setitimer(signal.ITIMER_REAL, 5, 2)
+    try:
+        before = signal.getitimer(signal.ITIMER_REAL)
+        with pytest.raises(
+            collector.CollectionFailure, match="caller-owned active"
+        ), collector._wall_deadline(time.monotonic() + 1):
+            pass
+        after = signal.getitimer(signal.ITIMER_REAL)
+        assert signal.getsignal(signal.SIGALRM) is handler
+        assert after[1] == before[1]
+        assert 0 < after[0] <= before[0]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def test_nested_deadline_does_not_extend_outer_deadline() -> None:
+    started = time.monotonic()
+    with (
+        pytest.raises(collector.CollectionFailure, match="wall-clock limit"),
+        collector._wall_deadline(started + 0.05),
+        collector._wall_deadline(started + 5),
+    ):
+        time.sleep(1)
+    assert time.monotonic() - started < 0.5
+
+
+def test_earlier_nested_deadline_shortens_outer_deadline() -> None:
+    started = time.monotonic()
+    with (
+        pytest.raises(collector.CollectionFailure, match="wall-clock limit"),
+        collector._wall_deadline(started + 5),
+        collector._wall_deadline(started + 0.05),
+    ):
+        time.sleep(1)
+    assert time.monotonic() - started < 0.5
+
+
+@pytest.mark.parametrize("blocked_operation", ["read", "fsync"])
+def test_deadline_interrupts_blocking_cache_io(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, blocked_operation: str
+) -> None:
+    body = b"cached body"
+    digest = hashlib.sha256(body).hexdigest()
+    rootfd = collector._open_dir_chain(tmp_path, create=False)
+    if blocked_operation == "read":
+        collector._publish(rootfd, digest, body)
+        original_read = os.read
+
+        def blocked_read(fd: int, size: int) -> bytes:
+            time.sleep(1)
+            return original_read(fd, size)
+
+        monkeypatch.setattr(os, "read", blocked_read)
+    else:
+        original_fsync = os.fsync
+
+        def blocked_fsync(fd: int) -> None:
+            time.sleep(1)
+            original_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", blocked_fsync)
+    started = time.monotonic()
+    try:
+        with (
+            pytest.raises(collector.CollectionFailure, match="wall-clock limit"),
+            collector._wall_deadline(started + 0.05),
+        ):
+            collector._store_verified(rootfd, body, digest)
+    finally:
+        os.close(rootfd)
+    assert time.monotonic() - started < 0.5
+
+
 def test_fetch_never_reads_beyond_remaining_aggregate_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -256,6 +337,46 @@ def test_storage_failures_do_not_reuse_downloaded_byte_allowance(
     assert all(row["status"] == "missing" for row in result["rows"])
     assert result["summary"]["missing"] == 50
     assert result["summary"]["mismatch"] == 0
+
+
+def test_expired_final_row_storage_is_missing_and_bytes_stay_charged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = {
+        path: path.read_bytes()
+        for path in (collector.LOCK, collector.MANIFEST, collector.CHECKSUMS)
+    }
+    original_read = protocol._read_bounded
+    monkeypatch.setattr(
+        protocol,
+        "_read_bounded",
+        lambda path, *args: captured[path] if path in captured else original_read(path, *args),
+    )
+
+    def fetched(
+        url: str, _repo: str, _number: int, size: int, _deadline: float, _budget: int
+    ) -> tuple[bytes, str]:
+        return b"x" * size, url
+
+    store_calls = 0
+
+    def store(_fd: int, _body: bytes, expected_hash: str) -> str:
+        nonlocal store_calls
+        store_calls += 1
+        if store_calls == 50:
+            time.sleep(1.5)
+        return expected_hash
+
+    monkeypatch.setattr(collector, "_fetch", fetched)
+    monkeypatch.setattr(collector, "_store_verified", store)
+    monkeypatch.setattr(collector, "MAX_SECONDS", 1)
+    result = collector.collect(tmp_path / "deadline-out")
+    last = result["rows"][-1]
+    assert last["status"] == "missing"
+    assert last["failure_class"] == "deadline"
+    assert "sha256" not in last and "blob" not in last
+    assert result["summary"]["matched"] == 49
+    assert result["summary"]["bytes"] == collector.MAX_TOTAL_BYTES
 
 
 def test_publish_is_no_clobber_and_safe_output_rejects_symlink(tmp_path: Path) -> None:

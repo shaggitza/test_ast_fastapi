@@ -38,6 +38,8 @@ MAX_TOTAL_BYTES = 443_496
 MAX_ROW_BYTES = 2_000_000
 MAX_SECONDS = 180
 SCHEMA = "locked-raw-diff-receipts-v1"
+_deadline_depth = 0
+_deadline_at: float | None = None
 
 
 class CollectionFailure(protocol.CorpusV2Error):
@@ -51,40 +53,53 @@ class CollectionFailure(protocol.CorpusV2Error):
 
 @contextlib.contextmanager
 def _wall_deadline(deadline: float) -> Iterator[None]:
-    """Interrupt a blocking urllib operation at the collector's wall deadline."""
+    """Enforce one non-extending POSIX alarm deadline across nested work."""
+    global _deadline_depth, _deadline_at  # noqa: PLW0603
     if (
         threading.current_thread() is not threading.main_thread()
         or not hasattr(signal, "setitimer")
         or not hasattr(signal, "SIGALRM")
     ):
         raise CollectionFailure("deadline", "exact deadline requires POSIX main-thread collection")
-    previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_timer = signal.getitimer(signal.ITIMER_REAL)
-    started = time.monotonic()
+    outermost = _deadline_depth == 0
+    previous_handler: Any = None
+    if outermost:
+        previous_handler = signal.getsignal(signal.SIGALRM)
+        previous_timer = signal.getitimer(signal.ITIMER_REAL)
+        if previous_timer[0] > 0:
+            raise CollectionFailure(
+                "deadline", "collector cannot run with a caller-owned active SIGALRM timer"
+            )
+        _deadline_at = deadline
+    elif _deadline_at is None:
+        raise RuntimeError("deadline guard state is inconsistent")
+    else:
+        _deadline_at = min(_deadline_at, deadline)
+        remaining = _deadline_at - time.monotonic()
+        if remaining <= 0:
+            signal.setitimer(signal.ITIMER_REAL, 0.000001)
+            raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
+        signal.setitimer(signal.ITIMER_REAL, remaining)
 
     def expired(_signum: int, _frame: Any) -> None:
         raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
 
-    signal.signal(signal.SIGALRM, expired)
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
-        signal.signal(signal.SIGALRM, previous_handler)
-        raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
-    signal.setitimer(signal.ITIMER_REAL, remaining)
+    if outermost:
+        remaining = _deadline_at - time.monotonic()
+        if remaining <= 0:
+            _deadline_at = None
+            raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, remaining)
+    _deadline_depth += 1
     try:
         yield
     finally:
-        # Account for time spent under our guard so nested operations cannot
-        # postpone a timer installed by the caller.
-        elapsed = time.monotonic() - started
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        if previous_timer[0]:
-            signal.setitimer(
-                signal.ITIMER_REAL,
-                max(0.000001, previous_timer[0] - elapsed),
-                previous_timer[1],
-            )
+        _deadline_depth -= 1
+        if outermost:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous_handler)
+            _deadline_at = None
 
 
 def _open_dir_chain(path: Path, *, create: bool) -> int:
@@ -324,10 +339,14 @@ def _store_verified(cache_fd: int, body: bytes, expected_hash: str) -> str:
     except FileNotFoundError:
         try:
             _publish(cache_fd, digest, body)
+        except CollectionFailure:
+            raise
         except protocol.CorpusV2Error as exc:
             raise CollectionFailure(
                 "local_storage_error", "content-addressed cache publication failed"
             ) from exc
+    except CollectionFailure:
+        raise
     except protocol.CorpusV2Error as exc:
         raise CollectionFailure("local_storage_error", "content-addressed cache collision") from exc
     except OSError as exc:
@@ -337,7 +356,7 @@ def _store_verified(cache_fd: int, body: bytes, expected_hash: str) -> str:
     return digest
 
 
-def collect(  # noqa: PLR0912, PLR0915
+def _collect(  # noqa: PLR0912, PLR0915
     output: Path,
     *,
     lock_path: Path = LOCK,
@@ -397,7 +416,9 @@ def collect(  # noqa: PLR0912, PLR0915
     rows = project["records"]
     _validate_rows(rows)
     rootfd = _open_dir_chain(output, create=True)
-    deadline = time.monotonic() + MAX_SECONDS
+    deadline = _deadline_at
+    if deadline is None:
+        raise RuntimeError("collector must run under its wall deadline")
     statuses: list[dict[str, Any]] = []
     total = 0
     try:
@@ -432,7 +453,10 @@ def collect(  # noqa: PLR0912, PLR0915
             )
             fetched = True
             total += len(body)
-            digest = _store_verified(cachefd, body, expected_hash)
+            with _wall_deadline(deadline):
+                digest = _store_verified(cachefd, body, expected_hash)
+                if time.monotonic() >= deadline:
+                    raise CollectionFailure("deadline", "collector wall-clock limit exceeded")
             entry.update(
                 {
                     "status": "matched",
@@ -504,6 +528,23 @@ def collect(  # noqa: PLR0912, PLR0915
         os.close(cachefd)
         os.close(rootfd)
     return receipt
+
+
+def collect(
+    output: Path,
+    *,
+    lock_path: Path = LOCK,
+    manifest_path: Path = MANIFEST,
+    checksums_path: Path = CHECKSUMS,
+) -> dict[str, Any]:
+    """Run setup, acquisition, storage, and receipt publication on one deadline."""
+    with _wall_deadline(time.monotonic() + MAX_SECONDS):
+        return _collect(
+            output,
+            lock_path=lock_path,
+            manifest_path=manifest_path,
+            checksums_path=checksums_path,
+        )
 
 
 def main() -> int:
