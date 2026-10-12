@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from fastapi_endpoint_detector.analyzer.change_mapper import ChangeMapper
+from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
+from fastapi_endpoint_detector.models.endpoint import Endpoint, EndpointMethod, HandlerInfo
 
 
 def _diff(path: str, line: int) -> str:
@@ -141,3 +143,69 @@ def test_handler_keeps_callable_before_resolved_unbound_local_load(tmp_path: Pat
         "GET /try-local-load"
     }
     assert mapper.analyze_diff(_diff("helpers.py", 3)).candidate_endpoints == []
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected_state"),
+    [
+        ("", "established_execution"),
+        ("    if False:\n        return 0\n", "established_execution"),
+        ("    if flag:\n        return 0\n", "possible_execution"),
+        ("    if flag:\n        raise ValueError()\n", "possible_execution"),
+        ("    with Suppressor():\n        raise ValueError()\n", "possible_execution"),
+        (
+            "    with Suppressor():\n        if flag:\n            raise ValueError()\n",
+            "possible_execution",
+        ),
+    ],
+)
+def test_lambda_after_abrupt_alternatives_has_conditional_source_evidence(
+    tmp_path: Path, prefix: str, expected_state: str
+) -> None:
+    prelude = (
+        "def hit() -> int:\n"
+        "    return 1\n"
+        "class Suppressor:\n"
+        '    def __enter__(self) -> "Suppressor":\n'
+        "        return self\n"
+        "    def __exit__(\n"
+        "        self,\n"
+        "        exc_type: type[BaseException] | None,\n"
+        "        exc: BaseException | None,\n"
+        "        traceback: object,\n"
+        "    ) -> bool:\n"
+        "        return True\n"
+        "def handler(flag: bool) -> int:\n"
+    )
+    body = "    return (lambda: hit())()"
+    source = prelude + prefix + body + "\n"
+    app_path = tmp_path / "app.py"
+    app_path.write_text(source, encoding="utf-8")
+    endpoint = Endpoint(
+        path="/block-continuations",
+        methods=[EndpointMethod.GET],
+        handler=HandlerInfo(name="handler", module="app", file_path=app_path, line_number=13),
+    )
+
+    dependencies = MypyAnalyzer(tmp_path, max_depth=4).analyze_endpoint(endpoint)
+
+    body_line = len(prelude.splitlines()) + len(prefix.splitlines()) + 1
+    body_column = len(body[: body.index("hit()")].encode("utf-8"))
+    states = {
+        span.execution_state
+        for span in dependencies.source_evidence_spans
+        if (
+            span.start_line,
+            span.start_column,
+            span.end_line,
+            span.end_column,
+        )
+        == (body_line, body_column, body_line, body_column + len("hit()"))
+    }
+    assert dependencies.references_symbol_at_line("app.py", 1) is not None
+    assert expected_state in states
+    if expected_state == "possible_execution":
+        assert "established_execution" not in states
+    else:
+        assert "possible_execution" not in states
+        assert "deferred_execution" not in states
