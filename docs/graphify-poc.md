@@ -1,8 +1,9 @@
 # Graphify code-graph POC boundary
 
-Issue #110 evaluates Graphify as an optional generic code-graph provider. This
-foundation is deliberately **not** connected to the default CLI or analyzer.
-Mypy remains the only default semantic backend. Importing this project never
+Issue #110 evaluates Graphify as an optional generic code-graph provider. The
+offline overlay is opt-in through `analyze --graphify`; it remains separate
+from the default endpoint analyzer and candidate selection. Mypy remains the
+default semantic backend. Importing this project never
 imports, installs, or executes Graphify, and missing Graphify tooling never
 causes fallback or changes ordinary analysis.
 
@@ -25,6 +26,12 @@ The expected producer metadata is pinned as:
 | console command | `graphify` |
 | exact version output | `graphify 0.9.30` |
 | adapter schema | `1` |
+
+An additive offline selector, `graphify-raw-0.9.30-v1` (normalized schema
+version `2`), accepts the pinned raw `--no-cluster` document. It does not alter
+the v1 contract above or establish directedness. Its deliberately restricted
+direction and provenance rules are documented in
+[`graphify-0.9.30-raw-schema.md`](graphify-0.9.30-raw-schema.md).
 
 These are **expected provenance metadata**, not proof that an imported file was
 created by that executable. The future sandbox gate must attest the installed
@@ -98,7 +105,9 @@ project, source, and receipt path failures are normalized to
 ## Current decision and remaining gates
 
 **Decision: BUILD the offline adapter foundation; do not ADOPT or invoke the
-backend. Keep #110 open.**
+backend. Keep #110 open.** The raw schema selector is a format-compatibility
+addition only; the trusted execution, calibration, and corpus gates remain
+open.
 
 Before an ADOPT or HYBRID decision, later work must still:
 

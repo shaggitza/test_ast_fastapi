@@ -55,6 +55,15 @@ class GraphEndpointSeed:
     start_line: int
     end_line: int
     discovery_status: EndpointDiscoveryStatus
+    binding_identity: str = "handler"
+    binding_kind: Literal["handler", "dependency"] = "handler"
+    confidence_ceiling: Literal["MEDIUM", "LOW"] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.endpoint_id or not self.binding_identity:
+            raise ValueError("endpoint and binding identities must be non-empty")
+        if self.binding_kind not in {"handler", "dependency"}:
+            raise ValueError("unsupported endpoint binding kind")
 
     @classmethod
     def from_endpoint(cls, endpoint: Endpoint) -> GraphEndpointSeed:
@@ -89,6 +98,8 @@ class GraphPathEvidence:
     edge_keys: tuple[int | str | None, ...] = ()
     edge_context_identities: tuple[str | None, ...] = ()
     incomplete: bool = False
+    binding_identity: str = "handler"
+    binding_kind: Literal["handler", "dependency"] = "handler"
 
 
 @dataclass(frozen=True)
@@ -136,6 +147,17 @@ def _confidence(
     return "HIGH"
 
 
+def _apply_confidence_ceiling(
+    confidence: GraphConfidence,
+    ceiling: Literal["MEDIUM", "LOW"] | None,
+) -> GraphConfidence:
+    if ceiling == "LOW":
+        return "LOW"
+    if ceiling == "MEDIUM" and confidence == "HIGH":
+        return "MEDIUM"
+    return confidence
+
+
 def _endpoint_bindings(
     nodes: tuple[GraphifyNode, ...],
     seeds: tuple[GraphEndpointSeed, ...],
@@ -145,16 +167,22 @@ def _endpoint_bindings(
 ) -> tuple[dict[str, tuple[_EndpointBinding, ...]], set[str]]:
     bindings: dict[str, list[_EndpointBinding]] = {}
     ambiguous: set[str] = set()
-    seeds_by_id: dict[str, GraphEndpointSeed] = {}
+    seeds_by_id: dict[tuple[str, str], GraphEndpointSeed] = {}
+    statuses_by_endpoint: dict[str, EndpointDiscoveryStatus] = {}
     for seed in seeds:
-        prior_seed = seeds_by_id.get(seed.endpoint_id)
+        prior_status = statuses_by_endpoint.setdefault(seed.endpoint_id, seed.discovery_status)
+        if prior_status != seed.discovery_status:
+            raise ValueError(f"conflicting endpoint seeds share endpoint_id: {seed.endpoint_id}")
+        seed_key = (seed.endpoint_id, seed.binding_identity)
+        prior_seed = seeds_by_id.get(seed_key)
         if prior_seed is not None:
             if prior_seed != seed:
                 raise ValueError(
-                    f"conflicting endpoint seeds share endpoint_id: {seed.endpoint_id}"
+                    "conflicting endpoint seeds share endpoint and binding identities: "
+                    f"{seed.endpoint_id}/{seed.binding_identity}"
                 )
             continue
-        seeds_by_id[seed.endpoint_id] = seed
+        seeds_by_id[seed_key] = seed
         path = _relative_path(seed.file_path, project_root)
         exact_matches = [
             node
@@ -192,7 +220,11 @@ def _endpoint_bindings(
         node_id: tuple(
             sorted(
                 node_bindings,
-                key=lambda item: (item.seed.endpoint_id, item.seed.discovery_status.value),
+                key=lambda item: (
+                    item.seed.endpoint_id,
+                    item.seed.binding_identity,
+                    item.seed.discovery_status.value,
+                ),
             )
         )
         for node_id, node_bindings in bindings.items()
@@ -329,7 +361,7 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
     visited_depth: dict[str, int] = {}
     visited_witnesses: set[_PathWitnessKey] = set()
     evidence: dict[
-        tuple[str, str, tuple[str, ...], tuple[_EdgeWitnessKey, ...]], GraphPathEvidence
+        tuple[str, str, str, tuple[str, ...], tuple[_EdgeWitnessKey, ...]], GraphPathEvidence
     ] = {}
     node_capped = False
     witness_capped = False
@@ -374,28 +406,38 @@ def traverse_graphify_snapshot(  # noqa: PLR0912, PLR0915
                     for span in line_only_spans
                 )
             )
+            confidence = (
+                "LOW"
+                if binding.line_only or line_only_spans
+                else _confidence(strengths, endpoint_seed.discovery_status)
+            )
+            confidence = _apply_confidence_ceiling(confidence, endpoint_seed.confidence_ceiling)
             item = GraphPathEvidence(
-                snapshot.side,
-                endpoint_seed.endpoint_id,
-                endpoint_seed.discovery_status,
-                walk.node_path[0],
-                walk.node_id,
-                walk.node_path,
-                node_spans,
-                edge_spans,
-                tuple(edge.relation for edge in walk.edges),
-                strengths,
-                (
-                    "LOW"
-                    if binding.line_only or line_only_spans
-                    else _confidence(strengths, endpoint_seed.discovery_status)
-                ),
-                path_limitations,
-                tuple(_edge_key(edge) for edge in walk.edges),
-                tuple(_edge_context_identity(edge) for edge in walk.edges),
+                side=snapshot.side,
+                endpoint_id=endpoint_seed.endpoint_id,
+                discovery_status=endpoint_seed.discovery_status,
+                changed_node_id=walk.node_path[0],
+                endpoint_node_id=walk.node_id,
+                node_path=walk.node_path,
+                node_source_spans=node_spans,
+                edge_source_spans=edge_spans,
+                relations=tuple(edge.relation for edge in walk.edges),
+                extractor_strengths=strengths,
+                confidence=confidence,
+                limitations=path_limitations,
+                edge_keys=tuple(_edge_key(edge) for edge in walk.edges),
+                edge_context_identities=tuple(_edge_context_identity(edge) for edge in walk.edges),
+                binding_identity=endpoint_seed.binding_identity,
+                binding_kind=endpoint_seed.binding_kind,
             )
             evidence[
-                (endpoint_seed.endpoint_id, item.changed_node_id, item.node_path, edge_witness)
+                (
+                    endpoint_seed.endpoint_id,
+                    endpoint_seed.binding_identity,
+                    item.changed_node_id,
+                    item.node_path,
+                    edge_witness,
+                )
             ] = item
             limitations.extend(path_limitations)
         available_edges: list[GraphifyEdge] = []

@@ -2664,6 +2664,18 @@ class HtmlFormatter(BaseFormatter):
                 f"{len(paths.source_projections)} source projections; "
                 "lexical and conditional only, persistence not established</div>"
             )
+        if report.graphify_overlay is not None:
+            evidence = report.graphify_overlay.get("evidence")
+            evidence_count = len(evidence) if isinstance(evidence, list) else 0
+            summary = (
+                f"{evidence_count} LOW diagnostic path(s); "
+                "offline lexical evidence only; does not change endpoint candidates"
+            )
+            content_lines.append(
+                '<div class="summary-item"><span class="summary-label">'
+                "Graphify Overlay:</span> "
+                f"{html.escape(summary)}</div>"
+            )
         if report.source_observations is not None:
             summary = self.summarize_source_observations(report.source_observations)
             content_lines.append(

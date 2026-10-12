@@ -1,61 +1,63 @@
-# Graphify 0.9.30 raw schema support
+# Graphify 0.9.30 raw schema support (offline adapter only)
 
-The adapter has an explicit `schema="graphify-raw-0.9.30-v1"` selector for
-the raw document emitted by the pinned `graphify extract --code-only
---no-cluster --out DIR` path. The existing `node-link-v1` selector remains
-strict and unchanged. The raw top level is exactly `nodes`, `edges`,
-`hyperedges`, `input_tokens`, and `output_tokens`; this parser rejects extra or
-missing top-level keys, invalid counters, nonempty hyperedges, unsupported
-record fields, invalid provenance, missing endpoints, duplicate IDs, and
-identical raw edge occurrences. Raw occurrences with the same endpoints and
-relation but distinct source locations or contexts remain separate.
+The explicit selector `graphify-raw-0.9.30-v1` accepts the raw document
+described by the pinned `graphify extract --code-only --no-cluster --out DIR`
+source path. The established `node-link-v1` contract and behavior are
+unchanged. The selector is available only with the explicit `--graphify`
+overlay; neither path starts Graphify or installs/imports its package.
 
-Source-path validation applies to both selectors: source paths must be relative
-to the project root and cannot traverse `..` or symlink components. This
-deliberately tightens legacy node-link acceptance of absolute paths or symlink
-aliases; callers must use confined project-relative paths.
+The raw document has exactly `nodes`, `edges`, `hyperedges`, `input_tokens`, and
+`output_tokens`. The adapter bounds those arrays and counters and requires empty
+hyperedges. For this raw schema only, the pinned extractor's `_origin` field is
+accepted on nodes and edges when its value is exactly `ast`; missing or other
+values fail closed. This is validated input metadata, not authentication that
+the file was actually emitted by Graphify. The node-link v1 field allowlists
+remain unchanged.
 
-Raw edge `source` and `target` order is retained for known semantic relations.
-The adapter maps `calls` to caller-to-callee, `imports` and `imports_from` to
-importer-to-imported, `inherits` to subclass-to-base, and `references` to
-referencer-to-referenced. `confidence` carries Graphify provenance
-(`EXTRACTED`, `INFERRED`, or `AMBIGUOUS`); it is not a HIGH/MEDIUM/LOW quality
-rating. Other relation names fail closed. Raw `source_location` is line-only
-(`L<number>`); the
-adapter stores those as line spans and never infers byte, column, or function
-end positions.
+Project-backed nodes and edges must identify a project-confined regular
+`source_file`; the adapter retains bounded exact-byte reads, SHA-256 hashes,
+mutation checks, and the exclusive receipt writer. A producer edge may omit `source_location`.
+When the location is absent or null, its source file is still checked and
+hashed, but its span is unknown and the edge cannot be traversed. A supplied
+raw marker must be one line (`L<number>`) and fit the exact source bytes. Raw
+line markers are never widened into byte or column ranges.
 
-The adapter's normalized raw snapshots record directed semantic edges while
-reporting `multigraph=false`: Graphify's raw merge deduplicates edge tuples and
-does not provide a directed multigraph contract. It can therefore lose
-repeated same-relation evidence in extraction before this adapter sees it. The
-existing `node-link-v1` path retains parallel edges and their NetworkX `key`,
-provenance, and source span independently; a shared relation name is not
-treated as a duplicate physical occurrence.
-This support removes the node-link format gate for imports; it is not evidence
-that a Graphify extraction ran or that the result meets GH110 quality goals.
+The narrowly recognized external-import stub is source-less: its pinned
+constructor ID, label, package specifier, and AST import edge from a checked
+project file must agree. Its normalized source path, hash, and span are absent;
+the raw package spelling is retained only as `unverified_source_file` diagnostic
+metadata. Neither the stub nor its spanless import edge supplies traversal or
+endpoint-binding evidence. Unknown or malformed stub identities still undergo
+ordinary project-path validation and fail closed.
 
-## Pinned upstream source evidence
+Raw `source` and `target` values are retained as producer endpoint order. That
+does not establish a directed graph: the pinned producer's raw form is not the
+directed NetworkX multigraph. In v2, only `calls`, `imports`, `imports_from`,
+and `inherits` have source-confirmed orientation and can enter traversal.
+`references`, `contains`, and all other relation names are retained with
+`orientation="unknown"` and cannot fan out. All supplied `EXTRACTED`,
+`INFERRED`, or `AMBIGUOUS` provenance labels remain separate from quality
+confidence; the adapter does not promote them to HIGH/MEDIUM/LOW. Physical
+records remain separate tuple entries, including repeated records. The
+producer itself may already have deduplicated repeated tuples before writing.
 
-The upstream release is `graphifyy==0.9.30`, official tag `v0.9.30`, commit
-`ecfcd160d56b420eb8241430fa7b5b1951c7829f`; the primary inspected files are
-[`graphify/cli.py`](https://github.com/Graphify-Labs/graphify/blob/v0.9.30/graphify/cli.py)
-and [`graphify/extract.py`](https://github.com/Graphify-Labs/graphify/blob/v0.9.30/graphify/extract.py).
-The CLI accepts `--code-only`, `--no-cluster`, and `--out`; the no-cluster
-writer serializes the raw merged object with `nodes`, `edges`, `hyperedges`,
-`input_tokens`, and `output_tokens`. The extractor emits node IDs, labels,
-`file_type`, `source_file`, optional `source_location`; edge endpoints,
-`relation`, provenance `confidence`, `source_file`, line `source_location`,
-and `weight`, with optional context and extractor-specific attributes.
-Source locations are line markers. The clustered exporter creates an
-undirected graph by default, and the extract command has no supported
-directed/multigraph flag. The adapter does not use clustered edges to infer
-semantic direction.
+This is an independently specified synthetic raw fixture contract, with
+records shaped from the pinned source constructors (including `_origin` and
+constructors that omit a line marker); it is not an observation of Graphify
+output. `tests/fixtures/graphify_0_9_30_raw_synthetic.json` was not emitted by
+Graphify and must not be cited as producer-behavior evidence.
+The release source artifacts and inspected file hashes are recorded in the
+controlled-probe research at commit
+`35cc919ef02b0a6570b95cda6425bbdf2a6a4c5f`, including
+`benchmarks/providers/graphify_probe/evidence.json`. In that work, the official
+`v0.9.30` source commit is
+`ecfcd160d56b420eb8241430fa7b5b1951c7829f`; hashes identify the exact pinned
+wheel and relevant source files. Graphify was not run or imported, and the
+fixture remains synthetic.
 
-The fixture [`graphify_0_9_30_raw_synthetic.json`](../tests/fixtures/graphify_0_9_30_raw_synthetic.json)
-is independently constructed from that source-described shape. It is labeled
-synthetic by this documentation and test name; it is not Graphify output or
-tool-behavior evidence. Graphify was not installed, imported, or run. GH101's
-trusted gVisor/Kata runtime remains unavailable, so runtime receipts, real
-baseline/target corpus extraction, CLI calibration, and quality acceptance
-remain open. GH110 remains open.
+The CLI/API selector does not close the trusted execution gate. GH101 runtime,
+image, and policy receipts remain required before any real extraction. The
+original GH110 gates also remain open: controlled positive and negative
+fixtures, the frozen target/baseline corpus, calibration of provenance against
+quality, and runtime/size/latency/resource measurements. This change makes no
+ADOPT, HYBRID, or completed-GH110 claim.
