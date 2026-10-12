@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass, replace
+import json
+from dataclasses import asdict, dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from fastapi_endpoint_detector.analyzer.mypy_analyzer import MypyAnalyzer
 from fastapi_endpoint_detector.analyzer.mypy_incremental import BuildConfig, MypyIncrementalProvider
@@ -12,6 +15,8 @@ from fastapi_endpoint_detector.analyzer.typed_graph_bridge import seeds_for_chan
 from fastapi_endpoint_detector.analyzer.typed_reverse_graph import (
     ChangedSeed,
     EndpointOccurrenceBinding,
+    SourceDependencyBinding,
+    SourceDependencyUncertainty,
     SourceSpan,
     TraversalBudgets,
     TypedGraphCache,
@@ -858,3 +863,287 @@ def test_exact_changed_coordinate_seeds_and_conditional_low_cap(tmp_path: Path) 
     assert outside_symbol == ()
     assert result.evidence
     assert all(item.confidence == "LOW" for item in result.evidence)
+
+
+# These ingress controls do not establish FastAPI selector implementation ownership.
+# The graph retains caller-supplied declarations as LOW with unknown execution.
+_SOURCE_DEPENDENCY_SELECTORS = (
+    "fastapi.params.Depends",
+    "fastapi.params.Security",
+    "fastapi.param_functions.Depends",
+    "fastapi.param_functions.Security",
+)
+
+
+def _source_dependency_case(tmp_path: Path, selector: str = _SOURCE_DEPENDENCY_SELECTORS[0]):
+    selector_module, selector_name = selector.rsplit(".", maxsplit=1)
+    inventory, snapshot, _ = _snapshot(
+        tmp_path,
+        {
+            "app": (
+                f"from {selector_module} import {selector_name}\n"
+                "from providers import provide\n"
+                f"def handler(value: int = {selector_name}(provide)):\n"
+                "    return value\n"
+            ),
+            "providers": "def provide() -> int:\n    return 1\n",
+        },
+    )
+    snapshots = {record.module: record.path.read_bytes() for record in inventory.files}
+    baseline = build_typed_reverse_graph(
+        inventory, snapshot, [], config_fingerprint="cfg", source_snapshots=snapshots
+    )
+    app_module = _module(snapshot, "app")
+    provider_module = _module(snapshot, "providers")
+    symbols = {symbol.fullname: symbol for symbol in baseline.symbols}
+    owner = symbols[_fullname(snapshot, app_module, "handler")]
+    provider = symbols[_fullname(snapshot, provider_module, "provide")]
+    assert owner.kind == provider.kind == "function"
+    assert owner.span is not None and provider.span is not None
+    record = next(record for record in inventory.files if record.module == app_module)
+    fragment = f"{selector_name}(provide)".encode()
+    line = snapshots[app_module].splitlines(keepends=True)[2]
+    start = line.index(fragment)
+    call_span = SourceSpan(
+        app_module,
+        str(record.path.resolve()),
+        record.sha256,
+        3,
+        start,
+        3,
+        start + len(fragment),
+    )
+    route = EndpointOccurrenceBinding("route-a", "GET /a", owner.fullname, owner.span)
+    row = SourceDependencyBinding(
+        "route-a", owner.fullname, provider.fullname, selector, call_span, provider.span
+    )
+    return inventory, snapshot, snapshots, route, row
+
+
+@pytest.mark.parametrize("selector", _SOURCE_DEPENDENCY_SELECTORS)
+def test_source_dependency_ingress_is_low_unknown_and_manifest_bound(
+    tmp_path: Path, selector: str
+) -> None:
+    inventory, snapshot, snapshots, route, row = _source_dependency_case(tmp_path, selector)
+    graph = build_typed_reverse_graph(
+        inventory,
+        snapshot,
+        [route],
+        config_fingerprint="cfg",
+        source_snapshots=snapshots,
+        source_dependency_bindings=[row],
+    )
+    result = graph.query([ChangedSeed("target", row.provider_symbol)], side="target")
+    evidence = [
+        item
+        for item in result.evidence
+        if any(edge.relation == "typed_source_dependency_binding" for edge in item.witnesses)
+    ]
+    assert len(evidence) == 1
+    found = evidence[0]
+    assert (found.confidence, found.execution_state, found.reference_state) == (
+        "LOW",
+        "unknown",
+        "unknown",
+    )
+    edge = next(
+        edge for edge in found.witnesses if edge.relation == "typed_source_dependency_binding"
+    )
+    assert edge.invocation == "unknown"
+    assert edge.span == row.call_span and edge.target_span == row.target_span
+    assert any(
+        issue.reason_code == "dependency_parameter_transfer_not_proven"
+        for issue in found.uncertainties
+    )
+    manifest = TypedGraphCache.manifest(graph)
+    assert manifest.source_dependency_bindings == (row,)
+    encoded = json.loads(json.dumps(asdict(manifest), sort_keys=True))
+    assert encoded["source_dependency_bindings"][0]["selector"] == selector
+    assert TypedGraphCache.validate(graph, inventory, snapshot, config_fingerprint="cfg")
+
+
+def test_source_dependency_shared_handler_has_one_physical_witness_and_two_routes(
+    tmp_path: Path,
+) -> None:
+    inventory, snapshot, snapshots, route, row = _source_dependency_case(tmp_path)
+    second_route = replace(route, occurrence_id="route-b", endpoint_id="GET /b")
+    second_row = replace(row, occurrence_id="route-b")
+    graph = build_typed_reverse_graph(
+        inventory,
+        snapshot,
+        [second_route, route],
+        config_fingerprint="cfg",
+        source_snapshots=snapshots,
+        source_dependency_bindings=[second_row, row],
+    )
+    assert len(graph.source_dependency_bindings) == 2
+    assert (
+        len([edge for edge in graph.edges if edge.relation == "typed_source_dependency_binding"])
+        == 1
+    )
+    result = graph.query([ChangedSeed("target", row.provider_symbol)], side="target")
+    found = [
+        item.occurrence.occurrence_id
+        for item in result.evidence
+        if any(edge.relation == "typed_source_dependency_binding" for edge in item.witnesses)
+    ]
+    assert sorted(found) == ["route-a", "route-b"]
+    same = build_typed_reverse_graph(
+        inventory,
+        snapshot,
+        [route, second_route],
+        config_fingerprint="cfg",
+        source_snapshots=snapshots,
+        source_dependency_bindings=[row, second_row],
+    )
+    assert TypedGraphCache.cache_key(graph) == TypedGraphCache.cache_key(same)
+
+
+def test_source_dependency_uncertainties_and_required_witnesses_are_cache_bound(
+    tmp_path: Path,
+) -> None:
+    inventory, snapshot, snapshots, route, row = _source_dependency_case(tmp_path)
+    uncertainty = SourceDependencyUncertainty(
+        route.occurrence_id,
+        route.symbol,
+        row.call_span,
+        "selector_origin_unverified",
+        "Depends",
+    )
+    graph = build_typed_reverse_graph(
+        inventory,
+        snapshot,
+        [route],
+        config_fingerprint="cfg",
+        source_snapshots=snapshots,
+        source_dependency_bindings=[row],
+        source_dependency_uncertainties=[uncertainty],
+    )
+    manifest = TypedGraphCache.manifest(graph)
+    assert manifest.source_dependency_uncertainties == (uncertainty,)
+    assert TypedGraphCache.validate(graph, inventory, snapshot, config_fingerprint="cfg")
+    for tampered in (
+        replace(
+            graph, source_dependency_bindings=(replace(row, selector="fastapi.params.Security"),)
+        ),
+        replace(graph, source_dependency_bindings=()),
+        replace(
+            graph,
+            source_dependency_bindings=(
+                replace(row, call_span=replace(row.call_span, source_sha256="0" * 64)),
+            ),
+        ),
+        replace(
+            graph,
+            source_dependency_uncertainties=(replace(uncertainty, reason_code="changed_reason"),),
+        ),
+        replace(
+            graph,
+            edges=tuple(
+                edge for edge in graph.edges if edge.relation != "typed_source_dependency_binding"
+            ),
+        ),
+    ):
+        assert not TypedGraphCache.validate(tampered, inventory, snapshot, config_fingerprint="cfg")
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda row: replace(row, occurrence_id=[]),
+        lambda row: replace(row, occurrence_id="missing"),
+        lambda row: replace(row, owner_symbol="elsewhere.handler"),
+        lambda row: replace(row, provider_symbol="elsewhere.provide"),
+        lambda row: replace(row, selector="Depends"),
+        lambda row: replace(row, call_span=replace(row.call_span, source_sha256="0" * 64)),
+        lambda row: replace(row, call_span=replace(row.call_span, start_column=True)),
+        lambda row: replace(row, target_span=replace(row.target_span, start_line=2)),
+        lambda row: replace(
+            row,
+            call_span=replace(
+                row.call_span, start_line=1, end_line=1, start_column=0, end_column=5
+            ),
+        ),
+    ],
+)
+def test_source_dependency_invalid_rows_fail_before_sort_or_lookup(tmp_path: Path, change) -> None:
+    inventory, snapshot, snapshots, route, row = _source_dependency_case(tmp_path)
+    with pytest.raises(ValueError, match="source dependency metadata"):
+        build_typed_reverse_graph(
+            inventory,
+            snapshot,
+            [route],
+            config_fingerprint="cfg",
+            source_snapshots=snapshots,
+            source_dependency_bindings=[change(row)],
+        )
+
+
+def test_source_dependency_duplicates_containers_and_budgets_fail_closed(
+    tmp_path: Path,
+) -> None:
+    inventory, snapshot, snapshots, route, row = _source_dependency_case(tmp_path)
+    uncertainty = SourceDependencyUncertainty(
+        route.occurrence_id, route.symbol, row.call_span, "origin_unverified", "Depends"
+    )
+    for kwargs in (
+        {"source_dependency_bindings": [row, row]},
+        {"source_dependency_bindings": {row}},
+        {"source_dependency_bindings": 42},
+        {"source_dependency_bindings": [row] * 8193},
+        {"source_dependency_uncertainties": [uncertainty, uncertainty]},
+        {"source_dependency_uncertainties": [replace(uncertainty, reason_code=[])]},
+        {"source_dependency_uncertainties": [replace(uncertainty, source_spelling="x" * 257)]},
+    ):
+        with pytest.raises(ValueError, match="source dependency metadata"):
+            build_typed_reverse_graph(
+                inventory,
+                snapshot,
+                [route],
+                config_fingerprint="cfg",
+                source_snapshots=snapshots,
+                **kwargs,
+            )
+    with pytest.raises(ValueError, match="source dependency metadata"):
+        build_typed_reverse_graph(
+            inventory,
+            snapshot,
+            [route, route],
+            config_fingerprint="cfg",
+            source_snapshots=snapshots,
+            source_dependency_bindings=[row],
+        )
+
+
+def test_source_dependency_absent_metadata_preserves_legacy_bindings(tmp_path: Path) -> None:
+    inventory, snapshot, snapshots, route, row = _source_dependency_case(tmp_path)
+    omitted = build_typed_reverse_graph(
+        inventory, snapshot, [route], config_fingerprint="cfg", source_snapshots=snapshots
+    )
+    empty = build_typed_reverse_graph(
+        inventory,
+        snapshot,
+        [route],
+        config_fingerprint="cfg",
+        source_snapshots=snapshots,
+        source_dependency_bindings=(),
+        source_dependency_uncertainties=(),
+    )
+    assert omitted == empty
+    assert omitted.source_dependency_bindings == omitted.source_dependency_uncertainties == ()
+    assert "DI callable-value transfer from route parameter/default/Depends is not integrated" in (
+        omitted.limitations
+    )
+    manual = build_typed_reverse_graph(
+        inventory,
+        snapshot,
+        [replace(route, dependency_symbols=(row.provider_symbol,))],
+        config_fingerprint="cfg",
+        source_snapshots=snapshots,
+    )
+    edge = next(edge for edge in manual.edges if edge.relation == "framework_dependency_binding")
+    assert (edge.confidence, edge.execution_state, edge.reference_state) == (
+        "LOW",
+        "executed",
+        "invocation",
+    )

@@ -50,7 +50,7 @@ GraphSide = Literal["baseline", "target"]
 EdgeKind = Literal["call", "constructor", "global_read", "global_write", "dependency"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 Invocation = Literal["function", "instance_method", "class_method", "constructor", "unknown"]
-_GRAPH_SCHEMA_VERSION = 5
+_GRAPH_SCHEMA_VERSION = 6
 
 
 class TypedSnapshot(Protocol):
@@ -132,6 +132,34 @@ class UncertaintyWitness:
         "effect_summary",
         "source_coverage",
     ]
+    reason_code: str
+    source_spelling: str
+
+
+@dataclass(frozen=True)
+class SourceDependencyBinding:
+    """Caller-supplied source declaration with execution and transfer unverified."""
+
+    occurrence_id: str
+    owner_symbol: str
+    provider_symbol: str
+    selector: Literal[
+        "fastapi.params.Depends",
+        "fastapi.params.Security",
+        "fastapi.param_functions.Depends",
+        "fastapi.param_functions.Security",
+    ]
+    call_span: SourceSpan
+    target_span: SourceSpan
+
+
+@dataclass(frozen=True)
+class SourceDependencyUncertainty:
+    """An unresolved source declaration owned by one physical route occurrence."""
+
+    occurrence_id: str
+    owner_symbol: str
+    span: SourceSpan
     reason_code: str
     source_spelling: str
 
@@ -232,6 +260,8 @@ class TypedReverseGraph:
     endpoint_bindings: tuple[EndpointOccurrenceBinding, ...]
     uncertainties: tuple[UncertaintyWitness, ...] = ()
     limitations: tuple[str, ...] = ()
+    source_dependency_bindings: tuple[SourceDependencyBinding, ...] = ()
+    source_dependency_uncertainties: tuple[SourceDependencyUncertainty, ...] = ()
 
     def reverse_index(self) -> dict[str, tuple[EdgeWitness, ...]]:
         rows: dict[str, list[EdgeWitness]] = {}
@@ -1029,6 +1059,10 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     *,
     config_fingerprint: str,
     source_snapshots: dict[str, bytes] | None = None,
+    source_dependency_bindings: tuple[SourceDependencyBinding, ...]
+    | list[SourceDependencyBinding] = (),
+    source_dependency_uncertainties: tuple[SourceDependencyUncertainty, ...]
+    | list[SourceDependencyUncertainty] = (),
 ) -> TypedReverseGraph:
     """Build one immutable typed graph from inventory bytes and retained mypy ASTs."""
     inventory_root = Path(inventory.root)
@@ -1170,6 +1204,41 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
                 "dependency_parameter_transfer_not_proven",
                 dependency,
             )
+    if not isinstance(source_dependency_bindings, (tuple, list)) or not isinstance(
+        source_dependency_uncertainties, (tuple, list)
+    ):
+        raise ValueError("source dependency metadata must be bounded rows")
+    if (
+        len(source_dependency_bindings) + len(source_dependency_uncertainties)
+        > _MAX_SOURCE_DEPENDENCY_METADATA
+    ):
+        raise ValueError("source dependency metadata exceeds row budget")
+    raw_bindings = tuple(source_dependency_bindings)
+    raw_uncertainties = tuple(source_dependency_uncertainties)
+    if not _dependency_metadata_valid(
+        raw_bindings,
+        raw_uncertainties,
+        endpoint_bindings,
+        symbols.values(),
+        source_by_path,
+        module_by_path,
+        source_lines,
+    ):
+        raise ValueError("source dependency metadata is not bound to this typed snapshot")
+    dependency_bindings = tuple(sorted(raw_bindings, key=_dependency_binding_key))
+    dependency_uncertainties = tuple(sorted(raw_uncertainties, key=_dependency_uncertainty_key))
+    dependency_edges, dependency_issues = _source_dependency_projection(
+        dependency_bindings, dependency_uncertainties
+    )
+    for witness_id, witness in dependency_edges.items():
+        if witness_id in edges and edges[witness_id] != witness:
+            raise ValueError("source dependency witness identity collision")
+        edges[witness_id] = witness
+    for uncertainty_id, uncertainty in dependency_issues.items():
+        if uncertainty_id in uncertainties and uncertainties[uncertainty_id] != uncertainty:
+            raise ValueError("source dependency uncertainty identity collision")
+        uncertainties[uncertainty_id] = uncertainty
+
     inventory_fingerprint = _sha256(
         tuple((item.module, item.relative_path, item.sha256) for item in records)
     )
@@ -1196,12 +1265,20 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
         tuple(sorted(endpoint_bindings, key=_binding_key)),
         tuple(sorted(uncertainties.values())),
         (
-            "DI callable-value transfer from route parameter/default/Depends is not integrated",
+            (
+                "Depends/Security source metadata is LOW; execution and parameter transfer "
+                "are unverified"
+                if dependency_bindings or dependency_uncertainties
+                else "DI callable-value transfer from route parameter/default/Depends "
+                "is not integrated"
+            ),
             "finite receiver dispatch beyond mypy's direct typed target is not integrated",
             "assigned/returned lambda state is unknown; only direct invocation is classified",
             "effect/reference/deferred generator summaries are not integrated",
             "conditional route confidence must be supplied on endpoint occurrence bindings",
         ),
+        dependency_bindings,
+        dependency_uncertainties,
     )
 
 
@@ -1229,6 +1306,275 @@ def _source_span_is_valid(span: SourceSpan, lines: tuple[bytes, ...]) -> bool:
     if span.start_column > len(start_line) or span.end_column > len(end_line):
         return False
     return (span.start_line, span.start_column) <= (span.end_line, span.end_column)
+
+
+_MAX_SOURCE_DEPENDENCY_METADATA = 8192
+_SOURCE_DEPENDENCY_SELECTORS = frozenset(
+    {
+        "fastapi.params.Depends",
+        "fastapi.params.Security",
+        "fastapi.param_functions.Depends",
+        "fastapi.param_functions.Security",
+    }
+)
+
+
+def _dependency_span_key(span: SourceSpan) -> tuple[Any, ...]:
+    return (
+        span.module,
+        span.path,
+        span.source_sha256,
+        span.start_line,
+        span.start_column,
+        span.end_line,
+        span.end_column,
+    )
+
+
+def _dependency_binding_key(row: SourceDependencyBinding) -> tuple[Any, ...]:
+    return (
+        row.occurrence_id,
+        row.owner_symbol,
+        row.provider_symbol,
+        row.selector,
+        _dependency_span_key(row.call_span),
+        _dependency_span_key(row.target_span),
+    )
+
+
+def _dependency_uncertainty_key(row: SourceDependencyUncertainty) -> tuple[Any, ...]:
+    return (
+        row.occurrence_id,
+        row.owner_symbol,
+        _dependency_span_key(row.span),
+        row.reason_code,
+        row.source_spelling,
+    )
+
+
+def _dependency_span_valid(
+    span: Any,
+    hashes: dict[str, str],
+    modules: dict[str, str],
+    lines: dict[str, tuple[bytes, ...]],
+) -> bool:
+    if (
+        not isinstance(span, SourceSpan)
+        or type(span.module) is not str
+        or not span.module
+        or type(span.path) is not str
+        or not span.path
+        or type(span.source_sha256) is not str
+        or len(span.source_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in span.source_sha256)
+        or any(
+            type(value) is not int
+            for value in (
+                span.start_line,
+                span.start_column,
+                span.end_line,
+                span.end_column,
+            )
+        )
+        or span.start_line < 1
+        or span.end_line < span.start_line
+        or span.start_column < 0
+        or span.end_column < 0
+        or (span.start_line, span.start_column) >= (span.end_line, span.end_column)
+    ):
+        return False
+    try:
+        path = str(Path(span.path).resolve())
+    except (OSError, ValueError):
+        return False
+    return (
+        path == span.path
+        and modules.get(path) == span.module
+        and hashes.get(path) == span.source_sha256
+        and _source_span_is_valid(span, lines.get(path, ()))
+    )
+
+
+def _source_dependency_projection(
+    dependency_bindings: tuple[SourceDependencyBinding, ...],
+    dependency_uncertainties: tuple[SourceDependencyUncertainty, ...],
+) -> tuple[dict[str, EdgeWitness], dict[str, UncertaintyWitness]]:
+    dependency_edges: dict[str, EdgeWitness] = {}
+    dependency_issues: dict[str, UncertaintyWitness] = {}
+    for row in dependency_bindings:
+        physical = (
+            row.owner_symbol,
+            row.provider_symbol,
+            row.selector,
+            row.call_span,
+            row.target_span,
+        )
+        witness_id = _sha256(("source-dependency-v1", physical))
+        witness = EdgeWitness(
+            witness_id,
+            row.owner_symbol,
+            row.provider_symbol,
+            "dependency",
+            row.call_span,
+            row.target_span,
+            "LOW",
+            "unknown",
+            "unknown",
+            "unknown",
+            "typed_source_dependency_binding",
+        )
+        if witness_id in dependency_edges and dependency_edges[witness_id] != witness:
+            raise ValueError("source dependency witness identity collision")
+        dependency_edges[witness_id] = witness
+        uncertainty_id = _sha256(("source-dependency-transfer-v1", physical))
+        dependency_issues[uncertainty_id] = UncertaintyWitness(
+            uncertainty_id,
+            row.owner_symbol,
+            row.call_span,
+            "dependency_injection",
+            "dependency_parameter_transfer_not_proven",
+            row.selector,
+        )
+    for uncertainty_row in dependency_uncertainties:
+        uncertainty_physical = (
+            uncertainty_row.owner_symbol,
+            uncertainty_row.span,
+            uncertainty_row.reason_code,
+            uncertainty_row.source_spelling,
+        )
+        uncertainty_id = _sha256(("source-dependency-uncertainty-v1", uncertainty_physical))
+        dependency_issues[uncertainty_id] = UncertaintyWitness(
+            uncertainty_id,
+            uncertainty_row.owner_symbol,
+            uncertainty_row.span,
+            "dependency_injection",
+            uncertainty_row.reason_code,
+            uncertainty_row.source_spelling,
+        )
+
+    return dependency_edges, dependency_issues
+
+
+def _dependency_projection_valid(graph: TypedReverseGraph) -> bool:
+    expected_edges, expected_issues = _source_dependency_projection(
+        graph.source_dependency_bindings, graph.source_dependency_uncertainties
+    )
+    actual_edges = {
+        edge.witness_id: edge
+        for edge in graph.edges
+        if edge.relation == "typed_source_dependency_binding"
+    }
+    actual_issues = {item.uncertainty_id: item for item in graph.uncertainties}
+    return expected_edges == actual_edges and all(
+        actual_issues.get(key) == value for key, value in expected_issues.items()
+    )
+
+
+def _dependency_metadata_valid(  # noqa: PLR0911, PLR0912
+    bindings: tuple[Any, ...],
+    uncertainties: tuple[Any, ...],
+    endpoint_bindings: Iterable[Any],
+    symbols: Iterable[Any],
+    hashes: dict[str, str],
+    modules: dict[str, str],
+    lines: dict[str, tuple[bytes, ...]],
+) -> bool:
+    if not isinstance(bindings, (tuple, list)) or not isinstance(uncertainties, (tuple, list)):
+        return False
+    if not bindings and not uncertainties:
+        return True
+    if len(bindings) + len(uncertainties) > _MAX_SOURCE_DEPENDENCY_METADATA:
+        return False
+    endpoints = tuple(endpoint_bindings)
+    if any(
+        not isinstance(row, EndpointOccurrenceBinding)
+        or type(row.occurrence_id) is not str
+        or not row.occurrence_id
+        or type(row.symbol) is not str
+        or not row.symbol
+        or not _dependency_span_valid(row.span, hashes, modules, lines)
+        for row in endpoints
+    ):
+        return False
+    occurrences = {row.occurrence_id: row for row in endpoints}
+    if len(occurrences) != len(endpoints):
+        return False
+    symbol_rows = tuple(symbols)
+    if any(not isinstance(row, Symbol) or type(row.fullname) is not str for row in symbol_rows):
+        return False
+    by_symbol = {row.fullname: row for row in symbol_rows}
+
+    def owner_valid(occurrence_id: str, owner_name: str, span: SourceSpan) -> bool:
+        occurrence = occurrences.get(occurrence_id)
+        owner = by_symbol.get(owner_name)
+        if (
+            occurrence is None
+            or owner is None
+            or owner.kind != "function"
+            or occurrence.symbol != owner_name
+            or occurrence.span != owner.span
+            or not _dependency_span_valid(owner.span, hashes, modules, lines)
+            or not isinstance(owner.span, SourceSpan)
+        ):
+            return False
+        return (
+            span.module == owner.span.module
+            and span.path == owner.span.path
+            and span.source_sha256 == owner.span.source_sha256
+            and (owner.span.start_line, owner.span.start_column)
+            <= (span.start_line, span.start_column)
+            and (span.end_line, span.end_column) <= (owner.span.end_line, owner.span.end_column)
+        )
+
+    seen: set[tuple[Any, ...]] = set()
+    for row in bindings:
+        if not isinstance(row, SourceDependencyBinding):
+            return False
+        if (
+            type(row.occurrence_id) is not str
+            or not row.occurrence_id
+            or type(row.owner_symbol) is not str
+            or not row.owner_symbol
+            or type(row.provider_symbol) is not str
+            or not row.provider_symbol
+            or type(row.selector) is not str
+            or row.selector not in _SOURCE_DEPENDENCY_SELECTORS
+            or not _dependency_span_valid(row.call_span, hashes, modules, lines)
+            or not _dependency_span_valid(row.target_span, hashes, modules, lines)
+            or not owner_valid(row.occurrence_id, row.owner_symbol, row.call_span)
+        ):
+            return False
+        target = by_symbol.get(row.provider_symbol)
+        if target is None or target.kind != "function" or target.span != row.target_span:
+            return False
+        key = _dependency_binding_key(row)
+        if key in seen:
+            return False
+        seen.add(key)
+    seen.clear()
+    for row in uncertainties:
+        if not isinstance(row, SourceDependencyUncertainty):
+            return False
+        if (
+            type(row.occurrence_id) is not str
+            or not row.occurrence_id
+            or type(row.owner_symbol) is not str
+            or not row.owner_symbol
+            or type(row.reason_code) is not str
+            or not row.reason_code
+            or len(row.reason_code) > 96
+            or not row.reason_code.replace("_", "").isalnum()
+            or type(row.source_spelling) is not str
+            or len(row.source_spelling) > 256
+            or not _dependency_span_valid(row.span, hashes, modules, lines)
+            or not owner_valid(row.occurrence_id, row.owner_symbol, row.span)
+        ):
+            return False
+        key = _dependency_uncertainty_key(row)
+        if key in seen:
+            return False
+        seen.add(key)
+    return True
 
 
 def _module_import_aliases(tree: Any, module: str, module_ids: frozenset[str]) -> dict[str, str]:
@@ -1532,6 +1878,8 @@ class GraphCacheManifest:
     engine_version: str
     config_fingerprint: str
     graph_provenance: str
+    source_dependency_bindings: tuple[SourceDependencyBinding, ...] = ()
+    source_dependency_uncertainties: tuple[SourceDependencyUncertainty, ...] = ()
 
 
 class TypedGraphCache:
@@ -1548,6 +1896,8 @@ class TypedGraphCache:
             graph.engine_version,
             graph.config_fingerprint,
             graph.graph_provenance,
+            graph.source_dependency_bindings,
+            graph.source_dependency_uncertainties,
         )
 
     @staticmethod
@@ -1573,6 +1923,8 @@ class TypedGraphCache:
         if str(root) != graph.root or graph.config_fingerprint != config_fingerprint:
             return False
         current: list[tuple[str, str]] = []
+        current_bytes: dict[str, bytes] = {}
+        current_paths: dict[str, str] = {}
         try:
             for record in sorted(inventory.files, key=lambda item: item.module):
                 path = Path(record.path)
@@ -1582,10 +1934,13 @@ class TypedGraphCache:
                 resolved.relative_to(root)
                 if (root / record.relative_path).resolve(strict=True) != resolved:
                     return False
-                digest = hashlib.sha256(resolved.read_bytes()).hexdigest()
+                raw = resolved.read_bytes()
+                digest = hashlib.sha256(raw).hexdigest()
                 if digest != record.sha256:
                     return False
                 current.append((record.module, digest))
+                current_bytes[record.module] = raw
+                current_paths[record.module] = str(resolved)
         except (OSError, ValueError):
             return False
         inventory_fingerprint = _sha256(
@@ -1610,8 +1965,25 @@ class TypedGraphCache:
             }
         except (OSError, ValueError):
             return False
+        current_by_path = {current_paths[module]: digest for module, digest in current}
+        module_by_path = {path: module for module, path in current_paths.items()}
+        current_lines = {
+            current_paths[module]: tuple(raw.splitlines(keepends=True))
+            for module, raw in current_bytes.items()
+        }
+        metadata_valid = _dependency_metadata_valid(
+            graph.source_dependency_bindings,
+            graph.source_dependency_uncertainties,
+            graph.endpoint_bindings,
+            graph.symbols,
+            current_by_path,
+            module_by_path,
+            current_lines,
+        )
         return (
-            tuple(current) == graph.source_hashes
+            metadata_valid
+            and _dependency_projection_valid(graph)
+            and tuple(current) == graph.source_hashes
             and graph.schema_version == _GRAPH_SCHEMA_VERSION
             and graph.inventory_fingerprint == inventory_fingerprint
             and inventoried_paths.issubset(snapshot_paths)
