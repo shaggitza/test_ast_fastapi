@@ -646,7 +646,9 @@ class MypyAnalyzer:
     # Schema 27 distinguishes typed execution evidence and creation-time partial
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
-    EXECUTION_STATE_POLICY = "v14-loop-exits-provider-origin-no-nominal-finality"
+    EXECUTION_STATE_POLICY = (
+        "v18-loop-exits-provider-origin-no-nominal-finality-context-suppression-alternatives"
+    )
     MAX_CONTROL_EXIT_STATES = 32
     MAX_LOOP_FLOW_PASSES = 4
     MAX_LOOP_BODY_EVALUATIONS = 32
@@ -665,7 +667,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 15
+    EXECUTION_SUMMARY_VERSION = 18
     CALLBACK_PROVIDER_MODULES: ClassVar[frozenset[str]] = frozenset(
         {
             "asyncio.threads",
@@ -9539,15 +9541,15 @@ class MypyAnalyzer:
                     sanitized = sanitize_context_state(context_exit.environment)
                     context_exits.append(_TraceExit(context_exit.kind, sanitized))
                     if context_exit.kind == "raise":
-                        # The manager may suppress a raised exception. This
-                        # alternative is conditional, not proof of an alias.
+                        # Keep both possible exception outcomes in the call
+                        # inventory. Suppression stays conditional; retaining
+                        # both outcomes does not truncate source-call coverage.
                         context_normals.append(
                             _join_trace_snapshots(
                                 [context_entry, sanitized],
                                 n,
                             )
                         )
-                        _trace_cap(n, "UNKNOWN_CONTEXT_EXCEPTION_SUPPRESSION")
                 context_normals = [sanitize_context_state(state) for state in context_normals]
                 if context_normals:
                     _restore_trace_snapshot(_join_trace_snapshots(context_normals, n))
