@@ -26,6 +26,8 @@ from mypy.options import Options
 from mypy.server.update import FineGrainedBuildManager
 from mypy.util import hash_digest
 
+from .live_expression_types import ModuleExpressionTypes, live_expression_type_snapshot
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -140,6 +142,10 @@ class TypedBuild:
                     rows.append(f"call-type:{expr.line}:{expr.column}:{expr!s}:{typ!r}")
             snapshot[module] = tuple(sorted(rows))
         return snapshot
+
+    def live_expression_type_snapshot(self) -> tuple[ModuleExpressionTypes, ...]:
+        """Current expression evidence, separate from the raw retained map."""
+        return live_expression_type_snapshot(self.modules, self.type_maps)
 
 
 def _digest(value: Any) -> str:

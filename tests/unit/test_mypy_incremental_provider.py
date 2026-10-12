@@ -243,3 +243,47 @@ def test_config_content_change_invalidates_provider_state(tmp_path: Path) -> Non
     assert unchanged.typed_snapshot() == fresh.typed_snapshot()
     assert unchanged.report.source_digests_before == rebuilt.report.source_digests_after
     assert unchanged.report.source_digests_after == rebuilt.report.source_digests_after
+
+
+def test_current_expression_types_survive_typevar_annotation_normalization(
+    tmp_path: Path,
+) -> None:
+    """Hosted provider regression; never infer semantics from retained map size."""
+    source = tmp_path / "generic.py"
+    source.write_text(
+        "from typing import Optional, TypeVar\n"
+        "T = TypeVar('T')\n"
+        "U = TypeVar('U')\n"
+        "def identity(value: T) -> T:\n    return value\n"
+        "def forward(value: Optional[T]) -> Optional[T]:\n    return identity(value)\n"
+        "def other(value: Optional[U]) -> Optional[U]:\n    return identity(value)\n",
+        encoding="utf-8",
+    )
+    inventory = {"generic": source}
+    provider = MypyIncrementalProvider(BuildConfig(tmp_path))
+    provider.build(inventory)
+    source.write_text(
+        "from typing import Optional, TypeVar\n"
+        "T = TypeVar('T')\n"
+        "U = TypeVar('U')\n"
+        "def identity(value: T) -> T:\n    return value\n"
+        "def forward(value: T | None) -> T | None:\n    return identity(value)\n"
+        "def other(value: U | None) -> U | None:\n    return identity(value)\n",
+        encoding="utf-8",
+    )
+    updated = provider.build(inventory)
+    fresh = _fresh(tmp_path, inventory)
+    assert updated.report.mode == "incremental_update"
+    assert updated.typed_snapshot() == fresh.typed_snapshot()
+    assert updated.live_expression_type_snapshot() == fresh.live_expression_type_snapshot()
+    current = next(
+        row for row in updated.live_expression_type_snapshot() if row.module == "generic"
+    )
+    assert current.owned_typevars == 2
+    assert current.mapped_expressions > 0
+    assert (
+        _equivalence_check(BuildConfig(tmp_path), inventory, updated)[
+            "live_expression_types_match_independent_cold_build"
+        ]
+        is True
+    )
