@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, ClassVar
@@ -23,17 +24,42 @@ class RecordedExecutor(VMExecutor):
     cleanup_command_sha256 = ""
 
     @classmethod
-    def _cleanup_container(cls, cidfile: Path, name: str) -> None:
+    def _cleanup_container(cls, cidfile: Path, name: str) -> None:  # noqa: PLR0912, PLR0915
         cid: str | None = None
         capture_error: str | None = None
+        snapshot: Path | None = None
         try:
-            candidate = cidfile.read_text(encoding="utf-8").strip()
+            with cidfile.open("rb") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise OSError("CID path is not a regular file")
+                raw = stream.read(129)
+            if len(raw) > 128:
+                candidate = ""
+                capture_error = "CID file exceeds 128 bytes"
+            else:
+                candidate = raw.decode("utf-8").strip()
             if re.fullmatch(r"[0-9a-fA-F]{64}", candidate) is None:
-                capture_error = "CID missing or invalid"
+                capture_error = capture_error or "CID missing or invalid"
             else:
                 cid = candidate
         except (OSError, UnicodeError) as exc:
             capture_error = f"CID capture failed: {type(exc).__name__}"
+        try:
+            fd, snapshot_name = tempfile.mkstemp(prefix="gh101-cid-snapshot-")
+            snapshot = Path(snapshot_name)
+            with os.fdopen(fd, "wb") as stream:
+                if cid is not None:
+                    stream.write(cid.encode("ascii"))
+            snapshot.chmod(0o400)
+        except OSError as exc:
+            capture_error = f"CID snapshot failed: {type(exc).__name__}"
+            cid = None
+            if snapshot is not None:
+                try:
+                    snapshot.write_bytes(b"")
+                except OSError:
+                    snapshot.unlink(missing_ok=True)
+                    snapshot = None
         cls.cleanup_receipt = {
             "container_name": name,
             "container_id": cid,
@@ -42,7 +68,12 @@ class RecordedExecutor(VMExecutor):
             "cleanup_verified": False,
         }
         try:
-            super()._cleanup_container(cidfile, name)
+            # Core cleanup reads only our private snapshot. Invalid/missing input
+            # therefore keeps its generated-name fallback even if the source path changes.
+            cleanup_cidfile = snapshot or (
+                Path(tempfile.gettempdir()) / f"gh101-missing-cid-{os.urandom(16).hex()}"
+            )
+            super()._cleanup_container(cleanup_cidfile, name)
         except Exception as exc:
             cls.cleanup_receipt["cleanup_error"] = str(exc)
             raise
@@ -50,6 +81,10 @@ class RecordedExecutor(VMExecutor):
             cls.cleanup_receipt["name_absence_verified"] = True
             cls.cleanup_receipt["cid_absence_verified"] = cid is not None
             cls.cleanup_receipt["cleanup_verified"] = cid is not None
+        finally:
+            if snapshot is not None:
+                snapshot.chmod(0o600)
+                snapshot.unlink(missing_ok=True)
 
 
 IMAGE = (

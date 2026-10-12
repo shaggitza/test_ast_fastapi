@@ -125,16 +125,21 @@ def test_timeout_cleanup_failure_cannot_be_reported_as_observed(tmp_path: Path) 
 
 
 @pytest.mark.parametrize(
-    ("cid_text", "cleanup_ok", "expected_verified"),
+    ("cid_text", "cleanup_ok", "expected_verified", "expected_id"),
     [
-        ("a" * 64, True, True),
-        ("", True, False),
-        ("not-a-cid", True, False),
-        ("b" * 64, False, False),
+        ("a" * 64, True, True, "a" * 64),
+        ("", True, False, None),
+        ("not-a-cid", True, False, None),
+        ("z" * 129, True, False, None),
+        ("b" * 64, False, False, "b" * 64),
     ],
 )
 def test_recorded_executor_captures_cid_before_unmodified_cleanup(
-    tmp_path: Path, cid_text: str, cleanup_ok: bool, expected_verified: bool
+    tmp_path: Path,
+    cid_text: str,
+    cleanup_ok: bool,
+    expected_verified: bool,
+    expected_id: str | None,
 ) -> None:
     cidfile = tmp_path / "owned.cid"
     cidfile.write_text(cid_text, encoding="utf-8")
@@ -151,28 +156,43 @@ def test_recorded_executor_captures_cid_before_unmodified_cleanup(
     with patch(
         "fastapi_endpoint_detector.executor.vm_executor.subprocess.run", side_effect=run
     ) as docker:
-        if cleanup_ok and cid_text != "not-a-cid":
+        if cleanup_ok:
             executor._cleanup_container(cidfile, "gh101-canary-owned")
         else:
             with pytest.raises(VMExecutorError, match="cleanup failed"):
                 executor._cleanup_container(cidfile, "gh101-canary-owned")
 
     receipt = executor.cleanup_receipt
-    assert receipt["container_id"] == (cid_text if len(cid_text) == 64 else None)
+    assert receipt["container_id"] == expected_id
     assert receipt["cleanup_verified"] is expected_verified
     assert receipt["container_name"] == "gh101-canary-owned"
-    assert receipt.get("name_absence_verified", False) is (cleanup_ok and cid_text != "not-a-cid")
+    assert receipt.get("name_absence_verified", False) is cleanup_ok
     commands = [call.args[0] for call in docker.call_args_list]
-    assert commands[0][:2] == ["docker", "kill"]
+    assert commands[0] == ["docker", "kill", expected_id or "gh101-canary-owned"]
     assert commands[1][:3] == ["docker", "rm", "--force"]
+    assert commands[1][-1] == (expected_id or "gh101-canary-owned")
+    assert any("name=^/gh101-canary-owned$" in command for command in commands)
+    assert any(
+        (expected_id is None and "id=" not in " ".join(command))
+        or (expected_id is not None and f"id={expected_id}" in command)
+        for command in commands
+        if command[1:3] == ["container", "ls"]
+    )
 
 
 def test_recorded_executor_cleanup_runs_when_cid_capture_read_fails(tmp_path: Path) -> None:
     executor = assay.RecordedExecutor()
     cidfile = tmp_path / "unreadable.cid"
     completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    def fail_original_read(path: Path, *args: object, **kwargs: object):
+        if path == cidfile:
+            raise OSError("read denied")
+        return original_open(path, *args, **kwargs)
+
+    original_open = Path.open
     with (
-        patch.object(Path, "read_text", side_effect=OSError("read denied")),
+        patch.object(Path, "open", fail_original_read),
         patch(
             "fastapi_endpoint_detector.executor.vm_executor.subprocess.run",
             return_value=completed,
@@ -184,6 +204,32 @@ def test_recorded_executor_cleanup_runs_when_cid_capture_read_fails(tmp_path: Pa
     assert executor.cleanup_receipt["cleanup_verified"] is False
     assert docker.call_count == 3
     assert docker.call_args_list[0].args[0] == ["docker", "kill", "gh101-canary-owned"]
+
+
+def test_recorded_executor_binds_core_cleanup_to_captured_snapshot(tmp_path: Path) -> None:
+    captured = "a" * 64
+    replacement = "b" * 64
+    cidfile = tmp_path / "owned.cid"
+    cidfile.write_text(captured, encoding="utf-8")
+    completed = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if command[:2] == ["docker", "kill"]:
+            cidfile.write_text(replacement, encoding="utf-8")
+        return completed
+
+    with patch(
+        "fastapi_endpoint_detector.executor.vm_executor.subprocess.run", side_effect=run
+    ) as docker:
+        assay.RecordedExecutor._cleanup_container(cidfile, "gh101-canary-owned")
+
+    commands = [call.args[0] for call in docker.call_args_list]
+    assert commands[0] == ["docker", "kill", captured]
+    assert commands[1] == ["docker", "rm", "--force", captured]
+    assert any(f"id={captured}" in command for command in commands)
+    assert not any(f"id={replacement}" in command for command in commands)
+    assert assay.RecordedExecutor.cleanup_receipt["container_id"] == captured
+    assert assay.RecordedExecutor.cleanup_receipt["cleanup_verified"] is True
 
 
 @pytest.mark.parametrize(
