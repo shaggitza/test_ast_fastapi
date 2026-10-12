@@ -279,7 +279,12 @@ def make_diff(path: str, before: str, after: str) -> str:
 def case_inputs(case: Case) -> dict[str, str]:
     """Regenerate exact paired snapshots, diff, and analyzer configuration."""
     source_symbol = case.source_symbol or case.symbol
-    original = sources(source_symbol, "return 1")
+    # The deferred lambda body is an expression position, unlike the ordinary
+    # function fixtures whose replacement bodies use ``return`` statements.
+    original_body = (
+        "1" if source_symbol in {"deferred_lambda_dead", "invoked_lambda_live"} else "return 1"
+    )
+    original = sources(source_symbol, original_body)
     replacements = {
         "leaf_alias": "return 2",
         "direct_one": "return shared_live() + 1",

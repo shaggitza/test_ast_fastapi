@@ -8,13 +8,11 @@ import math
 import subprocess
 import sys
 import time
-from typing import TYPE_CHECKING, Any
+from pathlib import Path
+from typing import Any
 
 import pytest
 from benchmarks.real_world import typed_dag_paired_cli_accuracy as gate
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _synthetic_validation_only() -> dict[str, Any]:
@@ -125,6 +123,41 @@ def test_failed_final_validation_publishes_invalid_report(
     assert "receipt mismatch" in saved["integrity_errors"][0]
 
 
+def test_main_summarizes_invalid_provenance_document_without_crashing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    output = tmp_path / "report.json"
+    document: dict[str, Any] = {
+        "gate_status": "failed",
+        "run_validity": "invalid",
+        "integrity_errors": ["runner provenance unavailable"],
+    }
+    monkeypatch.setattr(gate, "run", lambda *_args: document)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "typed_dag_paired_cli_accuracy",
+            "--analyzer-project-root",
+            str(tmp_path),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert gate.main() == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary == {
+        "gate_status": "failed",
+        "run_validity": "invalid",
+        "runner_revision": None,
+        "analyzer_revision": None,
+        "case_coverage": None,
+        "metrics": None,
+        "output": str(output),
+    }
+
+
 def test_all_cases_have_exact_paired_baseline_target_inputs() -> None:
     assert len(gate.CASES) == 18
     assert len({case.case_id for case in gate.CASES}) == 18
@@ -137,6 +170,156 @@ def test_all_cases_have_exact_paired_baseline_target_inputs() -> None:
         assert set(json.loads(material["baseline"]))
         assert set(json.loads(material["target"]))
         assert material["diff"]
+
+
+def test_fixture_validation_rejects_syntax_errors_on_either_side(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    declared = gate.CASES[0]
+    valid = gate.case_inputs(declared)
+    for side in ("baseline", "target"):
+        malformed = dict(valid)
+        sources = json.loads(malformed[side])
+        sources["app/routes.py"] = "def route(:\n"
+        malformed[side] = json.dumps(sources, sort_keys=True)
+        monkeypatch.setattr(gate, "case_inputs", lambda _case, value=malformed: value)
+        with pytest.raises(ValueError, match=f"invalid {side} Python fixture"):
+            gate.validate_generated_fixture(declared, malformed)
+        monkeypatch.setattr(gate, "case_inputs", lambda _case, value=valid: value)
+
+
+@pytest.mark.parametrize("completeness", ["partial", None])
+def test_partial_or_missing_analysis_completeness_cannot_pass_case(
+    completeness: str | None,
+) -> None:
+    declared = next(case for case in gate.CASES if case.case_id == "cross_file_direct")
+    report = {
+        "candidate_endpoints": [
+            {"endpoint": {"method": "GET", "path": "/one"}, "confidence": "high"}
+        ],
+        "errors": [],
+        "inventory_status": "established",
+        "inventory_limitations": [],
+        "summary": {"total_endpoints": len(gate.ROOTS)},
+        "analysis_completeness": completeness,
+    }
+    record = {
+        "precision": 1.0,
+        "recall": 1.0,
+        "actual": [{"endpoint": "GET /one", "confidence": "high"}],
+        "cli_evidence": {"report": report},
+    }
+    assert not gate._case_passes(record, declared)
+    # The validator uses this same operational capability predicate. A
+    # partial probe remains measured as failed without being misclassified as
+    # supported, while an otherwise identical complete probe is operational.
+    assert not gate._capability_operational(report)
+    complete_report = {**report, "analysis_completeness": "complete"}
+    assert gate._capability_operational(complete_report)
+    complete_record = {
+        **record,
+        "cli_evidence": {"report": complete_report},
+    }
+    assert gate._case_passes(complete_record, declared)
+
+
+@pytest.mark.parametrize("completeness", ["partial", None, "complete"])
+def test_run_validates_and_publishes_measured_capability_completeness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    completeness: str | None,
+) -> None:
+    """Exercise _run_case receipts through the real final validator and publisher."""
+    analyzer_root = tmp_path / "analyzer"
+    analyzer_root.mkdir()
+    pinned_sources = {"src/fixture.py": "# test-only pinned source\n"}
+    source_hashes = {key: gate.sha_text(value) for key, value in pinned_sources.items()}
+    source_tree_hash = gate.sha_text(gate._canonical_json(source_hashes))
+    provenance = {
+        "revision": "test-fixture-revision",
+        "revision_hash": gate.sha_text("test-fixture-revision"),
+        "source_root": str(analyzer_root.resolve()),
+        "worktree_clean": True,
+        "source_sha256": source_hashes,
+        "source_tree_hash": source_tree_hash,
+        "environment": {"source": "pinned test fixture"},
+    }
+    identity = {
+        "worktree_clean": True,
+        "source_tree_hash": source_tree_hash,
+        "source_sha256": source_hashes,
+    }
+    monkeypatch.setattr(gate, "analyzer_provenance", lambda _root: provenance)
+    monkeypatch.setattr(gate, "_source_identity_snapshot", lambda *_args: identity)
+    monkeypatch.setattr(gate, "validate_provenance", lambda _document, _root: None)
+    monkeypatch.setattr(
+        gate, "_git", lambda _root, *args: "test-runner-revision" if args[0] == "rev-parse" else ""
+    )
+
+    real_subprocess_run = subprocess.run
+
+    def runner_git_show(command: list[str], *args: Any, **kwargs: Any) -> Any:
+        if (
+            len(command) >= 5
+            and command[:3] == ["git", "-C", str(Path(__file__).resolve().parents[2])]
+            and command[3] == "show"
+        ):
+            spec = command[4]
+            relative = spec.split(":", 1)[1]
+            content = (Path(__file__).resolve().parents[2] / relative).read_bytes()
+            return subprocess.CompletedProcess(command, 0, stdout=content, stderr=b"")
+        return real_subprocess_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(gate.subprocess, "run", runner_git_show)
+    capability = next(case for case in gate.CASES if case.capability_probe)
+
+    def cli_result(command: list[str], _cwd: Path, _timeout: int) -> gate._CliResult:
+        options = command[4:]
+        case_id = Path(options[options.index("--app") + 1]).parent.parent.name
+        declared = next(case for case in gate.CASES if case.case_id == case_id)
+        report_completeness = completeness if declared.case_id == capability.case_id else "complete"
+        report = {
+            "candidate_endpoints": [
+                {
+                    "endpoint": {
+                        "method": endpoint.split(" ", 1)[0],
+                        "path": endpoint.split(" ", 1)[1],
+                    },
+                    "confidence": "high",
+                }
+                for endpoint in gate.expected_for(declared)
+            ],
+            "errors": [],
+            "warnings": [],
+            "inventory_status": "established",
+            "inventory_limitations": [],
+            "analysis_completeness": report_completeness,
+            "summary": {"total_endpoints": len(gate.ROOTS)},
+        }
+        return gate._CliResult(0, json.dumps(report), "", False, False)
+
+    monkeypatch.setattr(gate, "_run_bounded_cli", cli_result)
+    output = tmp_path / "published.json"
+    document = gate.run(output, analyzer_root)
+    saved = json.loads(output.read_text(encoding="utf-8"))
+    assert saved == document
+    assert document["run_validity"] == "valid", document["integrity_errors"]
+    case_row = next(row for row in document["cases"] if row["case_id"] == capability.case_id)
+    if completeness == "complete":
+        assert case_row["supported"] is True
+        assert case_row["status"] == "passed"
+    else:
+        assert case_row["supported"] is False
+        assert case_row["status"] == "failed"
+        assert case_row["error"] is None
+        assert case_row["tp"] == len(gate.expected_for(capability))
+        assert document["metrics"] is not None
+        assert document["gate_status"] == "failed"
+        assert not any(
+            "capability support was guessed" in error for error in document["integrity_errors"]
+        )
+    control = next(row for row in document["cases"] if row["control"] and row["supported"])
+    assert control["status"] == "passed"
 
 
 def test_oracle_keeps_connected_dead_controls_out_and_live_paths_in() -> None:
