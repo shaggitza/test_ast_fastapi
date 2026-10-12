@@ -8,6 +8,7 @@ import io
 import json
 import os
 import signal
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +20,7 @@ from benchmarks.real_world import materialize_locked_diffs_v2 as collector
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from types import FrameType
 
 
 def _rows() -> list[dict[str, Any]]:
@@ -623,3 +625,66 @@ def test_existing_blob_read_is_bounded_and_rejects_symlink_and_growth(tmp_path: 
     with pytest.raises(OSError):
         collector._read_blob(fd, expected, 3, expected)
     os.close(fd)
+
+
+def test_deadline_immediately_after_root_acquisition_closes_owned_fd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[int] = []
+    original_open = collector._open_dir_chain
+
+    def record_root(path: Path, *, create: bool) -> int:
+        fd = original_open(path, create=create)
+        opened.append(fd)
+        return fd
+
+    monkeypatch.setattr(collector, "_open_dir_chain", record_root)
+    previous_trace = sys.gettrace()
+    injected = False
+
+    def inject_deadline(frame: FrameType, event: str, _arg: object) -> Any:
+        nonlocal injected
+        if (
+            not injected
+            and event == "line"
+            and frame.f_code is collector._collect.__code__
+            and frame.f_locals.get("rootfd") is not None
+        ):
+            injected = True
+            raise collector.CollectionFailure("deadline", "injected after root acquisition")
+        return inject_deadline
+
+    try:
+        sys.settrace(inject_deadline)
+        with pytest.raises(collector.CollectionFailure, match="after root acquisition"):
+            collector.collect(tmp_path / "out")
+    finally:
+        sys.settrace(previous_trace)
+    assert injected and len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])
+    assert collector._deadline_depth == 0
+    assert collector._deadline_at is None
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_receipt_io_failure_is_reported_as_publication_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def unavailable(*_args: object) -> tuple[bytes, str]:
+        raise collector.CollectionFailure("request_error", "offline unavailable response")
+
+    def failed_publication(_fd: int, name: str, _body: bytes) -> None:
+        assert name == "receipts.json"
+        raise OSError("receipt filesystem is full")
+
+    monkeypatch.setattr(collector, "_fetch", unavailable)
+    monkeypatch.setattr(collector, "_publish", failed_publication)
+    with pytest.raises(
+        collector.CollectionFailure, match="receipt publication I/O failed"
+    ) as caught:
+        collector.collect(tmp_path / "out")
+    assert caught.value.failure_class == "local_storage_error"
+    assert isinstance(caught.value.__cause__, OSError)
+    assert "blob directory" not in str(caught.value)
+    assert not (tmp_path / "out" / "receipts.json").exists()

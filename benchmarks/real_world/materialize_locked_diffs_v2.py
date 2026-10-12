@@ -415,16 +415,19 @@ def _collect(  # noqa: PLR0912, PLR0915
         raise protocol.CorpusV2Error("locked repository is absent")
     rows = project["records"]
     _validate_rows(rows)
-    rootfd = _open_dir_chain(output, create=True)
-    deadline = _deadline_at
-    if deadline is None:
-        os.close(rootfd)
-        raise RuntimeError("collector must run under its wall deadline")
+    rootfd: int | None = None
     cachefd: int | None = None
     try:
-        with contextlib.suppress(FileExistsError):
-            os.mkdir("blobs", 0o700, dir_fd=rootfd)
-        cachefd = os.open("blobs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
+        rootfd = _open_dir_chain(output, create=True)
+        deadline = _deadline_at
+        if deadline is None:
+            raise RuntimeError("collector must run under its wall deadline")
+        try:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir("blobs", 0o700, dir_fd=rootfd)
+            cachefd = os.open("blobs", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=rootfd)
+        except OSError as exc:
+            raise protocol.CorpusV2Error("blob directory must be a real directory") from exc
         statuses: list[dict[str, Any]] = []
         total = 0
         for row in rows:
@@ -527,16 +530,20 @@ def _collect(  # noqa: PLR0912, PLR0915
                 json.dumps(receipt, sort_keys=True, indent=2, allow_nan=False) + "\n"
             ).encode()
         with _wall_deadline(deadline):
-            _publish(rootfd, "receipts.json", content)
+            try:
+                _publish(rootfd, "receipts.json", content)
+            except OSError as exc:
+                raise CollectionFailure(
+                    "local_storage_error", "receipt publication I/O failed"
+                ) from exc
         return receipt
-    except OSError as exc:
-        raise protocol.CorpusV2Error("blob directory must be a real directory") from exc
     finally:
         try:
             if cachefd is not None:
                 os.close(cachefd)
         finally:
-            os.close(rootfd)
+            if rootfd is not None:
+                os.close(rootfd)
 
 
 def collect(
