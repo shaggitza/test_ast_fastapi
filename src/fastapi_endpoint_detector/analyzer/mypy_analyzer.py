@@ -788,7 +788,7 @@ class MypyAnalyzer:
     # callable snapshots from the incompatible schema-26 cache formats.
     CACHE_SCHEMA_VERSION = 27
     EXECUTION_STATE_POLICY = (
-        "conditional-finally-partial-capture-v14-context-exit-aliases-imported-callable-source"
+        "conditional-finally-partial-capture-v15-exception-clause-entry-imported-callable-source"
     )
     MAX_CONTROL_EXIT_STATES = 32
     MAX_LOOP_FLOW_PASSES = 4
@@ -808,7 +808,7 @@ class MypyAnalyzer:
     MAX_FACTORY_RETURNS = 64
     MAX_FACTORY_STATES = 512
     MAX_POINTS_TO_EDGES = 4096
-    EXECUTION_SUMMARY_VERSION = 13
+    EXECUTION_SUMMARY_VERSION = 14
     GENERATOR_CONSUMERS: ClassVar[dict[str, tuple[int, str, bool | None]]] = {
         "starlette.responses.StreamingResponse": (0, "content", None),
     }
@@ -9556,13 +9556,26 @@ class MypyAnalyzer:
 
                 handler_sources = [before_try_state, *callable_snapshots]
                 handler_entry = _join_trace_snapshots(handler_sources, n)
-                if hasattr(n, "types") and n.types:
-                    for exc_type in n.types:
-                        if exc_type:
-                            walk_node(exc_type)
+                handler_types = n.types if hasattr(n, "types") else ()
+                handler_type_state = handler_entry
                 for handler_index, handler in enumerate(n.handlers):
+                    # Clause types run on the exceptional path, in order. A
+                    # previous nonmatching clause contributes its type effects,
+                    # while its handler body must never supply the next type.
+                    _restore_trace_snapshot(handler_type_state)
+                    exc_type = (
+                        handler_types[handler_index] if handler_index < len(handler_types) else None
+                    )
+                    if exc_type:
+                        possible_execution_depth[0] += 1
+                        try:
+                            walk_node(exc_type)
+                        finally:
+                            possible_execution_depth[0] -= 1
+                    handler_entry_for_handler = _trace_snapshot()
+                    handler_type_state = handler_entry_for_handler
+                    handler_sources_for_handler = [*handler_sources, handler_entry_for_handler]
                     handler_var = n.vars[handler_index] if handler_index < len(n.vars) else None
-                    _restore_trace_snapshot(handler_entry)
                     flow_environment.clear()
                     string_environment.clear()
                     deferred_environment.clear()
@@ -9571,17 +9584,23 @@ class MypyAnalyzer:
                         for name, value in before_try_state.partials.items()
                         if name not in try_assigned_names
                         and body_state.partials.get(name) == value
-                        and all(state.partials.get(name) == value for state in handler_sources)
+                        and all(
+                            state.partials.get(name) == value
+                            for state in handler_sources_for_handler
+                        )
                     }
                     lambda_environment = {
                         name: value
                         for name, value in before_try_state.lambdas.items()
                         if name not in try_assigned_names
                         and body_state.lambdas.get(name) is value
-                        and all(state.lambdas.get(name) is value for state in handler_sources)
+                        and all(
+                            state.lambdas.get(name) is value
+                            for state in handler_sources_for_handler
+                        )
                     }
-                    if set(handler_entry.partials) - set(partial_environment) or set(
-                        handler_entry.lambdas
+                    if set(handler_entry_for_handler.partials) - set(partial_environment) or set(
+                        handler_entry_for_handler.lambdas
                     ) - set(lambda_environment):
                         _trace_cap(n, "UNKNOWN_EXCEPTION_EXIT_BINDING")
                     clear_alias_target(handler_var)
