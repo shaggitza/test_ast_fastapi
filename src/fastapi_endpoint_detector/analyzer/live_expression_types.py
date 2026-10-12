@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 from mypy.nodes import Expression, MypyFile, Node, TypeVarLikeExpr
-from mypy.types import Type
+from mypy.types import ExtraAttrs, Type
 
 LIVE_EXPRESSION_SCOPE = "current-source-expression-types-and-owned-typevars-v1"
 
@@ -291,14 +291,46 @@ def _syntax_expressions(tree: MypyFile, module: str, budget: _Budget) -> list[Ex
     return expressions
 
 
+def _extra_attrs_children(value: object, budget: _Budget) -> list[object]:
+    """Audit Instance metadata before Mypy's recursive ExtraAttrs serialization."""
+    if type(value) is not ExtraAttrs:
+        raise ExpressionSnapshotError("unsupported Instance.extra_attrs shape")
+    attrs = _field(value, "attrs")
+    immutable = _field(value, "immutable")
+    mod_name = _field(value, "mod_name")
+    if type(attrs) is not dict or len(attrs) > budget.limits.container_items:
+        raise ExpressionSnapshotError("invalid or oversized ExtraAttrs.attrs")
+    if type(immutable) is not set or len(immutable) > budget.limits.container_items:
+        raise ExpressionSnapshotError("invalid or oversized ExtraAttrs.immutable")
+    if mod_name is not None and (
+        type(mod_name) is not str or len(mod_name) > budget.limits.string_chars
+    ):
+        raise ExpressionSnapshotError("invalid or oversized ExtraAttrs.mod_name")
+    for name, typ in attrs.items():
+        budget.spend()
+        if (
+            type(name) is not str
+            or len(name) > budget.limits.string_chars
+            or not isinstance(typ, Type)
+        ):
+            raise ExpressionSnapshotError("invalid ExtraAttrs attribute")
+    for name in immutable:
+        budget.spend()
+        if type(name) is not str or len(name) > budget.limits.string_chars:
+            raise ExpressionSnapshotError("invalid ExtraAttrs immutable name")
+    return [attrs[name] for name in sorted(attrs)]
+
+
 def _type_children(child: object, budget: _Budget) -> list[object]:
     if isinstance(child, Type):
         cls = type(child)
         if cls.__module__ != "mypy.types" or cls.__name__ not in _TYPE_FIELDS:
             raise ExpressionSnapshotError(f"unsupported expression type: {cls.__name__}")
-        if cls.__name__ == "Instance" and _field(child, "extra_attrs") is not None:
-            raise ExpressionSnapshotError("Instance.extra_attrs is outside audited type shapes")
         children = [_field(child, name) for name in _TYPE_FIELDS[cls.__name__]]
+        if cls.__name__ == "Instance":
+            extra = _field(child, "extra_attrs")
+            if extra is not None:
+                children.extend(_extra_attrs_children(extra, budget))
         if cls.__name__ == "CallableType" and hasattr(child, "instance_type"):
             children.append(_field(child, "instance_type"))
         return children

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from mypy import nodes as mypy_nodes
@@ -27,8 +28,10 @@ from mypy.types import (
     AnyType,
     CallableType,
     ErasedType,
+    ExtraAttrs,
     Instance,
     NoneType,
+    Type,
     TypeOfAny,
     TypeVarId,
     TypeVarType,
@@ -38,6 +41,9 @@ from mypy.types import (
 from fastapi_endpoint_detector.analyzer.live_expression_types import (
     ExpressionSnapshotError,
     ExpressionSnapshotLimits,
+    _Budget,
+    _extra_attrs_children,
+    _serialize_type,
     live_expression_type_snapshot,
 )
 
@@ -72,7 +78,7 @@ def _typevar(name: str = "T", owner: str = "fixture") -> TypeVarExpr:
 def test_stale_map_keys_do_not_change_current_expression_snapshot() -> None:
     expr, stale = _name(), _name()
     tree = _tree(expr)
-    types = {expr: NoneType()}
+    types: dict[Expression, Type] = {expr: NoneType()}
     expected = live_expression_type_snapshot(_states(tree), types)
     types[stale] = AnyType(TypeOfAny.explicit)
     assert len(types) == 2
@@ -286,7 +292,9 @@ def test_template_string_children_use_only_source_expression_edges() -> None:
     "interpolation",
     [(_name(), "value"), (_name(), 1, None, None), (_name(), "value", None, "not-an-expression")],
 )
-def test_malformed_template_string_interpolation_is_rejected(interpolation: tuple) -> None:
+def test_malformed_template_string_interpolation_is_rejected(
+    interpolation: tuple[Any, ...],
+) -> None:
     cls = getattr(mypy_nodes, "TemplateStrExpr", None)
     if cls is None:
         pytest.skip("TemplateStrExpr exists in the Mypy 2.4 profile")
@@ -309,3 +317,139 @@ def test_callable_instance_type_cycle_is_preflighted() -> None:
     expr = _name()
     with pytest.raises(ExpressionSnapshotError, match="cyclic expression type"):
         live_expression_type_snapshot(_states(_tree(expr)), {expr: callable_type})
+
+
+def _module_type(extra: ExtraAttrs | None = None) -> Instance:
+    cls = ClassDef("ModuleType", Block([]))
+    info = TypeInfo(SymbolTable(), cls, "types")
+    info._fullname = "types.ModuleType"
+    result = Instance(info, [])
+    result.extra_attrs = extra
+    return result
+
+
+def _module_snapshot(
+    extra: ExtraAttrs | None, *, limits: ExpressionSnapshotLimits | None = None
+) -> object:
+    expr = _name()
+    return live_expression_type_snapshot(
+        _states(_tree(expr)), {expr: _module_type(extra)}, limits=limits
+    )
+
+
+def test_module_extra_attrs_are_serialized_without_mutating_the_retained_type() -> None:
+    expr = _name()
+    extra = ExtraAttrs({"answer": NoneType()}, {"answer"}, "fixture.module")
+    typ = _module_type(extra)
+    retained: dict[Expression, Type] = {expr: typ}
+    snapshot = live_expression_type_snapshot(_states(_tree(expr)), retained)
+    assert snapshot[0].expressions == snapshot[0].mapped_expressions == 1
+    assert retained[expr] is typ and typ.extra_attrs is extra
+    assert extra.immutable == {"answer"} and extra.mod_name == "fixture.module"
+    assert _module_snapshot(None) != _module_snapshot(ExtraAttrs({}, set(), None))
+    assert _module_snapshot(extra) == _module_snapshot(
+        ExtraAttrs({"answer": NoneType()}, {"answer"}, "fixture.module")
+    )
+
+
+def test_module_extra_attrs_insertion_order_is_not_type_evidence() -> None:
+    names = ("answer", "message", "status", "version")
+    first = ExtraAttrs({name: NoneType() for name in names}, set(names), "fixture.module")
+    second_immutable: set[str] = set()
+    for name in reversed(names):
+        second_immutable.add(name)
+    second = ExtraAttrs(
+        {name: NoneType() for name in reversed(names)}, second_immutable, "fixture.module"
+    )
+    assert _module_snapshot(first) == _module_snapshot(second)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ExtraAttrs({"changed": NoneType()}, {"answer"}, "fixture.module"),
+        ExtraAttrs({"answer": AnyType(TypeOfAny.explicit)}, {"answer"}, "fixture.module"),
+        ExtraAttrs({"answer": NoneType()}, set(), "fixture.module"),
+        ExtraAttrs({"answer": NoneType()}, {"other"}, "fixture.module"),
+        ExtraAttrs({"answer": NoneType()}, {"answer"}, "another.module"),
+        ExtraAttrs({"answer": NoneType()}, {"answer"}, None),
+    ],
+)
+def test_each_module_extra_attrs_semantic_field_changes_the_digest(changed: ExtraAttrs) -> None:
+    original = ExtraAttrs({"answer": NoneType()}, {"answer"}, "fixture.module")
+    assert _module_snapshot(original) != _module_snapshot(changed)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("attrs", []),
+        ("attrs", {1: NoneType()}),
+        ("attrs", {"answer": "not-a-Type"}),
+        ("immutable", []),
+        ("immutable", {1}),
+        ("mod_name", True),
+    ],
+)
+def test_malformed_module_extra_attrs_never_produce_a_successful_snapshot(
+    field: str, value: Any
+) -> None:
+    extra = ExtraAttrs({}, set(), None)
+    with pytest.raises((TypeError, ExpressionSnapshotError)):
+        # Compiled Mypy models may reject malformed fields before the serializer.
+        setattr(extra, field, value)
+        _module_snapshot(extra)
+
+
+@pytest.mark.parametrize("field", ["attrs", "immutable", "mod_name"])
+def test_module_extra_attrs_string_limits_apply_before_serialize(field: str) -> None:
+    extra = ExtraAttrs({}, set(), None)
+    if field == "attrs":
+        extra.attrs["long_attribute_name"] = NoneType()
+    elif field == "immutable":
+        extra.immutable.add("long_attribute_name")
+    else:
+        extra.mod_name = "long_module_name"
+    with pytest.raises(ExpressionSnapshotError, match="ExtraAttrs"):
+        _serialize_type(_module_type(extra), _Budget(ExpressionSnapshotLimits(string_chars=4)))
+
+
+@pytest.mark.parametrize("field", ["attrs", "immutable"])
+def test_module_extra_attrs_container_limits_apply_before_serialize(field: str) -> None:
+    extra = ExtraAttrs({}, set(), None)
+    if field == "attrs":
+        extra.attrs.update({"first": NoneType(), "second": NoneType()})
+    else:
+        extra.immutable.update({"first", "second"})
+    with pytest.raises(ExpressionSnapshotError, match="oversized ExtraAttrs"):
+        _serialize_type(_module_type(extra), _Budget(ExpressionSnapshotLimits(container_items=1)))
+
+
+def test_module_extra_attrs_self_reference_is_preflighted() -> None:
+    expr = _name()
+    extra = ExtraAttrs({}, set(), None)
+    typ = _module_type(extra)
+    extra.attrs["self"] = typ
+    with pytest.raises(ExpressionSnapshotError, match="cyclic expression type"):
+        live_expression_type_snapshot(_states(_tree(expr)), {expr: typ})
+
+
+@pytest.mark.parametrize(
+    ("limit", "value"), [("type_depth", 1), ("type_items", 3), ("work_items", 5)]
+)
+def test_module_extra_attrs_nested_types_use_existing_traversal_limits(
+    limit: str, value: int
+) -> None:
+    limits = ExpressionSnapshotLimits(**{limit: value})
+    _serialize_type(_module_type(None), _Budget(limits))
+    extra = ExtraAttrs({"nested": UnionType([UnionType([NoneType()])])}, set(), None)
+    with pytest.raises(ExpressionSnapshotError, match="limit"):
+        _serialize_type(_module_type(extra), _Budget(limits))
+
+
+def test_unknown_extra_attrs_shape_is_rejected_by_the_type_preflight() -> None:
+    with pytest.raises(ExpressionSnapshotError, match=r"unsupported Instance\.extra_attrs"):
+        _extra_attrs_children(
+            SimpleNamespace(attrs={}, immutable=set(), mod_name=None),
+            _Budget(ExpressionSnapshotLimits()),
+        )

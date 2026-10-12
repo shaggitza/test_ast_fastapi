@@ -30,8 +30,13 @@ are retained strictly; they are not normalized away to make builds agree.
 Traversal is iterative and bounded for source nodes, containers, recursive
 serializable type shapes and JSON evidence. Unsupported shapes, cycles,
 serialization failures and exceeded limits abort comparison rather than
-reporting a successful partial result. Instance extra attributes remain outside
-the audited type shapes. The Mypy 2.4 callable instance-type child is preflighted
+reporting a successful partial result. Instance extra attributes use the audited
+Mypy 1.19.1/2.4.0 ExtraAttrs shape: a bounded exact dict of named Type values,
+a bounded exact immutable-name set and an optional bounded module name.
+Attribute types enter the same cycle, depth and work preflight before Mypy's
+recursive serializer runs. Module-name, attribute and immutable-name changes
+remain equality-visible; native sorted immutable names and sorted JSON keys
+make insertion order irrelevant. Unknown or malformed metadata fails closed. The Mypy 2.4 callable instance-type child is preflighted
 before serialization. Template-string interpolation projects only its value
 and optional format-spec expressions, with shape validation.
 
@@ -42,8 +47,12 @@ existing flags. Older checked-in result artifacts are unchanged; missing the
 new flag does not satisfy the current gate.
 
 Validation uses own manually constructed nodes and fake retained/cold stand-ins.
-The same helper passed 29 controls with Mypy 1.19.1 (five Mypy 2.4-specific
-controls skipped) and 34 with Mypy 2.4.0 (no skips). Four own gate controls cover
+The initial helper passed 29 controls with Mypy 1.19.1 (five Mypy 2.4-specific
+controls skipped) and 34 with Mypy 2.4.0 (no skips). After the hosted CI found
+ModuleType ExtraAttrs unsupported, the repaired helper passed 53 controls with
+Mypy 1.19.1 (the same five skips) and 58 with Mypy 2.4.0 (no skips). These add
+module metadata equality, insertion-order stability, malformed fields, cycles
+and bounded metadata/type traversal controls. Four own gate controls cover
 missing/non-boolean flags, mismatched live types despite matching legacy
 evidence, count reporting and the unchanged raw map counter. These runs parse
 no application sources and perform no real provider builds.
