@@ -516,7 +516,8 @@ def test_constructor_scan_rejects_ambiguous_or_deferred_walrus_constructors(
     source.write_text(
         "from contextlib import asynccontextmanager\n"
         "from fastapi import FastAPI\n"
-        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n" + registration,
+        "@asynccontextmanager\nasync def lifespan(app):\n    yield\n"
+        "app = FastAPI(lifespan=lifespan)\n" + registration,
         encoding="utf-8",
     )
     inventory, contracts = _inventory(source)
@@ -524,7 +525,12 @@ def test_constructor_scan_rejects_ambiguous_or_deferred_walrus_constructors(
         inventory, contracts, MypyAnalyzer(tmp_path), _typed_build(tmp_path)
     )
 
-    assert all(record.constructor_lifespan is None for record in report.records)
+    assert report.records
+    if registration.startswith("def deferred"):
+        assert all(record.constructor_lifespan is not None for record in report.records)
+        assert all(record.status == "conditional" for record in report.records)
+    else:
+        assert all(record.constructor_lifespan is None for record in report.records)
 
 
 @pytest.mark.parametrize(
