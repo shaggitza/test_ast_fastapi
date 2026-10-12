@@ -47,10 +47,12 @@ from mypy.nodes import (
 )
 
 GraphSide = Literal["baseline", "target"]
+SourceDependencyScope = Literal["signature", "app", "router", "include", "route"]
+SourceDeclarationScope = Literal["app", "router", "include", "route"]
 EdgeKind = Literal["call", "constructor", "global_read", "global_write", "dependency"]
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 Invocation = Literal["function", "instance_method", "class_method", "constructor", "unknown"]
-_GRAPH_SCHEMA_VERSION = 6
+_GRAPH_SCHEMA_VERSION = 8
 
 
 class TypedSnapshot(Protocol):
@@ -134,6 +136,7 @@ class UncertaintyWitness:
     ]
     reason_code: str
     source_spelling: str
+    occurrence_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,17 @@ class SourceDependencyUncertainty:
     span: SourceSpan
     reason_code: str
     source_spelling: str
+    scope: SourceDependencyScope = "signature"
+
+
+@dataclass(frozen=True, order=True)
+class SourceDependencyDeclarationSite:
+    """Caller-associated native declaration; origin and route transfer are unverified."""
+
+    occurrence_id: str
+    owner_symbol: str
+    scope: SourceDeclarationScope
+    span: SourceSpan
 
 
 @dataclass(frozen=True)
@@ -262,6 +276,7 @@ class TypedReverseGraph:
     limitations: tuple[str, ...] = ()
     source_dependency_bindings: tuple[SourceDependencyBinding, ...] = ()
     source_dependency_uncertainties: tuple[SourceDependencyUncertainty, ...] = ()
+    source_dependency_declaration_sites: tuple[SourceDependencyDeclarationSite, ...] = ()
 
     def reverse_index(self) -> dict[str, tuple[EdgeWitness, ...]]:
         rows: dict[str, list[EdgeWitness]] = {}
@@ -338,6 +353,8 @@ class TypedReverseGraph:
                             uncertainty
                             for owner in path_owners
                             for uncertainty in uncertainties_by_owner.get(owner, ())
+                            if not uncertainty.occurrence_id
+                            or uncertainty.occurrence_id == occurrence.occurrence_id
                         )
                     )
                     uncertainty_reasons = {item.reason_code for item in path_uncertainties}
@@ -388,6 +405,12 @@ class TypedReverseGraph:
             for uncertainty in self.uncertainties:
                 if uncertainty.category == "effect_summary":
                     continue
+                if (
+                    seed.occurrence_id
+                    and uncertainty.occurrence_id
+                    and seed.occurrence_id != uncertainty.occurrence_id
+                ):
+                    continue
                 uncertainty_queue: deque[tuple[str, tuple[EdgeWitness, ...], frozenset[str]]] = (
                     deque([(uncertainty.owner, (), frozenset({uncertainty.owner}))])
                 )
@@ -413,6 +436,11 @@ class TypedReverseGraph:
                         break
                     for occurrence in sorted(by_symbol.get(current, ()), key=_binding_key):
                         if seed.occurrence_id and seed.occurrence_id != occurrence.occurrence_id:
+                            continue
+                        if (
+                            uncertainty.occurrence_id
+                            and uncertainty.occurrence_id != occurrence.occurrence_id
+                        ):
                             continue
                         path_id = "/".join(edge.witness_id for edge in path)
                         potential_record = PotentialImpactEvidence(
@@ -1063,6 +1091,8 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
     | list[SourceDependencyBinding] = (),
     source_dependency_uncertainties: tuple[SourceDependencyUncertainty, ...]
     | list[SourceDependencyUncertainty] = (),
+    source_dependency_declaration_sites: tuple[SourceDependencyDeclarationSite, ...]
+    | list[SourceDependencyDeclarationSite] = (),
 ) -> TypedReverseGraph:
     """Build one immutable typed graph from inventory bytes and retained mypy ASTs."""
     inventory_root = Path(inventory.root)
@@ -1204,17 +1234,21 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
                 "dependency_parameter_transfer_not_proven",
                 dependency,
             )
-    if not isinstance(source_dependency_bindings, (tuple, list)) or not isinstance(
-        source_dependency_uncertainties, (tuple, list)
+    if (
+        not isinstance(source_dependency_bindings, (tuple, list))
+        or not isinstance(source_dependency_uncertainties, (tuple, list))
+        or not isinstance(source_dependency_declaration_sites, (tuple, list))
     ):
         raise ValueError("source dependency metadata must be bounded rows")
     if (
         len(source_dependency_bindings) + len(source_dependency_uncertainties)
         > _MAX_SOURCE_DEPENDENCY_METADATA
+        or len(source_dependency_declaration_sites) > _MAX_SOURCE_DEPENDENCY_METADATA
     ):
         raise ValueError("source dependency metadata exceeds row budget")
     raw_bindings = tuple(source_dependency_bindings)
     raw_uncertainties = tuple(source_dependency_uncertainties)
+    raw_declaration_sites = tuple(source_dependency_declaration_sites)
     if not _dependency_metadata_valid(
         raw_bindings,
         raw_uncertainties,
@@ -1223,10 +1257,12 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
         source_by_path,
         module_by_path,
         source_lines,
+        declaration_sites=raw_declaration_sites,
     ):
         raise ValueError("source dependency metadata is not bound to this typed snapshot")
     dependency_bindings = tuple(sorted(raw_bindings, key=_dependency_binding_key))
     dependency_uncertainties = tuple(sorted(raw_uncertainties, key=_dependency_uncertainty_key))
+    declaration_sites = tuple(sorted(raw_declaration_sites))
     dependency_edges, dependency_issues = _source_dependency_projection(
         dependency_bindings, dependency_uncertainties
     )
@@ -1279,6 +1315,7 @@ def build_typed_reverse_graph(  # noqa: PLR0912, PLR0915
         ),
         dependency_bindings,
         dependency_uncertainties,
+        declaration_sites,
     )
 
 
@@ -1309,6 +1346,9 @@ def _source_span_is_valid(span: SourceSpan, lines: tuple[bytes, ...]) -> bool:
 
 
 _MAX_SOURCE_DEPENDENCY_METADATA = 8192
+_MAX_SOURCE_DECLARATION_BYTES = 65536
+_MAX_SOURCE_DECLARATION_LINES = 1024
+_SOURCE_DECLARATION_SCOPES = frozenset({"app", "router", "include", "route"})
 _SOURCE_DEPENDENCY_SELECTORS = frozenset(
     {
         "fastapi.params.Depends",
@@ -1349,7 +1389,12 @@ def _dependency_uncertainty_key(row: SourceDependencyUncertainty) -> tuple[Any, 
         _dependency_span_key(row.span),
         row.reason_code,
         row.source_spelling,
+        row.scope,
     )
+
+
+def _dependency_declaration_key(row: Any) -> tuple[Any, ...]:
+    return row.occurrence_id, row.owner_symbol, row.scope, _dependency_span_key(row.span)
 
 
 def _dependency_span_valid(
@@ -1393,6 +1438,39 @@ def _dependency_span_valid(
         and hashes.get(path) == span.source_sha256
         and _source_span_is_valid(span, lines.get(path, ()))
     )
+
+
+def dependency_declaration_spelling(span: SourceSpan, lines: tuple[bytes, ...]) -> str | None:
+    """Read a bounded declaration display from exact UTF-8 byte coordinates."""
+    coordinates = (span.start_line, span.start_column, span.end_line, span.end_column)
+    if (
+        any(type(value) is not int for value in coordinates)
+        or span.start_column < 0
+        or span.end_column < 0
+        or (span.start_line, span.start_column) >= (span.end_line, span.end_column)
+        or not _source_span_is_valid(span, lines)
+        or span.end_line - span.start_line + 1 > _MAX_SOURCE_DECLARATION_LINES
+    ):
+        return None
+    first, last = lines[span.start_line - 1], lines[span.end_line - 1]
+    try:
+        first[: span.start_column].decode("utf-8")
+        last[: span.end_column].decode("utf-8")
+        parts: tuple[bytes, ...]
+        if span.start_line == span.end_line:
+            parts = (first[span.start_column : span.end_column],)
+        else:
+            parts = (
+                first[span.start_column :],
+                *lines[span.start_line : span.end_line - 1],
+                last[: span.end_column],
+            )
+        if sum(len(part) for part in parts) > _MAX_SOURCE_DECLARATION_BYTES:
+            return None
+        spelling = b"".join(parts).decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    return spelling[:256] if spelling else None
 
 
 def _source_dependency_projection(
@@ -1441,6 +1519,8 @@ def _source_dependency_projection(
             uncertainty_row.span,
             uncertainty_row.reason_code,
             uncertainty_row.source_spelling,
+            uncertainty_row.scope,
+            uncertainty_row.occurrence_id,
         )
         uncertainty_id = _sha256(("source-dependency-uncertainty-v1", uncertainty_physical))
         dependency_issues[uncertainty_id] = UncertaintyWitness(
@@ -1450,23 +1530,37 @@ def _source_dependency_projection(
             "dependency_injection",
             uncertainty_row.reason_code,
             uncertainty_row.source_spelling,
+            uncertainty_row.occurrence_id,
         )
 
     return dependency_edges, dependency_issues
 
 
-def _dependency_projection_valid(graph: TypedReverseGraph) -> bool:
-    expected_edges, expected_issues = _source_dependency_projection(
-        graph.source_dependency_bindings, graph.source_dependency_uncertainties
+def _dependency_projection_valid(
+    graph: TypedReverseGraph, *, expected_graph: TypedReverseGraph
+) -> bool:
+    """Compare DI rows with an independently reconstructed typed-source projection."""
+    if any(not isinstance(edge, EdgeWitness) for edge in graph.edges) or any(
+        not isinstance(item, UncertaintyWitness) for item in graph.uncertainties
+    ):
+        return False
+    relations = {"typed_source_dependency_binding", "framework_dependency_binding"}
+    actual_edges = tuple(edge for edge in graph.edges if edge.relation in relations)
+    expected_edges = tuple(edge for edge in expected_graph.edges if edge.relation in relations)
+    actual_issues = tuple(
+        item for item in graph.uncertainties if item.category == "dependency_injection"
     )
-    actual_edges = {
-        edge.witness_id: edge
-        for edge in graph.edges
-        if edge.relation == "typed_source_dependency_binding"
-    }
-    actual_issues = {item.uncertainty_id: item for item in graph.uncertainties}
-    return expected_edges == actual_edges and all(
-        actual_issues.get(key) == value for key, value in expected_issues.items()
+    expected_issues = tuple(
+        item for item in expected_graph.uncertainties if item.category == "dependency_injection"
+    )
+    if len({edge.witness_id for edge in actual_edges}) != len(actual_edges) or len(
+        {item.uncertainty_id for item in actual_issues}
+    ) != len(actual_issues):
+        return False
+    return sorted(actual_edges, key=lambda edge: edge.witness_id) == sorted(
+        expected_edges, key=lambda edge: edge.witness_id
+    ) and sorted(actual_issues, key=lambda item: item.uncertainty_id) == sorted(
+        expected_issues, key=lambda item: item.uncertainty_id
     )
 
 
@@ -1478,12 +1572,21 @@ def _dependency_metadata_valid(  # noqa: PLR0911, PLR0912
     hashes: dict[str, str],
     modules: dict[str, str],
     lines: dict[str, tuple[bytes, ...]],
+    *,
+    declaration_sites: tuple[Any, ...] = (),
 ) -> bool:
-    if not isinstance(bindings, (tuple, list)) or not isinstance(uncertainties, (tuple, list)):
+    if (
+        not isinstance(bindings, (tuple, list))
+        or not isinstance(uncertainties, (tuple, list))
+        or not isinstance(declaration_sites, (tuple, list))
+    ):
         return False
-    if not bindings and not uncertainties:
+    if not bindings and not uncertainties and not declaration_sites:
         return True
-    if len(bindings) + len(uncertainties) > _MAX_SOURCE_DEPENDENCY_METADATA:
+    if (
+        len(bindings) + len(uncertainties) > _MAX_SOURCE_DEPENDENCY_METADATA
+        or len(declaration_sites) > _MAX_SOURCE_DEPENDENCY_METADATA
+    ):
         return False
     endpoints = tuple(endpoint_bindings)
     if any(
@@ -1504,27 +1607,51 @@ def _dependency_metadata_valid(  # noqa: PLR0911, PLR0912
         return False
     by_symbol = {row.fullname: row for row in symbol_rows}
 
-    def owner_valid(occurrence_id: str, owner_name: str, span: SourceSpan) -> bool:
+    def owner_identity_valid(occurrence_id: str, owner_name: str) -> bool:
         occurrence = occurrences.get(occurrence_id)
         owner = by_symbol.get(owner_name)
+        return (
+            occurrence is not None
+            and owner is not None
+            and owner.kind == "function"
+            and occurrence.symbol == owner_name
+            and occurrence.span == owner.span
+            and _dependency_span_valid(owner.span, hashes, modules, lines)
+        )
+
+    def owner_valid(occurrence_id: str, owner_name: str, span: SourceSpan) -> bool:
+        if not owner_identity_valid(occurrence_id, owner_name):
+            return False
+        owner_span = by_symbol[owner_name].span
+        return (
+            isinstance(owner_span, SourceSpan)
+            and span.module == owner_span.module
+            and span.path == owner_span.path
+            and span.source_sha256 == owner_span.source_sha256
+            and (owner_span.start_line, owner_span.start_column)
+            <= (span.start_line, span.start_column)
+            and (span.end_line, span.end_column) <= (owner_span.end_line, owner_span.end_column)
+        )
+
+    eligible_sites: set[tuple[Any, ...]] = set()
+    for site in declaration_sites:
         if (
-            occurrence is None
-            or owner is None
-            or owner.kind != "function"
-            or occurrence.symbol != owner_name
-            or occurrence.span != owner.span
-            or not _dependency_span_valid(owner.span, hashes, modules, lines)
-            or not isinstance(owner.span, SourceSpan)
+            not isinstance(site, SourceDependencyDeclarationSite)
+            or type(site.occurrence_id) is not str
+            or not site.occurrence_id
+            or type(site.owner_symbol) is not str
+            or not site.owner_symbol
+            or type(site.scope) is not str
+            or site.scope not in _SOURCE_DECLARATION_SCOPES
+            or not owner_identity_valid(site.occurrence_id, site.owner_symbol)
+            or not _dependency_span_valid(site.span, hashes, modules, lines)
+            or dependency_declaration_spelling(site.span, lines[site.span.path]) is None
         ):
             return False
-        return (
-            span.module == owner.span.module
-            and span.path == owner.span.path
-            and span.source_sha256 == owner.span.source_sha256
-            and (owner.span.start_line, owner.span.start_column)
-            <= (span.start_line, span.start_column)
-            and (span.end_line, span.end_column) <= (owner.span.end_line, owner.span.end_column)
-        )
+        key = _dependency_declaration_key(site)
+        if key in eligible_sites:
+            return False
+        eligible_sites.add(key)
 
     seen: set[tuple[Any, ...]] = set()
     for row in bindings:
@@ -1552,6 +1679,7 @@ def _dependency_metadata_valid(  # noqa: PLR0911, PLR0912
             return False
         seen.add(key)
     seen.clear()
+    used_sites: set[tuple[Any, ...]] = set()
     for row in uncertainties:
         if not isinstance(row, SourceDependencyUncertainty):
             return False
@@ -1567,14 +1695,30 @@ def _dependency_metadata_valid(  # noqa: PLR0911, PLR0912
             or type(row.source_spelling) is not str
             or len(row.source_spelling) > 256
             or not _dependency_span_valid(row.span, hashes, modules, lines)
-            or not owner_valid(row.occurrence_id, row.owner_symbol, row.span)
+            or type(row.scope) is not str
+            or row.scope not in {"signature", *_SOURCE_DECLARATION_SCOPES}
+            or (
+                row.scope == "signature"
+                and not owner_valid(row.occurrence_id, row.owner_symbol, row.span)
+            )
+            or (
+                row.scope != "signature"
+                and (
+                    row.reason_code != "route_dependency_association_origin_and_transfer_unverified"
+                    or _dependency_declaration_key(row) not in eligible_sites
+                    or row.source_spelling
+                    != dependency_declaration_spelling(row.span, lines[row.span.path])
+                )
+            )
         ):
             return False
+        if row.scope != "signature":
+            used_sites.add(_dependency_declaration_key(row))
         key = _dependency_uncertainty_key(row)
         if key in seen:
             return False
         seen.add(key)
-    return True
+    return used_sites == eligible_sites
 
 
 def _module_import_aliases(tree: Any, module: str, module_ids: frozenset[str]) -> dict[str, str]:
@@ -1880,6 +2024,7 @@ class GraphCacheManifest:
     graph_provenance: str
     source_dependency_bindings: tuple[SourceDependencyBinding, ...] = ()
     source_dependency_uncertainties: tuple[SourceDependencyUncertainty, ...] = ()
+    source_dependency_declaration_sites: tuple[SourceDependencyDeclarationSite, ...] = ()
 
 
 class TypedGraphCache:
@@ -1898,6 +2043,7 @@ class TypedGraphCache:
             graph.graph_provenance,
             graph.source_dependency_bindings,
             graph.source_dependency_uncertainties,
+            graph.source_dependency_declaration_sites,
         )
 
     @staticmethod
@@ -1979,10 +2125,25 @@ class TypedGraphCache:
             current_by_path,
             module_by_path,
             current_lines,
+            declaration_sites=graph.source_dependency_declaration_sites,
         )
+        if not metadata_valid:
+            return False
+        try:
+            expected_graph = build_typed_reverse_graph(
+                inventory,
+                typed_snapshot,
+                graph.endpoint_bindings,
+                config_fingerprint=config_fingerprint,
+                source_snapshots=current_bytes,
+                source_dependency_bindings=graph.source_dependency_bindings,
+                source_dependency_uncertainties=graph.source_dependency_uncertainties,
+                source_dependency_declaration_sites=graph.source_dependency_declaration_sites,
+            )
+        except (OSError, ValueError):
+            return False
         return (
-            metadata_valid
-            and _dependency_projection_valid(graph)
+            _dependency_projection_valid(graph, expected_graph=expected_graph)
             and tuple(current) == graph.source_hashes
             and graph.schema_version == _GRAPH_SCHEMA_VERSION
             and graph.inventory_fingerprint == inventory_fingerprint
